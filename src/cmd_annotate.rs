@@ -114,32 +114,92 @@ impl CodeCache {
     }
 }
 
-/// On-demand cache of source-file contents, keyed by the path that DWARF
-/// reports. A `None` value means we already tried and the file isn't there
-/// (or isn't readable as UTF-8); we don't retry per address.
+/// On-demand cache of source-file contents.
+///
+/// Lookup tries a sequence of candidate paths because DWARF's `file` is
+/// often relative to the CU's `comp_dir` (DWARF 5 line programs do this
+/// almost always), and that comp_dir was the build machine's path —
+/// useless on the user's box. So we try, in order:
+///
+/// 1. The literal path DWARF gave us.
+/// 2. `comp_dir / file`, when comp_dir is present.
+/// 3. Each user-supplied `--source-path` prefix joined with the file
+///    (full and basename), so users can plug in a Debian-style
+///    `/usr/src/debug/glibc-2.41` and have things work out.
+///
+/// Both successful reads and "not found anywhere" results are cached,
+/// keyed by the original DWARF path, so we don't re-try every probe per
+/// instruction.
 struct SourceCache {
-    by_path: HashMap< PathBuf, Option< Vec< String > > >
+    by_dwarf_path: HashMap< String, Option< Vec< String > > >,
+    extra_prefixes: Vec< PathBuf >
 }
 
 impl SourceCache {
-    fn new() -> Self {
-        SourceCache { by_path: HashMap::new() }
+    fn new( extra_prefixes: Vec< PathBuf > ) -> Self {
+        SourceCache { by_dwarf_path: HashMap::new(), extra_prefixes }
     }
 
-    fn line( &mut self, path: &str, line: u64 ) -> Option< &str > {
-        let key = PathBuf::from( path );
-        let entry = self.by_path.entry( key.clone() ).or_insert_with( || {
-            match fs::read_to_string( &key ) {
-                Ok( contents ) => Some( contents.lines().map( str::to_owned ).collect() ),
-                Err( err ) => {
-                    debug!( "annotate: could not read source '{}': {}", path, err );
-                    None
-                }
-            }
-        });
+    fn line( &mut self, dwarf_path: &str, comp_dir: Option< &str >, line: u64 ) -> Option< &str > {
+        if !self.by_dwarf_path.contains_key( dwarf_path ) {
+            let loaded = self.try_load( dwarf_path, comp_dir );
+            self.by_dwarf_path.insert( dwarf_path.to_owned(), loaded );
+        }
+        let entry = self.by_dwarf_path.get( dwarf_path )?;
         let lines = entry.as_ref()?;
         let idx = (line as usize).checked_sub( 1 )?;
         lines.get( idx ).map( |s| s.as_str() )
+    }
+
+    fn try_load( &self, dwarf_path: &str, comp_dir: Option< &str > ) -> Option< Vec< String > > {
+        fn strip_dot( s: &str ) -> &str { s.strip_prefix( "./" ).unwrap_or( s ) }
+        let path = strip_dot( dwarf_path );
+        let cd = comp_dir.map( strip_dot );
+
+        // glibc records both `comp_dir = ./nptl` and `file = ./nptl/cancellation.c`,
+        // so naively joining produces `nptl/nptl/cancellation.c` (doesn't exist).
+        // When the file already starts with comp_dir, treat it as a source-root-
+        // relative path and skip the join.
+        let already_under_cd = match cd {
+            Some( c ) => path.starts_with( c )
+                && (path.len() == c.len() || path.as_bytes().get( c.len() ) == Some( &b'/' )),
+            None => false,
+        };
+
+        let basename = std::path::Path::new( path )
+            .file_name()
+            .and_then( |n| n.to_str() )
+            .filter( |b| *b != path );
+
+        let mut candidates: Vec< PathBuf > = Vec::new();
+        candidates.push( PathBuf::from( dwarf_path ) );
+        if path != dwarf_path {
+            candidates.push( PathBuf::from( path ) );
+        }
+        if let Some( c ) = cd {
+            if !already_under_cd {
+                candidates.push( PathBuf::from( c ).join( path ) );
+            }
+        }
+        for prefix in &self.extra_prefixes {
+            candidates.push( prefix.join( path ) );
+            if let Some( c ) = cd {
+                if !already_under_cd {
+                    candidates.push( prefix.join( c ).join( path ) );
+                }
+            }
+            if let Some( b ) = basename {
+                candidates.push( prefix.join( b ) );
+            }
+        }
+
+        for candidate in &candidates {
+            if let Ok( contents ) = fs::read_to_string( candidate ) {
+                debug!( "annotate: source for '{}' loaded from '{}'", dwarf_path, candidate.display() );
+                return Some( contents.lines().map( str::to_owned ).collect() );
+            }
+        }
+        None
     }
 }
 
@@ -196,14 +256,15 @@ fn fetch_code_bytes< 'a >( data: &'a BinaryData, range: &Range< RelativeAddr > )
     None
 }
 
-/// Resolved (file, line) for a single instruction, plus whether it came
-/// from an inline frame. We only care about the bottom (innermost) frame
-/// for header purposes — that's the source the user wrote that the
-/// instruction was generated from.
+/// Resolved (file, line) for a single instruction, plus the CU's
+/// compilation directory when DWARF carried it. We only care about the
+/// bottom (innermost) frame for header purposes — that's the source the
+/// user wrote that the instruction was generated from.
 #[derive(Clone, PartialEq, Eq)]
 struct LineInfo {
     file: String,
-    line: u64
+    line: u64,
+    comp_dir: Option< String >,
 }
 
 /// Disassemble a function's bytes and write per-instruction lines, marking
@@ -236,7 +297,7 @@ fn disassemble_amd64< W: Write, F >(
                 if let Some( ref info ) = info {
                     let snippet = source_cache
                         .as_deref_mut()
-                        .and_then( |cache| cache.line( &info.file, info.line ) )
+                        .and_then( |cache| cache.line( &info.file, info.comp_dir.as_deref(), info.line ) )
                         .map( |s| s.trim().to_owned() )
                         .unwrap_or_default();
                     let basename = std::path::Path::new( &info.file )
@@ -400,7 +461,9 @@ pub fn main( args: AnnotateArgs ) -> Result< (), Box< dyn Error > > {
     let mut out = stdout.lock();
     let decoder = InstDecoder::default();
     let mut code_cache = CodeCache::new();
-    let mut source_cache = SourceCache::new();
+    let mut source_cache = SourceCache::new(
+        args.source_path.iter().map( PathBuf::from ).collect()
+    );
 
     for ((tag, name), record) in chosen {
         match (tag, record) {
@@ -440,7 +503,11 @@ pub fn main( args: AnnotateArgs ) -> Result< (), Box< dyn Error > > {
                         address_space.decode_symbol_while( abs, &mut |frame| {
                             if info.is_none() {
                                 if let (Some( file ), Some( line )) = (frame.file.as_ref(), frame.line) {
-                                    info = Some( LineInfo { file: file.clone(), line } );
+                                    info = Some( LineInfo {
+                                        file: file.clone(),
+                                        line,
+                                        comp_dir: frame.comp_dir.clone()
+                                    });
                                 }
                             }
                             true

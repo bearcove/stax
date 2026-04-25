@@ -402,6 +402,12 @@ pub struct AnnotateArgs {
     /// with the disassembly. Native functions only.
     #[structopt(long, short = "s")]
     pub source: bool,
+
+    /// Extra directory prefixes to search when DWARF reports a source path
+    /// that doesn't exist on disk (e.g. /usr/src/debug/glibc-2.41 for
+    /// libc6-dbgsym source). May be specified multiple times.
+    #[structopt(long, short = "S", parse(from_os_str))]
+    pub source_path: Vec< OsString >,
 }
 
 #[derive(StructOpt, Debug)]

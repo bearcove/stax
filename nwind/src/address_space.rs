@@ -81,9 +81,20 @@ mod addr2line {
         }
     }
 
+    /// Stand-in for the real `addr2line::LookupResult` so call sites can
+    /// uniformly run `.skip_all_loads()` regardless of whether addr2line
+    /// is compiled in.
+    pub struct LookupShim< T >( pub T );
+
+    impl< T > LookupShim< T > {
+        pub fn skip_all_loads( self ) -> T {
+            self.0
+        }
+    }
+
     impl< T: gimli::Reader > Context< T > {
-        pub fn find_frames( &self, _: u64 ) -> Result< FrameIter< T >, () > {
-            Err(())
+        pub fn find_frames( &self, _: u64 ) -> LookupShim< Result< FrameIter< T >, () > > {
+            LookupShim( Err(()) )
         }
 
         pub fn from_sections(
@@ -191,6 +202,23 @@ fn test_binary_is_sync() {
 }
 
 pub type BinaryHandle< A > = Arc< Binary< A > >;
+
+/// Resolve `DW_AT_comp_dir` for the CU containing `relative_address`.
+/// Returns `None` if no CU covers the address or if the CU has no
+/// comp_dir attribute. Paired with `Frame::file`, which is typically
+/// relative to this directory in DWARF 5.
+#[cfg(feature = "addr2line")]
+fn lookup_comp_dir( context: &addr2line::Context< AddrCtxReader >, relative_address: u64 ) -> Option< String > {
+    use gimli::Reader;
+    let (_dwarf, unit) = context.find_dwarf_and_unit( relative_address ).skip_all_loads()?;
+    let comp_dir = unit.comp_dir.as_ref()?;
+    comp_dir.to_string_lossy().ok().map( |s| s.into_owned() )
+}
+
+#[cfg(not(feature = "addr2line"))]
+fn lookup_comp_dir( _: &addr2line::Context< AddrCtxReader >, _: u64 ) -> Option< String > {
+    None
+}
 
 /// Parse `binary_data` with the `object` crate, fetch each DWARF section
 /// (decompressing SHF_COMPRESSED bytes on the fly), and hand the
@@ -438,10 +466,18 @@ impl< A: Architecture > Binary< A > {
 
         let mut found = false;
         if let Some( context ) = self.context.as_ref() {
-            if let Ok( mut raw_frames ) = context.lock().unwrap().find_frames( relative_address ).skip_all_loads() {
+            let ctx_guard = context.lock().unwrap();
+            // Pull DW_AT_comp_dir for the CU containing this address. DWARF 5
+            // file paths in the line program are typically relative to the
+            // CU's compilation directory, so the consumer needs both halves
+            // to find the source on disk.
+            let comp_dir: Option< String > = lookup_comp_dir( &*ctx_guard, relative_address );
+            frame.comp_dir = comp_dir.clone();
+            if let Ok( mut raw_frames ) = ctx_guard.find_frames( relative_address ).skip_all_loads() {
                 if let Ok( Some( raw_frame ) ) = raw_frames.next() {
                     found = true;
                     process_frame( raw_frame, &mut frame );
+                    frame.comp_dir = comp_dir.clone();
 
                     loop {
                         let next_raw_frame = match raw_frames.next() {
@@ -472,6 +508,7 @@ impl< A: Architecture > Binary< A > {
                         if let Some( raw_frame ) = next_raw_frame {
                             process_frame( raw_frame, &mut frame );
                             frame.library = Some( self.name.as_str().into() );
+                            frame.comp_dir = comp_dir.clone();
                         } else {
                             break;
                         }
@@ -867,7 +904,11 @@ pub struct Frame< 'a > {
     pub file: Option< String >,
     pub line: Option< u64 >,
     pub column: Option< u64 >,
-    pub is_inline: bool
+    pub is_inline: bool,
+    /// `DW_AT_comp_dir` of the compilation unit this address landed in,
+    /// when DWARF carried it. `file` is often relative to this (e.g.
+    /// `./nptl/cancellation.c` next to a comp_dir of `/build/glibc-…`).
+    pub comp_dir: Option< String >,
 }
 
 impl< 'a > fmt::Debug for Frame< 'a > {
@@ -897,7 +938,8 @@ impl< 'a > Frame< 'a > {
             file: None,
             line: None,
             column: None,
-            is_inline: false
+            is_inline: false,
+            comp_dir: None,
         }
     }
 }
@@ -1277,9 +1319,13 @@ pub fn reload< A: Architecture >(
             let binary_data = data.debug_binary_data.as_ref().or( data.binary_data.as_ref() );
             if let Some( binary_data ) = binary_data {
 
-                if cfg!( not( feature = "addr2line" ) ) {
+                #[cfg(not(feature = "addr2line"))]
+                {
+                    let _ = binary_data;
                     debug!( "Not compiled with the `addr2line` feature; skipping addr2line context creation" );
-                } else if context.is_none() {
+                }
+                #[cfg(feature = "addr2line")]
+                if context.is_none() {
                     debug!( "Creating addr2line context for '{}' from '{}'...", data.name, binary_data.name() );
 
                     // Use `object` to find sections and decompress them on
