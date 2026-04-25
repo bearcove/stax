@@ -33,7 +33,7 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use nwind::{BinaryData, BinaryId};
+use nwind::BinaryId;
 use yaxpeax_arch::{Decoder, LengthedInstruction, U8Reader};
 use yaxpeax_arm::armv8::a64::InstDecoder as Aarch64Decoder;
 use yaxpeax_x86::amd64::InstDecoder as Amd64Decoder;
@@ -90,15 +90,57 @@ impl FuncRecord {
     }
 }
 
-/// Per-binary code-bytes cache. Holds whatever `BinaryData` we managed to
-/// obtain for fetching code bytes — embedded blob first, then the on-disk
-/// file. (Symbol lookup goes through `IAddressSpace`; this cache is purely
-/// about *bytes to disassemble*.)
-///
-/// The on-disk fallback is what lets system libraries (libc.so.6, libm.so.6
-/// …) annotate even though the recorder doesn't embed them.
+/// One executable segment of an on-disk binary, in its own SVMA space.
+/// Both ELF `PT_LOAD` and Mach-O `LC_SEGMENT*` flatten to this shape.
+#[derive(Clone, Copy, Debug)]
+struct CodeSegment {
+    address: u64,
+    size: u64,
+    file_offset: u64,
+    file_size: u64,
+}
+
+/// Bytes + segment table for one binary, suitable for slicing out
+/// instruction bytes by relative address. We hold the full file in
+/// memory (`Vec<u8>`) so the lookup is one indirection — annotate is
+/// post-processing, not a hot path.
+struct CodeImage {
+    bytes: Arc< Vec< u8 > >,
+    segments: Vec< CodeSegment >
+}
+
+impl CodeImage {
+    /// Slice out bytes for `range`, expressed in the binary's SVMA, by
+    /// finding the segment that contains it and translating to a file
+    /// offset.
+    fn fetch( &self, range: &Range< RelativeAddr > ) -> Option< &[u8] > {
+        let start = range.start.raw();
+        let end = range.end.raw();
+        let len = (end - start) as usize;
+        for seg in &self.segments {
+            let seg_end = seg.address.checked_add( seg.size )?;
+            if seg.address <= start && end <= seg_end {
+                let in_segment = start - seg.address;
+                if in_segment.checked_add( len as u64 )? > seg.file_size {
+                    return None;
+                }
+                let file_off = (seg.file_offset + in_segment) as usize;
+                if file_off.checked_add( len )? > self.bytes.len() {
+                    return None;
+                }
+                return Some( &self.bytes[ file_off..file_off + len ] );
+            }
+        }
+        None
+    }
+}
+
+/// Per-binary code-bytes cache. Looks up the embedded archive blob
+/// first, then falls back to the on-disk path. Both ELF and Mach-O are
+/// supported via `object::File`. (Symbol lookup goes through
+/// `IAddressSpace`; this cache is purely about *bytes to disassemble*.)
 struct CodeCache {
-    by_binary: HashMap< BinaryId, Option< Arc< BinaryData > > >
+    by_binary: HashMap< BinaryId, Option< Arc< CodeImage > > >
 }
 
 impl CodeCache {
@@ -106,10 +148,11 @@ impl CodeCache {
         CodeCache { by_binary: HashMap::new() }
     }
 
-    fn get( &mut self, binary_id: &BinaryId, binary: &Binary ) -> Option< &Arc< BinaryData > > {
+    fn get( &mut self, binary_id: &BinaryId, binary: &Binary ) -> Option< &Arc< CodeImage > > {
         if !self.by_binary.contains_key( binary_id ) {
-            let code = binary.data().cloned().or_else( || load_from_disk( binary ) );
-            self.by_binary.insert( binary_id.clone(), code );
+            let image = build_image_from_archive( binary )
+                .or_else( || build_image_from_disk( binary ) );
+            self.by_binary.insert( binary_id.clone(), image );
         }
         self.by_binary.get( binary_id ).and_then( |opt| opt.as_ref() )
     }
@@ -204,19 +247,59 @@ impl SourceCache {
     }
 }
 
-fn load_from_disk( binary: &Binary ) -> Option< Arc< BinaryData > > {
+/// Build a `CodeImage` from an archive-embedded ELF blob (the
+/// recorder writes these for `--offline` captures).
+fn build_image_from_archive( binary: &Binary ) -> Option< Arc< CodeImage > > {
+    let data = binary.data()?;
+    let bytes: Arc< Vec< u8 > > = Arc::new( data.as_bytes().to_vec() );
+    let segments = parse_segments( &bytes )?;
+    Some( Arc::new( CodeImage { bytes, segments } ) )
+}
+
+/// Build a `CodeImage` by reading the binary off disk. Handles ELF and
+/// Mach-O via `object::File`, so system libraries (libc.so.6,
+/// libsystem_malloc.dylib, …) annotate without needing the recorder
+/// to embed them.
+fn build_image_from_disk( binary: &Binary ) -> Option< Arc< CodeImage > > {
     let path = binary.path();
-    // Skip pseudo-paths like "[vdso]", "[heap]"; load_from_fs would just fail.
+    // Skip pseudo-paths like "[vdso]", "[heap]"; fs::read would just fail.
     if path.starts_with( '[' ) {
         return None;
     }
-    match BinaryData::load_from_fs( path ) {
-        Ok( data ) => Some( Arc::new( data ) ),
+    let bytes = match fs::read( path ) {
+        Ok( b ) => b,
         Err( err ) => {
             debug!( "annotate: could not open '{}' from disk: {}", path, err );
-            None
+            return None;
         }
+    };
+    let bytes: Arc< Vec< u8 > > = Arc::new( bytes );
+    let segments = parse_segments( &bytes )?;
+    Some( Arc::new( CodeImage { bytes, segments } ) )
+}
+
+/// Parse `bytes` (ELF or Mach-O) and collect its loadable segments.
+/// Returns `None` if the file isn't a recognized object format.
+fn parse_segments( bytes: &[u8] ) -> Option< Vec< CodeSegment > > {
+    use object::{Object, ObjectSegment};
+    let file = match object::File::parse( bytes ) {
+        Ok( f ) => f,
+        Err( err ) => {
+            debug!( "annotate: object::File::parse failed: {}", err );
+            return None;
+        }
+    };
+    let mut segments = Vec::new();
+    for seg in file.segments() {
+        let (file_offset, file_size) = seg.file_range();
+        segments.push( CodeSegment {
+            address: seg.address(),
+            size: seg.size(),
+            file_offset,
+            file_size
+        });
     }
+    Some( segments )
 }
 
 fn format_hex_bytes( bytes: &[u8] ) -> String {
@@ -228,33 +311,6 @@ fn format_hex_bytes( bytes: &[u8] ) -> String {
         let _ = write!( &mut out, "{:02x}", byte );
     }
     out
-}
-
-/// Locate the slice of file bytes corresponding to a binary-relative range,
-/// using the executable PT_LOAD segment that contains it.
-fn fetch_code_bytes< 'a >( data: &'a BinaryData, range: &Range< RelativeAddr > ) -> Option< &'a [u8] > {
-    let start = range.start.raw();
-    let end = range.end.raw();
-    let len = (end - start) as usize;
-    for header in data.load_headers() {
-        if !header.is_executable {
-            continue;
-        }
-        let segment_end = header.address + header.memory_size;
-        if header.address <= start && end <= segment_end {
-            let in_segment = start - header.address;
-            if in_segment + (len as u64) > header.file_size {
-                return None;
-            }
-            let file_off = (header.file_offset + in_segment) as usize;
-            let bytes = data.as_bytes();
-            if file_off.checked_add( len )? > bytes.len() {
-                return None;
-            }
-            return Some( &bytes[ file_off..file_off + len ] );
-        }
-    }
-    None
 }
 
 /// Resolved (file, line) for a single instruction, plus the CU's
@@ -532,7 +588,7 @@ pub fn main( args: AnnotateArgs ) -> Result< (), Box< dyn Error > > {
                 let binary = state.get_binary( &binary_id );
                 let label = binary.basename();
                 let code = code_cache.get( &binary_id, binary );
-                let bytes = match code.and_then( |data| fetch_code_bytes( data, &range ) ) {
+                let bytes = match code.and_then( |image| image.fetch( &range ) ) {
                     Some( b ) => b,
                     None => {
                         writeln!( out, "==== {} [{}]  rel 0x{:x}..0x{:x}  total={}  (no code bytes available) ====\n",
