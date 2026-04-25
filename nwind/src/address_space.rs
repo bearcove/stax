@@ -1132,11 +1132,24 @@ pub fn reload< A: Architecture >(
         let mut symbols = data.symbols;
         let mut context = data.context;
         if data.load_symbols {
-            let binary_data = data.debug_binary_data.as_ref().or( data.binary_data.as_ref() );
-            if let Some( binary_data ) = binary_data {
-                if symbols.is_empty() {
+            // Load symbols from BOTH the original binary and the separate
+            // debug file when both are present. The recorder typically only
+            // ships `.dynsym` (so `data.symbols` holds those exported names),
+            // but the debug file's `.symtab` carries the non-exported
+            // internals (e.g. `__memcpy_avx512_unaligned_erms`) that we
+            // otherwise can't resolve. Resolution iterates `self.symbols`
+            // in order and returns the first hit, so listing the debug
+            // file's symtab alongside dynsym is safe.
+            if symbols.is_empty() {
+                if let Some( binary_data ) = data.binary_data.as_ref() {
                     symbols.push( Symbols::load_from_binary_data( &binary_data ) );
                 }
+            }
+            if let Some( debug_binary_data ) = data.debug_binary_data.as_ref() {
+                symbols.push( Symbols::load_from_binary_data( &debug_binary_data ) );
+            }
+            let binary_data = data.debug_binary_data.as_ref().or( data.binary_data.as_ref() );
+            if let Some( binary_data ) = binary_data {
 
                 if cfg!( not( feature = "addr2line" ) ) {
                     debug!( "Not compiled with the `addr2line` feature; skipping addr2line context creation" );
