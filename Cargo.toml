@@ -18,7 +18,7 @@ serde = "1"
 serde_json = "1"
 serde_derive = "1"
 structopt = "0.2"
-inferno = { version = "0.9", default-features = false, optional = true }
+inferno = { version = "0.12", default-features = false, optional = true }
 yaxpeax-arch = { version = "0.3", default-features = false, features = ["std"] }
 yaxpeax-x86 = { version = "2", default-features = false, features = ["std", "fmt"] }
 
