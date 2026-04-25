@@ -576,7 +576,6 @@ dependencies = [
  "proc-maps",
  "quickcheck",
  "regex",
- "rustc-demangle",
  "serde",
  "serde_derive",
  "serde_json",

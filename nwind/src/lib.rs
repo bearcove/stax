@@ -75,7 +75,8 @@ pub use crate::address_space::{
     Primitive,
     IAddressSpace,
     AddressSpace,
-    Frame
+    Frame,
+    ResolvedSymbol
 };
 pub use crate::dwarf_regs::DwarfRegs;
 pub use crate::range_map::RangeMap;

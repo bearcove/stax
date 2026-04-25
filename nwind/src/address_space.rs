@@ -440,6 +440,30 @@ impl< A: Architecture > Binary< A > {
         callback( &mut frame );
     }
 
+    /// Resolve a runtime address to the enclosing function (non-inline)
+    /// and its binary-relative range.
+    ///
+    /// Unlike [`Self::decode_symbol_while`], this exposes the symbol's
+    /// `Range<u64>` so callers can do per-function analyses (annotate,
+    /// disassembly windows, …) without rebuilding their own symbol map.
+    pub fn lookup_symbol< 'a >( &'a self, address: u64 ) -> Option< ResolvedSymbol< 'a > > {
+        let relative_address = translate_address( &self.mappings, address );
+        for symbols in &self.symbols {
+            if let Some( (range, raw_name) ) = symbols.get_symbol( relative_address ) {
+                let demangled = demangle( raw_name );
+                return Some( ResolvedSymbol {
+                    absolute_address: address,
+                    relative_address,
+                    relative_range: range,
+                    raw_name: raw_name.into(),
+                    demangled_name: demangled.map( Cow::Owned ),
+                    library: self.name.as_str().into()
+                });
+            }
+        }
+        None
+    }
+
     fn resolve_symbol( &self, relative_address: u64 ) -> Option< (Cow< str >, Option< Cow< str > >) > {
         if let Some( symbol_decode_cache ) = self.symbol_decode_cache.as_ref() {
             let mut cache = symbol_decode_cache.lock().unwrap();
@@ -826,11 +850,39 @@ impl< 'a > Frame< 'a > {
     }
 }
 
+/// The function (or top-level non-inline frame) that contains a given
+/// runtime address, resolved through the binary's symbol table — together
+/// with the binary-relative range over which that symbol applies.
+///
+/// Returned by [`IAddressSpace::lookup_symbol`]. Use this when you need the
+/// function's bounds (e.g. to fetch its code bytes) in addition to the name —
+/// `decode_symbol_while` only exposes the name.
+pub struct ResolvedSymbol< 'a > {
+    /// The address that was queried (runtime VA).
+    pub absolute_address: u64,
+    /// `absolute_address` translated into the binary's own VA space.
+    pub relative_address: u64,
+    /// The function's range in binary-relative addresses. `start <=
+    /// relative_address < end`.
+    pub relative_range: Range< u64 >,
+    /// Mangled symbol name as stored in the ELF symbol table.
+    pub raw_name: Cow< 'a, str >,
+    /// Demangled name when the symbol's mangling is recognised.
+    pub demangled_name: Option< Cow< 'a, str > >,
+    /// Name of the loaded library / binary the symbol belongs to.
+    pub library: Cow< 'a, str >
+}
+
 pub trait IAddressSpace {
     fn reload( &mut self, regions: Vec< Region >, try_load: &mut dyn FnMut( &Region, &mut LoadHandle ) ) -> Reloaded;
     fn unwind( &mut self, regs: &mut DwarfRegs, stack: &dyn BufferReader, output: &mut Vec< UserFrame > );
     fn decode_symbol_while< 'a >( &'a self, address: u64, callback: &mut dyn FnMut( &mut Frame< 'a > ) -> bool );
     fn decode_symbol_once( &self, address: u64 ) -> Frame;
+    /// Resolve `address` to the enclosing function (non-inline) and return
+    /// its symbol name plus binary-relative range. `None` when the address
+    /// doesn't map to any loaded binary, or the binary has no matching
+    /// symbol-table entry.
+    fn lookup_symbol< 'a >( &'a self, address: u64 ) -> Option< ResolvedSymbol< 'a > >;
     fn set_panic_on_partial_backtrace( &mut self, value: bool );
 }
 
@@ -1320,6 +1372,11 @@ impl< A: Architecture > IAddressSpace for AddressSpace< A > where A::RegTy: Prim
         } else {
             Frame::from_address( address, address )
         }
+    }
+
+    fn lookup_symbol< 'a >( &'a self, address: u64 ) -> Option< ResolvedSymbol< 'a > > {
+        let region = self.regions.get_value( address )?;
+        region.binary.lookup_symbol( address )
     }
 
     fn set_panic_on_partial_backtrace( &mut self, value: bool ) {
