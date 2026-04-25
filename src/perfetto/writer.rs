@@ -11,21 +11,24 @@ mod tp {
     pub const TRUSTED_PACKET_SEQUENCE_ID: u32 = 10;
     pub const INTERNED_DATA: u32 = 12;
     pub const SEQUENCE_FLAGS: u32 = 13;
+    pub const TIMESTAMP_CLOCK_ID: u32 = 58;
+    pub const CLOCK_SNAPSHOT: u32 = 36;
     pub const PROCESS_DESCRIPTOR: u32 = 43;
     pub const THREAD_DESCRIPTOR: u32 = 44;
     pub const FIRST_PACKET_ON_SEQUENCE: u32 = 87;
-    /// Field 54 in the current Perfetto trace_packet.proto. (Earlier I
-    /// guessed 91 -- that turned out to be an Android-only field, which
-    /// is why ui.perfetto.dev reported `energy_descriptor_invalid` /
-    /// `entity_state_residency_lookup_failed` errors per sample.)
     pub const STREAMING_PROFILE_PACKET: u32 = 54;
 }
 
+/// Builtin clock ids from `protos/perfetto/common/builtin_clock.proto`.
+const BUILTIN_CLOCK_MONOTONIC: u64 = 3;
+const BUILTIN_CLOCK_BOOTTIME: u64 = 6;
+
+/// `sequence_flags` bits.
+const SEQ_FLAG_INCREMENTAL_STATE_CLEARED: u64 = 1;
+const SEQ_FLAG_NEEDS_INCREMENTAL_STATE: u64 = 2;
+
 /// `Trace.packet` field number.
 const FIELD_TRACE_PACKET: u32 = 1;
-
-/// `sequence_flags` bits (see `trace_packet.proto`).
-const SEQ_FLAG_INCREMENTAL_STATE_CLEARED: u64 = 1;
 
 /// One sample as we want to emit it.
 pub struct Sample<'a> {
@@ -55,6 +58,20 @@ pub fn write_trace<W: Write>(
     process_name: &str,
     threads: &[ThreadTrace],
 ) -> io::Result<()> {
+    // ClockSnapshot first: anchor MONOTONIC against BOOTTIME at a known
+    // timestamp so Perfetto can convert sample timestamps (which it
+    // implicitly attributes to MONOTONIC for stack profile packets) into
+    // its trace clock domain. We pick the first sample's timestamp as the
+    // anchor; if there are no samples, anchor to zero (Perfetto still
+    // wants the snapshot present).
+    let anchor_ns = threads
+        .iter()
+        .flat_map(|t| t.samples.first())
+        .map(|s| s.timestamp_ns)
+        .min()
+        .unwrap_or(0);
+    write_clock_snapshot_packet(w, 1, anchor_ns)?;
+
     // Sequence id 1 is reserved for the process descriptor; threads start
     // at 2 and go up.
     write_process_descriptor_packet(w, 1, process_pid, process_name)?;
@@ -64,6 +81,43 @@ pub fn write_trace<W: Write>(
         write_thread_sequence(w, sequence_id, t)?;
     }
     Ok(())
+}
+
+/// Emit a `ClockSnapshot` TracePacket. We map both MONOTONIC and BOOTTIME
+/// to the same `anchor_ns` value (we don't have separate clocks on macOS
+/// for these -- mach_absolute_time→ns is essentially MONOTONIC, and we
+/// treat the same value as BOOTTIME for trace purposes). This satisfies
+/// Perfetto's StreamingProfilePacket parser, which complains about clock
+/// 3 (MONOTONIC) without a snapshot even when we never explicitly set
+/// `timestamp_clock_id` to 3 ourselves.
+fn write_clock_snapshot_packet<W: Write>(
+    w: &mut W,
+    sequence_id: u32,
+    anchor_ns: u64,
+) -> io::Result<()> {
+    write_message(w, FIELD_TRACE_PACKET, |buf| {
+        write_uint32(buf, tp::TRUSTED_PACKET_SEQUENCE_ID, sequence_id)?;
+        write_message(buf, tp::CLOCK_SNAPSHOT, |snap| {
+            // ClockSnapshot.clocks (field 1) -- one Clock per ID.
+            write_message(snap, 1, |c| {
+                write_uint64(c, 1 /* clock_id */, BUILTIN_CLOCK_BOOTTIME)?;
+                write_uint64(c, 2 /* timestamp */, anchor_ns)?;
+                Ok(())
+            })?;
+            write_message(snap, 1, |c| {
+                write_uint64(c, 1 /* clock_id */, BUILTIN_CLOCK_MONOTONIC)?;
+                write_uint64(c, 2 /* timestamp */, anchor_ns)?;
+                Ok(())
+            })?;
+            // ClockSnapshot.primary_trace_clock (field 2) -- pin trace
+            // clock to BOOTTIME so the timestamps on our packets (which
+            // we don't tag with timestamp_clock_id, defaulting to BOOTTIME)
+            // need no further conversion.
+            write_uint64(snap, 2, BUILTIN_CLOCK_BOOTTIME)?;
+            Ok(())
+        })?;
+        Ok(())
+    })
 }
 
 fn write_process_descriptor_packet<W: Write>(
@@ -171,13 +225,14 @@ fn write_thread_sequence<W: Write>(
     })?;
 
     // Emit one TracePacket per sample with a single-element
-    // StreamingProfilePacket. Perfetto can also pack many samples into one
-    // packet via the repeated fields, but per-sample TracePackets keep
-    // absolute timestamps trivial and the trace is still small.
+    // StreamingProfilePacket. Each sample packet gets
+    // `SEQ_NEEDS_INCREMENTAL_STATE` so Perfetto carries the InternedData
+    // emitted in the bootstrap packet forward to the iid lookups here.
     for (sample, &cs_iid) in thread.samples.iter().zip(sample_callstack_iids.iter()) {
         write_message(w, FIELD_TRACE_PACKET, |buf| {
             write_uint64(buf, tp::TIMESTAMP, sample.timestamp_ns)?;
             write_uint32(buf, tp::TRUSTED_PACKET_SEQUENCE_ID, sequence_id)?;
+            write_uint64(buf, tp::SEQUENCE_FLAGS, SEQ_FLAG_NEEDS_INCREMENTAL_STATE)?;
             write_message(buf, tp::STREAMING_PROFILE_PACKET, |sp| {
                 // `repeated uint64 callstack_iid = 1`
                 write_packed_uint64(sp, 1, &[cs_iid])?;
