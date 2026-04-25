@@ -751,6 +751,7 @@ dependencies = [
  "libc",
  "log",
  "mach2",
+ "object",
  "thiserror",
 ]
 
@@ -852,6 +853,15 @@ dependencies = [
  "scroll",
  "speedy",
  "thread-local-reentrant",
+]
+
+[[package]]
+name = "object"
+version = "0.39.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e5a6c098c7a3b6547378093f5cc30bc54fd361ce711e05293a5cc589562739b"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]

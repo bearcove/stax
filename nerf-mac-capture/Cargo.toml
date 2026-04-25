@@ -19,3 +19,4 @@ framehop = "0.16"
 lazy_static = "1.5"
 crossbeam-channel = "0.5"
 thiserror = "2"
+object = { version = "0.39", default-features = false, features = ["std", "read_core", "macho", "unaligned"] }

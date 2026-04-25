@@ -22,6 +22,8 @@ pub mod dyld_bindings;
 pub mod error;
 pub mod kernel_error;
 pub mod mach_ipc;
+pub mod proc_maps;
 pub mod thread_act;
 pub mod thread_info;
 pub mod time;
+pub mod types;
