@@ -63,6 +63,17 @@ pub fn record<S: SampleSink>(
         return Err(Error::NotRoot);
     }
 
+    // Wipe any stale kperf/ktrace state from a previous half-finished
+    // run. Without this, `kdebug::reset()` below trips EINVAL when
+    // ktrace is still owned by KTRACE_KPERF from a previous session.
+    unsafe {
+        let _ = (fw.kperf_sample_set)(0);
+        let _ = (fw.kperf_reset)();
+    }
+    let _ = kdebug::set_lightweight_pet(0);
+    let _ = kdebug::enable(false);
+    let _ = kdebug::reset();
+
     let mut session = Session::start(&fw, &opts)?;
     session.attach_to_pid(opts.pid)?;
     session.enable_kdebug(&opts)?;

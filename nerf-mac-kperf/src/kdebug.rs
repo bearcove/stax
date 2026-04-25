@@ -357,12 +357,17 @@ pub fn set_lightweight_pet(enabled: u32) -> Result<(), Error> {
 }
 
 fn sysctl_op(op: &'static str, mib: &mut [c_int]) -> Result<(), Error> {
+    // The kdebug sysctl handler expects a non-null `oldlenp` even
+    // for write-only ops; passing NULL there fails with EINVAL on
+    // recent macOS releases. trace(1) and kdv both pass a
+    // pointer-to-zero, so we mirror that.
+    let mut zero: usize = 0;
     let rc = unsafe {
         sysctl(
             mib.as_mut_ptr(),
             mib.len() as u32,
             std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            &mut zero,
             std::ptr::null_mut(),
             0,
         )
