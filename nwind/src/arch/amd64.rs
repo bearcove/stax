@@ -217,6 +217,10 @@ impl Architecture for Arch {
             Some( result ) => result,
             None => {
                 if let Some( rbp ) = regs.get( dwarf::RBP ) {
+                    if !memory.is_stack_address( rbp ) {
+                        return None;
+                    }
+
                     if let Some( next_rbp ) = memory.get_pointer_at_address( rbp ) {
                         if let Some( next_rip ) = memory.get_pointer_at_address( rbp + 8 ) {
                             trace!(
@@ -227,7 +231,7 @@ impl Architecture for Arch {
                                 next_rip
                             );
 
-                            if next_rbp != rbp {
+                            if next_rbp > rbp && memory.is_stack_address( next_rbp ) {
                                 regs.clear();
                                 regs.append( dwarf::RSP, rbp + 16 );
                                 regs.append( dwarf::RBP, next_rbp );

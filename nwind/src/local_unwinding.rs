@@ -27,6 +27,7 @@ pub enum UnwindControl {
 
 struct LocalMemory< 'a > {
     regions: &'a RangeMap< BinaryRegion< arch::native::Arch > >,
+    stack_ranges: &'a [(u64, u64)],
     dynamic_fde_registry: &'a DynamicFdeRegistry< gimli::NativeEndian >
 }
 
@@ -37,14 +38,29 @@ impl< 'a > MemoryReader< arch::native::Arch > for LocalMemory< 'a > {
 
     #[inline(always)]
     fn get_pointer_at_address( &self, address: <arch::native::Arch as Architecture>::RegTy ) -> Option< <arch::native::Arch as Architecture>::RegTy > {
-        let value = unsafe {
-            std::ptr::read_unaligned( address as usize as *const usize )
+        let mut value = mem::MaybeUninit::< usize >::uninit();
+        let local = libc::iovec {
+            iov_base: value.as_mut_ptr() as *mut libc::c_void,
+            iov_len: mem::size_of::< usize >()
         };
-        Some( value as _ )
+        let remote = libc::iovec {
+            iov_base: address as usize as *mut libc::c_void,
+            iov_len: mem::size_of::< usize >()
+        };
+
+        let bytes_read = unsafe {
+            libc::process_vm_readv( libc::getpid(), &local, 1, &remote, 1, 0 )
+        };
+
+        if bytes_read != mem::size_of::< usize >() as isize {
+            return None;
+        }
+
+        Some( unsafe { value.assume_init() as _ } )
     }
 
-    fn is_stack_address( &self, _: u64 ) -> bool {
-        false
+    fn is_stack_address( &self, address: u64 ) -> bool {
+        self.stack_ranges.iter().any( |&(stack_start, stack_end)| address >= stack_start && address < stack_end )
     }
 
     fn dynamic_fde_registry( &self ) -> Option< &DynamicFdeRegistry< gimli::NativeEndian > > {
@@ -562,6 +578,7 @@ impl LocalUnwindContext {
 
 pub struct LocalAddressSpace {
     regions: RangeMap< BinaryRegion< arch::native::Arch > >,
+    stack_ranges: Vec< (u64, u64) >,
     binary_map: HashMap< BinaryId, BinaryHandle< arch::native::Arch > >,
     use_shadow_stack: bool,
     should_load_symbols: bool,
@@ -704,6 +721,7 @@ impl LocalAddressSpace {
 
         let mut address_space = LocalAddressSpace {
             regions: RangeMap::new(),
+            stack_ranges: Vec::new(),
             binary_map: HashMap::new(),
             use_shadow_stack: false,
             should_load_symbols: opts.should_load_symbols,
@@ -732,6 +750,11 @@ impl LocalAddressSpace {
         trace!( "Parsing maps..." );
         let regions = proc_maps::parse( &maps );
         let should_load_symbols = self.should_load_symbols;
+        self.stack_ranges = regions
+            .iter()
+            .filter( |region| region.is_read && region.is_write && !region.is_executable && region.name.starts_with( "[stack" ) )
+            .map( |region| (region.start, region.end) )
+            .collect();
 
         self.reload_count += 1;
         let mut new_binaries = Vec::new();
@@ -787,6 +810,7 @@ impl LocalAddressSpace {
 
         let memory = LocalMemory {
             regions: &self.regions,
+            stack_ranges: &self.stack_ranges,
             dynamic_fde_registry: &self.dynamic_fde_registry
         };
 
@@ -860,6 +884,7 @@ impl LocalAddressSpace {
 
         let memory = LocalMemory {
             regions: &self.regions,
+            stack_ranges: &self.stack_ranges,
             dynamic_fde_registry: &self.dynamic_fde_registry
         };
 
