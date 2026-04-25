@@ -258,13 +258,59 @@ impl Interner {
 
     fn encode_interned_data(&self) -> io::Result<Vec<u8>> {
         // InternedData field numbers from interned_data.proto:
-        //   function_names = 5
-        //   frames         = 6
-        //   callstacks     = 7
-        // Frame fields:        iid=1, function_name_id=2 (mapping_id=3, rel_pc=4 omitted)
-        // Callstack fields:    iid=1, frame_ids=2 (packed)
-        // InternedString:      iid=1, str=2
+        //   build_ids       = 16   (InternedString)
+        //   mapping_paths   = 17   (InternedString)
+        //   function_names  = 5    (InternedString)
+        //   mappings        = 19
+        //   frames          = 6
+        //   callstacks      = 7
+        //
+        // Frame fields:     iid=1, function_name_id=2, mapping_id=3, rel_pc=4
+        // Mapping fields:   iid=1, build_id=2, exact_offset=8, start_offset=3,
+        //                   start=4, end=5, load_bias=6, path_string_ids=7 (repeated)
+        // Callstack fields: iid=1, frame_ids=2 (packed)
+        // InternedString:   iid=1, str=2
+        //
+        // We emit a single dummy Mapping at iid 1 covering the entire 64-bit
+        // address space and have every Frame reference it with rel_pc=0. The
+        // proto comment says mapping_id=0 means "fully symbolized, no mapping",
+        // but Perfetto's UI parser rejects such frames as invalid in practice.
+        // We don't have per-binary load addresses plumbed through here yet;
+        // when binary-load events are wired in we can emit one Mapping per
+        // image and recover real address attribution.
         let mut out = Vec::new();
+
+        const DUMMY_BUILD_ID_IID: u64 = 1;
+        const DUMMY_PATH_IID: u64 = 1;
+        const DUMMY_MAPPING_IID: u64 = 1;
+
+        // build_ids[1] = "" (we don't have a real build id)
+        write_message(&mut out, 16 /* build_ids */, |s| {
+            write_uint64(s, 1, DUMMY_BUILD_ID_IID)?;
+            write_string(s, 2, "")?;
+            Ok(())
+        })?;
+
+        // mapping_paths[1] = "nperf"
+        write_message(&mut out, 17 /* mapping_paths */, |s| {
+            write_uint64(s, 1, DUMMY_PATH_IID)?;
+            write_string(s, 2, "nperf")?;
+            Ok(())
+        })?;
+
+        // mappings[1] = covers 0..u64::MAX
+        write_message(&mut out, 19 /* mappings */, |m| {
+            write_uint64(m, 1 /* iid */, DUMMY_MAPPING_IID)?;
+            write_uint64(m, 2 /* build_id */, DUMMY_BUILD_ID_IID)?;
+            write_uint64(m, 3 /* start_offset */, 0)?;
+            write_uint64(m, 4 /* start */, 0)?;
+            write_uint64(m, 5 /* end */, u64::MAX)?;
+            write_uint64(m, 6 /* load_bias */, 0)?;
+            // path_string_ids is repeated; emit one entry pointing at the dummy path.
+            write_uint64(m, 7 /* path_string_ids */, DUMMY_PATH_IID)?;
+            write_uint64(m, 8 /* exact_offset */, 0)?;
+            Ok(())
+        })?;
 
         // function_names (sorted by iid for deterministic output)
         let mut by_iid: Vec<(u64, &str)> = self
@@ -281,12 +327,14 @@ impl Interner {
             })?;
         }
 
-        // frames
+        // frames -- every frame references the single dummy mapping with rel_pc=0
         for (idx, &fn_iid) in self.frame_to_function.iter().enumerate() {
             let frame_iid = (idx as u64) + 1;
             write_message(&mut out, 6 /* frames */, |f| {
                 write_uint64(f, 1 /* iid */, frame_iid)?;
                 write_uint64(f, 2 /* function_name_id */, fn_iid)?;
+                write_uint64(f, 3 /* mapping_id */, DUMMY_MAPPING_IID)?;
+                write_uint64(f, 4 /* rel_pc */, 0)?;
                 Ok(())
             })?;
         }
