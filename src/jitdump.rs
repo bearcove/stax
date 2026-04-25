@@ -171,4 +171,35 @@ impl< 'a > JitDump< 'a > {
             records: file.records
         })
     }
+
+    /// Parse a jitdump file from its raw bytes (e.g. embedded in an nperf
+    /// archive as a `Packet::FileBlob`).
+    pub fn load_from_bytes( bytes: &[u8] ) -> Result< Self, speedy::Error > {
+        let file: JitDumpFile = speedy::Readable::read_from_buffer_copying_data( bytes )?;
+        Ok( Self {
+            records: file.records.into_iter().map( |r| r.into_owned() ).collect()
+        })
+    }
+}
+
+impl< 'a > Record< 'a > {
+    fn into_owned( self ) -> Record< 'static > {
+        match self {
+            Record::CodeLoad { timestamp, pid, tid, virtual_address, address, index, name, code } => {
+                Record::CodeLoad {
+                    timestamp,
+                    pid,
+                    tid,
+                    virtual_address,
+                    address,
+                    index,
+                    name,
+                    code: Cow::Owned( code.into_owned() ),
+                }
+            }
+            Record::Unknown { id, timestamp, payload } => {
+                Record::Unknown { id, timestamp, payload: Cow::Owned( payload.into_owned() ) }
+            }
+        }
+    }
 }

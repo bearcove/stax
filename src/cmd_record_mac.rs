@@ -286,16 +286,40 @@ impl MacSink {
 
     fn finish(mut self) -> io::Result<()> {
         use std::io::Write;
-        self.writer.flush()?;
-        if !self.jitdump_paths.is_empty() {
-            info!("Recording complete.");
-            info!("JIT runtime detected. To resolve JIT'd symbols, pass --jitdump:");
-            for path in &self.jitdump_paths {
-                info!("    nperf collate <archive> --jitdump {}", path.display());
+
+        // Embed each discovered jitdump file's bytes into the archive as a
+        // FileBlob. data_reader's pre-scan picks these up and seeds the
+        // jitdump_events queue so `nperf collate <archive>` resolves JIT
+        // names without needing --jitdump.
+        for path in self.jitdump_paths.clone() {
+            match std::fs::read(&path) {
+                Ok(bytes) => {
+                    info!(
+                        "Embedding jitdump {} ({} bytes) into archive.",
+                        path.display(),
+                        bytes.len()
+                    );
+                    let path_bytes = path
+                        .to_string_lossy()
+                        .as_bytes()
+                        .to_owned();
+                    let _ = self.write_packet(Packet::FileBlob {
+                        path: Cow::Owned(path_bytes),
+                        data: Cow::Owned(bytes),
+                    });
+                }
+                Err(err) => {
+                    warn!(
+                        "Could not read jitdump {} for embedding: {}",
+                        path.display(),
+                        err
+                    );
+                }
             }
-        } else {
-            info!("Recording complete.");
         }
+
+        self.writer.flush()?;
+        info!("Recording complete.");
         Ok(())
     }
 }

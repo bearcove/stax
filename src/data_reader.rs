@@ -576,6 +576,48 @@ pub(crate) fn read_data< F >( args: ReadDataArgs, mut on_event: F ) -> Result< S
         }
     }
 
+    // Pre-scan the archive for any embedded jitdump files (FileBlob packets
+    // whose basename matches `jit-*.dump`). nperf-mac-capture writes these
+    // when the preload-dylib detects the target opening a jitdump file --
+    // makes JIT names resolve without the user having to find the path
+    // themselves and pass --jitdump.
+    {
+        let prescan_fp = fs::File::open( input_path )
+            .map_err( |err| format!( "cannot open {:?} for jitdump pre-scan: {}", input_path, err ) )?;
+        let prescan_reader = ArchiveReader::new( prescan_fp ).validate_header().unwrap().skip_unknown();
+        for packet in prescan_reader {
+            let packet = packet?;
+            if let Packet::FileBlob { ref path, ref data } = packet {
+                if is_jitdump_path( path.as_ref() ) {
+                    match crate::jitdump::JitDump::load_from_bytes( data.as_ref() ) {
+                        Ok( jitdump ) => {
+                            debug!( "Loading embedded jitdump {:?} ({} bytes)", String::from_utf8_lossy( path.as_ref() ), data.len() );
+                            for record in jitdump.records {
+                                if let crate::jitdump::Record::CodeLoad { timestamp, virtual_address, name, code, .. } = record {
+                                    jitdump_events.push_back( (timestamp, virtual_address..virtual_address + code.len() as u64, name) );
+                                }
+                            }
+                        }
+                        Err( err ) => {
+                            warn!( "Failed to parse embedded jitdump {:?}: {:?}", String::from_utf8_lossy( path.as_ref() ), err );
+                        }
+                    }
+                }
+            }
+        }
+        // Sort by timestamp so the existing time-ordered process_jitdump
+        // logic (which assumes a sorted queue) keeps working.
+        let mut all: Vec< _ > = jitdump_events.drain(..).collect();
+        all.sort_by_key( |&(ts, _, _)| ts );
+        jitdump_events = all.into_iter().collect();
+    }
+
+    fn is_jitdump_path( path: &[u8] ) -> bool {
+        let basename_start = path.iter().rposition( |&b| b == b'/' ).map( |i| i + 1 ).unwrap_or( 0 );
+        let basename = &path[ basename_start.. ];
+        basename.starts_with( b"jit-" ) && basename.ends_with( b".dump" )
+    }
+
     fn process_jitdump( timestamp: u64, jitdump_events: &mut VecDeque< (u64, Range< u64 >, String) >, jitdump_names: &mut RangeMap< String > ) {
         while let Some( (event_timestamp, _, _) ) = jitdump_events.front() {
             if *event_timestamp > timestamp {
