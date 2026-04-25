@@ -335,11 +335,23 @@ impl Process {
     pub(crate) fn memory_regions( &self ) -> &RangeMap< Region > {
         &self.memory_regions
     }
+
+    pub(crate) fn address_space( &self ) -> &dyn IAddressSpace {
+        &*self.address_space
+    }
 }
 
 impl Binary {
     pub(crate) fn data( &self ) -> Option< &Arc< BinaryData > > {
         self.data.as_ref()
+    }
+
+    pub(crate) fn debug_data( &self ) -> Option< &Arc< BinaryData > > {
+        self.debug_data.as_ref()
+    }
+
+    pub(crate) fn path( &self ) -> &str {
+        &self.path
     }
 }
 
