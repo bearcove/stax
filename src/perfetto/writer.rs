@@ -118,13 +118,22 @@ pub fn write_trace<W: Write>(
 
     for (idx, (tid, pid, sample, cs_iid)) in sample_streams.iter().enumerate() {
         let is_first = idx == 0;
+        // PerfSample.timebase_count is documented as a cumulative counter,
+        // but trace_processor's `linux_perf_sample_with_counters` view
+        // surfaces it raw (no delta). The area-selection flame graph
+        // computes self_value = SUM(counter_value). If we set 0,
+        // self_value is 0 and the flame view shows root: 0; if we set
+        // (idx+1) like a real cumulative counter, sample N is weighted
+        // N× more than sample 1. Constant 1 per sample is what we want
+        // for now: every sample contributes equally, total = sample
+        // count, the flame view rolls up correctly. (When we wire in
+        // real PMC values via kperf in M3+, this becomes the cycle /
+        // instruction / cache-miss count.)
+        let timebase_count: u64 = 1;
         write_message(w, FIELD_TRACE_PACKET, |buf| {
             write_uint64(buf, tp::TIMESTAMP, sample.timestamp_ns)?;
             write_uint32(buf, tp::TRUSTED_PACKET_SEQUENCE_ID, SEQUENCE_ID)?;
             write_uint64(buf, tp::SEQUENCE_FLAGS, SEQ_FLAG_NEEDS_INCREMENTAL_STATE)?;
-            // Attach the global InternedData to the first sample's
-            // packet only -- subsequent samples inherit it via
-            // NEEDS_INCREMENTAL_STATE on the same sequence.
             if is_first {
                 write_bytes(buf, tp::INTERNED_DATA, &interned_payload)?;
             }
@@ -134,6 +143,7 @@ pub fn write_trace<W: Write>(
                 write_uint32(ps, 3, *tid)?;
                 write_uint64(ps, 4, *cs_iid)?;
                 write_uint64(ps, 5, CPU_MODE_USER)?;
+                write_uint64(ps, 6 /* timebase_count */, timebase_count)?;
                 Ok(())
             })?;
             Ok(())
