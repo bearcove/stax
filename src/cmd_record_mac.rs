@@ -10,6 +10,7 @@ use std::io::{self, BufWriter};
 use std::path::PathBuf;
 use std::time::Duration;
 
+use chrono::prelude::*;
 use speedy::{Endianness, Writable};
 
 use nerf_mac_capture::process_launcher::{ReceivedStuff, TaskAccepter, TaskLauncher};
@@ -24,8 +25,6 @@ use crate::archive::{
 };
 use crate::args::{self, TargetProcess};
 use crate::utils::SigintHandler;
-
-const DEFAULT_OUTPUT: &str = "perf.data";
 
 pub fn main(args: args::RecordArgs) -> Result<(), Box<dyn Error>> {
     if args.discard_all {
@@ -54,11 +53,11 @@ fn record_existing_pid(
     args: args::RecordArgs,
     pid: u32,
 ) -> Result<(), Box<dyn Error>> {
-    let output_path = resolve_output_path(&args);
     let exe_path = proc_pidpath(pid).unwrap_or_else(|err| {
         warn!("proc_pidpath({}) failed: {}", pid, err);
         String::new()
     });
+    let output_path = resolve_output_path(&args, pid, &exe_path);
 
     info!("Recording PID {} -> {}", pid, output_path.display());
 
@@ -88,8 +87,6 @@ fn record_child_launch(
     program: String,
     program_args: Vec<String>,
 ) -> Result<(), Box<dyn Error>> {
-    let output_path = resolve_output_path(&args);
-
     let mut accepter = TaskAccepter::new()
         .map_err(|err| format!("setting up Mach IPC accepter: {:?}", err))?;
     let server_name = accepter.server_name().to_owned();
@@ -109,6 +106,8 @@ fn record_child_launch(
     info!("Child bootstrapped: PID {}", pid);
 
     let exe_path = proc_pidpath(pid).unwrap_or_else(|_| program.clone());
+    let output_path = resolve_output_path(&args, pid, &exe_path);
+    info!("Recording PID {} -> {}", pid, output_path.display());
     let mut sink = open_sink(&output_path, pid, &exe_path, &args)?;
 
     // Resume the child now that we have the task port and the headers
@@ -225,12 +224,36 @@ fn open_sink(
     Ok(sink)
 }
 
-fn resolve_output_path(args: &args::RecordArgs) -> PathBuf {
-    args.profiler_args
-        .output
-        .clone()
-        .unwrap_or_else(|| OsString::from(DEFAULT_OUTPUT))
-        .into()
+/// Mirrors the Linux profiler.rs default-output convention: when `-o` isn't
+/// given, fall back to `<YYYYMMDD>_<HHMMSS>_<pid>_<exe-basename>.nperf`.
+fn resolve_output_path(args: &args::RecordArgs, pid: u32, exe_path: &str) -> PathBuf {
+    if let Some(ref out) = args.profiler_args.output {
+        return PathBuf::from(out);
+    }
+
+    let basename: String = {
+        let raw = exe_path
+            .rsplit('/')
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("nperf");
+        raw.chars()
+            .map(|ch| if ch.is_alphanumeric() { ch } else { '_' })
+            .collect()
+    };
+
+    let now = Utc::now();
+    PathBuf::from(format!(
+        "{:04}{:02}{:02}_{:02}{:02}{:02}_{:05}_{}.nperf",
+        now.year(),
+        now.month(),
+        now.day(),
+        now.hour(),
+        now.minute(),
+        now.second(),
+        pid,
+        basename
+    ))
 }
 
 fn sigint_or_deadline(
