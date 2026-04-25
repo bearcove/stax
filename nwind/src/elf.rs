@@ -3,9 +3,7 @@
 //! `binary.rs` and `symbols.rs` care about a small subset of the ELF
 //! format: section/program headers, symbol tables, the gnu build-id note,
 //! and a few well-known section names. We collapse 32-bit and 64-bit
-//! headers into a single `SectionHeader`/`ProgramHeader`/`Sym` type
-//! (with everything widened to `u64`) and expose two parsers that yield
-//! the same `Elf` trait — same shape we used to get out of `goblin`.
+//! into a single set of widened structs (everything to `u64`).
 //!
 //! `byteorder` is used directly because input slices (e.g. `include_bytes!`
 //! in tests) aren't guaranteed to be 8-byte aligned, which rules out the
@@ -138,50 +136,34 @@ pub struct Note<'a> {
     pub desc: &'a [u8],
 }
 
-pub trait Elf<'a> {
-    type SectionHeaderIter: Iterator<Item = SectionHeader>;
-    type ProgramHeaderIter: Iterator<Item = ProgramHeader>;
-
-    fn is_64_bit(&self) -> bool;
-    fn endianness(&self) -> Endian;
-    fn header(&self) -> &Header;
-    fn section_headers(&self) -> Self::SectionHeaderIter;
-    fn program_headers(&self) -> Self::ProgramHeaderIter;
-    fn get_section_header(&self, index: usize) -> Option<SectionHeader>;
-    fn get_section_body(&self, header: &SectionHeader) -> &'a [u8];
-    fn get_section_body_range(&self, header: &SectionHeader) -> Range<u64>;
-    fn get_strtab(&self, header: &SectionHeader) -> Option<Strtab<'a>>;
-    fn parse_note(&self, data: &'a [u8]) -> Option<Note<'a>>;
-}
-
-pub struct ElfImpl<'a> {
+/// Parsed ELF view over a byte slice. Endianness and bitness are
+/// resolved at parse time and stored as plain fields, so call sites
+/// don't need to dispatch over an enum.
+pub struct Elf<'a> {
     bytes: &'a [u8],
     header: Header,
     endianness: Endian,
     is_64: bool,
 }
 
-impl<'a> Elf<'a> for ElfImpl<'a> {
-    type SectionHeaderIter = SectionHeaderIter<'a>;
-    type ProgramHeaderIter = ProgramHeaderIter<'a>;
-
+impl<'a> Elf<'a> {
     #[inline]
-    fn is_64_bit(&self) -> bool {
+    pub fn is_64_bit(&self) -> bool {
         self.is_64
     }
 
     #[inline]
-    fn endianness(&self) -> Endian {
+    pub fn endianness(&self) -> Endian {
         self.endianness
     }
 
     #[inline]
-    fn header(&self) -> &Header {
+    pub fn header(&self) -> &Header {
         &self.header
     }
 
     #[inline]
-    fn section_headers(&self) -> Self::SectionHeaderIter {
+    pub fn section_headers(&self) -> SectionHeaderIter<'a> {
         let header = &self.header;
         SectionHeaderIter {
             bytes: self.bytes,
@@ -194,7 +176,7 @@ impl<'a> Elf<'a> for ElfImpl<'a> {
     }
 
     #[inline]
-    fn program_headers(&self) -> Self::ProgramHeaderIter {
+    pub fn program_headers(&self) -> ProgramHeaderIter<'a> {
         let header = &self.header;
         ProgramHeaderIter {
             bytes: self.bytes,
@@ -207,7 +189,7 @@ impl<'a> Elf<'a> for ElfImpl<'a> {
     }
 
     #[inline]
-    fn get_section_header(&self, index: usize) -> Option<SectionHeader> {
+    pub fn get_section_header(&self, index: usize) -> Option<SectionHeader> {
         let header = &self.header;
         if index >= header.e_shnum as usize {
             return None;
@@ -217,31 +199,29 @@ impl<'a> Elf<'a> for ElfImpl<'a> {
     }
 
     #[inline]
-    fn get_section_body(&self, header: &SectionHeader) -> &'a [u8] {
+    pub fn get_section_body(&self, header: &SectionHeader) -> &'a [u8] {
         let start = header.sh_offset as usize;
         let end = start + header.sh_size as usize;
         &self.bytes[start..end]
     }
 
     #[inline]
-    fn get_section_body_range(&self, header: &SectionHeader) -> Range<u64> {
+    pub fn get_section_body_range(&self, header: &SectionHeader) -> Range<u64> {
         header.sh_offset..header.sh_offset + header.sh_size
     }
 
     #[inline]
-    fn get_strtab(&self, header: &SectionHeader) -> Option<Strtab<'a>> {
+    pub fn get_strtab(&self, header: &SectionHeader) -> Option<Strtab<'a>> {
         if header.sh_type != SHT_STRTAB {
             return None;
         }
         Some(Strtab::new(self.get_section_body(header), 0))
     }
 
-    fn parse_note(&self, data: &'a [u8]) -> Option<Note<'a>> {
-        // Layout:
-        //   u32 namesz, u32 descsz, u32 type, name[namesz padded], desc[descsz padded]
-        // The header words are 4-byte aligned regardless of class; padding
-        // is to 4 bytes for 32-bit and to 4 bytes in the wild for 64-bit
-        // build-id notes too.
+    pub fn parse_note(&self, data: &'a [u8]) -> Option<Note<'a>> {
+        // Layout: u32 namesz, u32 descsz, u32 type, name[namesz padded
+        // to 4], desc[descsz padded to 4]. The build-id note is always
+        // 4-byte aligned in the wild even on 64-bit binaries.
         if data.len() < 12 {
             return None;
         }
@@ -349,8 +329,6 @@ fn read_program_header(
     let len = if is_64 { 56 } else { 32 };
     let mut buf = src.get(offset..offset + len)?;
     if is_64 {
-        // 64-bit Elf64_Phdr layout: type, flags, offset, vaddr, paddr,
-        // filesz, memsz, align.
         let p_type = read_u32(&mut buf, endian)?;
         let p_flags = read_u32(&mut buf, endian)?;
         let p_offset = read_u64(&mut buf, endian)?;
@@ -363,8 +341,7 @@ fn read_program_header(
             p_type, p_flags, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_align,
         })
     } else {
-        // 32-bit Elf32_Phdr layout: type, offset, vaddr, paddr, filesz,
-        // memsz, flags, align — note `flags` moved.
+        // 32-bit Phdr: type, offset, vaddr, paddr, filesz, memsz, flags, align.
         let p_type = read_u32(&mut buf, endian)?;
         let p_offset = read_u32(&mut buf, endian)? as u64;
         let p_vaddr = read_u32(&mut buf, endian)? as u64;
@@ -423,80 +400,58 @@ impl<'a> Iterator for ProgramHeaderIter<'a> {
     }
 }
 
-pub struct Elf32SymIter<'a> {
+/// Iterator over either Elf32 or Elf64 symbol entries, picked by
+/// `is_64` at construction time.
+pub struct SymIter<'a> {
     bytes: &'a [u8],
     endianness: Endian,
+    is_64: bool,
 }
 
-impl<'a> Elf32SymIter<'a> {
+impl<'a> SymIter<'a> {
     #[inline]
-    pub fn new(bytes: &'a [u8], endianness: Endian) -> Self {
-        Elf32SymIter { bytes, endianness }
+    pub fn new(bytes: &'a [u8], endianness: Endian, is_64: bool) -> Self {
+        SymIter { bytes, endianness, is_64 }
     }
 }
 
-impl<'a> Iterator for Elf32SymIter<'a> {
+impl<'a> Iterator for SymIter<'a> {
     type Item = Sym;
     fn next(&mut self) -> Option<Self::Item> {
-        if self.bytes.len() < 16 {
-            return None;
+        if self.is_64 {
+            if self.bytes.len() < 24 {
+                return None;
+            }
+            let mut buf = &self.bytes[..24];
+            let st_name = read_u32(&mut buf, self.endianness)? as usize;
+            let st_info = read_u8(&mut buf)?;
+            let st_other = read_u8(&mut buf)?;
+            let st_shndx = read_u16(&mut buf, self.endianness)? as usize;
+            let st_value = read_u64(&mut buf, self.endianness)?;
+            let st_size = read_u64(&mut buf, self.endianness)?;
+            self.bytes = &self.bytes[24..];
+            Some(Sym { st_name, st_info, st_other, st_shndx, st_value, st_size })
+        } else {
+            if self.bytes.len() < 16 {
+                return None;
+            }
+            let mut buf = &self.bytes[..16];
+            let st_name = read_u32(&mut buf, self.endianness)? as usize;
+            let st_value = read_u32(&mut buf, self.endianness)? as u64;
+            let st_size = read_u32(&mut buf, self.endianness)? as u64;
+            let st_info = read_u8(&mut buf)?;
+            let st_other = read_u8(&mut buf)?;
+            let st_shndx = read_u16(&mut buf, self.endianness)? as usize;
+            self.bytes = &self.bytes[16..];
+            Some(Sym { st_name, st_info, st_other, st_shndx, st_value, st_size })
         }
-        let mut buf = &self.bytes[..16];
-        let st_name = read_u32(&mut buf, self.endianness)? as usize;
-        let st_value = read_u32(&mut buf, self.endianness)? as u64;
-        let st_size = read_u32(&mut buf, self.endianness)? as u64;
-        let st_info = read_u8(&mut buf)?;
-        let st_other = read_u8(&mut buf)?;
-        let st_shndx = read_u16(&mut buf, self.endianness)? as usize;
-        self.bytes = &self.bytes[16..];
-        Some(Sym { st_name, st_info, st_other, st_shndx, st_value, st_size })
     }
-}
-
-pub struct Elf64SymIter<'a> {
-    bytes: &'a [u8],
-    endianness: Endian,
-}
-
-impl<'a> Elf64SymIter<'a> {
-    #[inline]
-    pub fn new(bytes: &'a [u8], endianness: Endian) -> Self {
-        Elf64SymIter { bytes, endianness }
-    }
-}
-
-impl<'a> Iterator for Elf64SymIter<'a> {
-    type Item = Sym;
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.bytes.len() < 24 {
-            return None;
-        }
-        let mut buf = &self.bytes[..24];
-        let st_name = read_u32(&mut buf, self.endianness)? as usize;
-        let st_info = read_u8(&mut buf)?;
-        let st_other = read_u8(&mut buf)?;
-        let st_shndx = read_u16(&mut buf, self.endianness)? as usize;
-        let st_value = read_u64(&mut buf, self.endianness)?;
-        let st_size = read_u64(&mut buf, self.endianness)?;
-        self.bytes = &self.bytes[24..];
-        Some(Sym { st_name, st_info, st_other, st_shndx, st_value, st_size })
-    }
-}
-
-pub enum ElfKind<'a> {
-    Elf32(ElfImpl<'a>),
-    Elf64(ElfImpl<'a>),
-}
-
-#[inline]
-pub fn call_callback<'a, R, E: Elf<'a>, F: FnOnce(E) -> R>(elf: E, callback: F) -> R {
-    callback(elf)
 }
 
 const EI_CLASS: usize = 4;
 const EI_DATA: usize = 5;
 
-pub fn parse(bytes: &[u8]) -> Result<ElfKind<'_>, &'static str> {
+pub fn parse(bytes: &[u8]) -> Result<Elf<'_>, &'static str> {
     if bytes.len() < 16 {
         return Err("not an ELF file");
     }
@@ -511,8 +466,6 @@ pub fn parse(bytes: &[u8]) -> Result<ElfKind<'_>, &'static str> {
         _ => return Err("invalid bitness"),
     };
 
-    // Common header layout: e_ident(16) + e_type(2) + e_machine(2) +
-    // e_version(4), then e_entry/e_phoff/e_shoff which are word-sized.
     let header_len = if is_64 { 64 } else { 52 };
     let raw = bytes.get(0..header_len).ok_or("ELF header truncated")?;
     let mut e_ident = [0u8; 16];
@@ -546,18 +499,5 @@ pub fn parse(bytes: &[u8]) -> Result<ElfKind<'_>, &'static str> {
         e_flags, e_ehsize, e_phentsize, e_phnum, e_shentsize, e_shnum, e_shstrndx,
     };
 
-    let elf = ElfImpl { bytes, header, endianness, is_64 };
-    Ok(if is_64 { ElfKind::Elf64(elf) } else { ElfKind::Elf32(elf) })
-}
-
-/// `parse_elf!(elf, |inner| { ... })` lets us dispatch over the 32/64
-/// kinds without writing the match by hand at every call site.
-#[macro_export]
-macro_rules! parse_elf {
-    ($elf:expr, $callback:expr) => {{
-        match $elf {
-            $crate::elf::ElfKind::Elf32(inner) => $crate::elf::call_callback(inner, $callback),
-            $crate::elf::ElfKind::Elf64(inner) => $crate::elf::call_callback(inner, $callback),
-        }
-    }};
+    Ok(Elf { bytes, header, endianness, is_64 })
 }

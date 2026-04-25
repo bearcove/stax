@@ -29,18 +29,6 @@ impl Drop for Symbols {
 }
 
 fn load_symbols< 'a, F: FnMut( Range< u64 >, &'a str ) >( architecture: &str, bitness: Bitness, endianness: Endianness, sym_bytes: &[u8], strtab_bytes: &'a [u8], mut callback: F ) {
-    macro_rules! select_branch {
-        (if ($condition: expr) { $true_case:expr } else { $false_case:expr } => |$name:ident| $callback:expr) => {
-            if $condition {
-                let $name = $true_case;
-                $callback
-            } else {
-                let $name = $false_case;
-                $callback
-            }
-        }
-    }
-
     let is_arm = architecture == "arm";
     let endian = match endianness {
         Endianness::LittleEndian => Endian::Little,
@@ -48,31 +36,24 @@ fn load_symbols< 'a, F: FnMut( Range< u64 >, &'a str ) >( architecture: &str, bi
     };
 
     let strtab = Strtab::new( strtab_bytes, 0x0 );
-    select_branch! {
-        if (bitness == Bitness::B64) {
-            elf::Elf64SymIter::new( sym_bytes, endian )
-        } else {
-            elf::Elf32SymIter::new( sym_bytes, endian )
-        } => |syms| {
-            for sym in syms {
-                if !sym.is_function() || sym.st_size == 0 || sym.st_value == 0 {
-                    continue;
-                }
-                if let Some( Ok( name ) ) = strtab.get( sym.st_name ) {
-                    let mut start = sym.st_value as u64;
-                    if is_arm {
-                        // On ARM the lowest bit of the symbol value specifies
-                        // whenever the instruction it points at is an ARM or
-                        // a Thumb one, so we mask it out.
-                        // Source: ELF for the ARM Architecture
-                        //         http://infocenter.arm.com/help/topic/com.arm.doc.ihi0044f/IHI0044F_aaelf.pdf
-                        start = start & !1;
-                    }
-
-                    let end = start + sym.st_size as u64;
-                    callback( start..end, name );
-                }
+    let syms = elf::SymIter::new( sym_bytes, endian, bitness == Bitness::B64 );
+    for sym in syms {
+        if !sym.is_function() || sym.st_size == 0 || sym.st_value == 0 {
+            continue;
+        }
+        if let Some( Ok( name ) ) = strtab.get( sym.st_name ) {
+            let mut start = sym.st_value as u64;
+            if is_arm {
+                // On ARM the lowest bit of the symbol value specifies
+                // whether the instruction it points at is an ARM or a
+                // Thumb one, so we mask it out.
+                // Source: ELF for the ARM Architecture
+                //         http://infocenter.arm.com/help/topic/com.arm.doc.ihi0044f/IHI0044F_aaelf.pdf
+                start = start & !1;
             }
+
+            let end = start + sym.st_size as u64;
+            callback( start..end, name );
         }
     }
 }

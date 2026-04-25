@@ -71,7 +71,6 @@ pub(crate) struct Process {
     pid: u32,
     executable: String,
     memory_regions: RangeMap< Region >,
-    base_address_for_binary: HashMap< BinaryId, u64 >,
     address_space: Box< dyn IAddressSpace >,
     address_space_needs_reload: bool
 }
@@ -99,7 +98,6 @@ impl Process {
         self.address_space_needs_reload = false;
         let regions: Vec< _ > = self.memory_regions.values().cloned().collect();
         trace!( "Reloading address space for PID {}: {} regions", self.pid, regions.len() );
-        let base_address_for_binary = &mut self.base_address_for_binary;
 
         self.address_space.reload( regions, &mut |region, handle| {
             let binary_id = region.into();
@@ -110,23 +108,6 @@ impl Process {
                 } else {
                     for load_header in binary.load_headers.iter().cloned() {
                         handle.add_region_mapping( load_header );
-                    }
-
-                    // For compatibility with old profiling data.
-                    if let Some( &base_address ) = base_address_for_binary.get( &binary_id ) {
-                        let address = region.start - base_address;
-                        let size = region.end - region.start;
-                        debug!( "Old profiling data compatibility: adding PT_LOAD region for '{}': {:016X}-{:016X}", region.name, address, address + size );
-                        handle.add_region_mapping( LoadHeader {
-                            address,
-                            file_offset: 0,
-                            file_size: size,
-                            memory_size: size,
-                            alignment: 1,
-                            is_readable: true,
-                            is_writable: false,
-                            is_executable: true
-                        });
                     }
                 }
 
@@ -745,7 +726,6 @@ pub(crate) fn read_data< F >( args: ReadDataArgs, mut on_event: F ) -> Result< S
                     pid,
                     executable,
                     memory_regions: RangeMap::new(),
-                    base_address_for_binary: HashMap::new(),
                     address_space,
                     address_space_needs_reload: true
                 };

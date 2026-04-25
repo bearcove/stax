@@ -16,7 +16,7 @@ use object::elf::{
 use gimli;
 use speedy::{Readable, Writable};
 
-use crate::elf::{self, Elf as _, Endian};
+use crate::elf::{self, Endian};
 use crate::utils::{HexValue, StableIndex, get_major, get_minor};
 use crate::types::{Inode, Bitness, Endianness};
 
@@ -197,7 +197,7 @@ impl BinaryData {
 
         {
             let elf = elf::parse( &blob ).map_err( |err| io::Error::new( io::ErrorKind::Other, err ) )?;
-            parse_elf!( elf, |elf| {
+            let result: io::Result<()> = (|| {
                 endianness = match elf.endianness() {
                     Endian::Little => Endianness::LittleEndian,
                     Endian::Big => Endianness::BigEndian
@@ -318,7 +318,8 @@ impl BinaryData {
                 }
 
                 Ok(())
-            })?;
+            })();
+            result?;
         }
 
         let binary = BinaryData {
@@ -477,30 +478,28 @@ impl BinaryData {
 
     fn get_section_range( &self, name: &str ) -> Option< Range< usize > > {
         let elf = elf::parse( &self.blob ).map_err( |err| io::Error::new( io::ErrorKind::Other, err ) ).unwrap();
-        parse_elf!( elf, |elf| {
-            let name_strtab_header = elf.get_section_header( elf.header().e_shstrndx as usize ).unwrap();
-            let name_strtab = elf.get_strtab( &name_strtab_header ).unwrap();
+        let name_strtab_header = elf.get_section_header( elf.header().e_shstrndx as usize ).unwrap();
+        let name_strtab = elf.get_strtab( &name_strtab_header ).unwrap();
 
-            for header in elf.section_headers() {
-                let section_name = match name_strtab.get( header.sh_name ) {
-                    Some( Ok( name ) ) => name,
-                    _ => continue
-                };
+        for header in elf.section_headers() {
+            let section_name = match name_strtab.get( header.sh_name ) {
+                Some( Ok( name ) ) => name,
+                _ => continue
+            };
 
-                if section_name != name {
-                    continue;
-                }
-
-                let offset = header.sh_offset as usize;
-                let length = header.sh_size as usize;
-                let range = offset..offset + length;
-                if let Some( _ ) = self.blob.get( range.clone() ) {
-                    return Some( range );
-                }
+            if section_name != name {
+                continue;
             }
 
-            None
-        })
+            let offset = header.sh_offset as usize;
+            let length = header.sh_size as usize;
+            let range = offset..offset + length;
+            if let Some( _ ) = self.blob.get( range.clone() ) {
+                return Some( range );
+            }
+        }
+
+        None
     }
 
     #[inline]
