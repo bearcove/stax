@@ -1903,6 +1903,9 @@ dependencies = [
 [[package]]
 name = "xtask"
 version = "0.0.0"
+dependencies = [
+ "speedy",
+]
 
 [[package]]
 name = "yaxpeax-arch"

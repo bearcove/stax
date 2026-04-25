@@ -6,3 +6,4 @@ publish = false
 description = "Dev-only entrypoints (cargo xtask install, ...)."
 
 [dependencies]
+speedy = "0.8"

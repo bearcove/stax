@@ -8,8 +8,12 @@
 use std::env;
 use std::error::Error;
 use std::fs;
-use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
+
+mod migrate_archive;
 
 const BIN_NAME: &str = "nperf";
 
@@ -18,6 +22,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let task = args.get(1).map(String::as_str).unwrap_or("");
     match task {
         "install" => install()?,
+        "migrate-archives" => migrate_archive::run(&args[2..])?,
         "" | "help" | "--help" | "-h" => {
             print_usage();
         }
@@ -35,8 +40,11 @@ fn print_usage() {
     eprintln!();
     eprintln!("Subcommands:");
     eprintln!(
-        "  install    Build {bin} (release), copy to ~/.cargo/bin/{bin}, codesign on macOS",
+        "  install              Build {bin} (release), copy to ~/.cargo/bin/{bin}, codesign on macOS",
         bin = BIN_NAME
+    );
+    eprintln!(
+        "  migrate-archives     Rewrite v1 .nperf archives in place to v2 (one-shot fixture migration)"
     );
 }
 
