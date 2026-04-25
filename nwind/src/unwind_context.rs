@@ -96,6 +96,11 @@ impl< 'a, A: Architecture > UnwindHandle< 'a, A > {
 
         self.ctx.nth_frame += 1;
 
+        if self.ctx.nth_frame > 1000 {
+            warn!( "possible infinite loop detected and avoided" );
+            return false;
+        }
+
         self.ctx.address = self.ctx.regs.get( A::INSTRUCTION_POINTER_REG ).unwrap();
         debug!( "Unwinding #{} -> #{} at: 0x{:016X}", self.ctx.nth_frame - 1, self.ctx.nth_frame, self.ctx.address );
 

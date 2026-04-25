@@ -59,9 +59,10 @@ pub fn main( args: args::RecordArgs ) -> Result< (), Box< dyn Error > > {
     });
 
     info!( "Opening perf events for process with PID {}...", controller.pid() );
-    let mut perf = PerfGroup::open( controller.pid(), args.frequency, args.stack_size, args.event_source.unwrap_or( EventSource::HwCpuCycles ) );
+    let stop_processes = !args.do_not_send_sigstop;
+    let mut perf = PerfGroup::open( controller.pid(), args.frequency, args.stack_size, args.event_source.unwrap_or( EventSource::HwCpuCycles ), stop_processes );
     if perf.is_err() && args.event_source.is_none() {
-        perf = PerfGroup::open( controller.pid(), args.frequency, args.stack_size, args.event_source.unwrap_or( EventSource::SwCpuClock ) );
+        perf = PerfGroup::open( controller.pid(), args.frequency, args.stack_size, args.event_source.unwrap_or( EventSource::SwCpuClock ), stop_processes );
     }
 
     let mut perf = match perf {

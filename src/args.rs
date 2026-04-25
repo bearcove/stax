@@ -194,7 +194,11 @@ pub struct RecordArgs {
     pub discard_all: bool,
 
     #[structopt(flatten)]
-    pub profiler_args: GenericProfilerArgs
+    pub profiler_args: GenericProfilerArgs,
+
+    /// Do not send SIGSTOP before hooking into the process
+    #[structopt(long)]
+    pub do_not_send_sigstop: bool,
 }
 
 #[derive(StructOpt, Debug)]
