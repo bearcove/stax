@@ -33,12 +33,19 @@ pub struct BinaryLoadedEvent<'a> {
     pub base_avma: u64,
     /// Size of the image's `__TEXT` segment.
     pub vmsize: u64,
+    /// SVMA of the image's `__TEXT` segment, i.e. the address the linker
+    /// laid out symbols against. Subtracting this from a runtime PC and
+    /// adding the value back to a `MachOSymbol::start_svma` lets the
+    /// analysis side resolve a sample address without knowing the slide.
+    pub text_svma: u64,
     pub path: &'a str,
     /// Mach-O LC_UUID, if present.
     pub uuid: Option<[u8; 16]>,
     /// CPU type / subtype string (e.g. `"arm64"`, `"x86_64"`).
     pub arch: Option<&'static str>,
     pub is_executable: bool,
+    /// Symbols read from the image's `LC_SYMTAB`, addresses as SVMAs.
+    pub symbols: &'a [crate::proc_maps::MachOSymbol],
 }
 
 pub struct BinaryUnloadedEvent<'a> {

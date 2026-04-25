@@ -806,8 +806,15 @@ pub(crate) fn read_data< F >( args: ReadDataArgs, mut on_event: F ) -> Result< S
                 let binary = state.binary_by_id.get_mut( &binary_id ).unwrap();
                 Arc::get_mut( &mut binary.string_tables ).unwrap().add( offset, data.into_owned() );
             },
-            Packet::MachOSymbolTable { path, .. } => {
-                warn!( "MachOSymbolTable encountered for {:?}; mac analysis not yet implemented, skipping", String::from_utf8_lossy( &path ) );
+            Packet::MachOSymbolTable { inode, path, text_svma: _, entries } => {
+                let binary_name = String::from_utf8_lossy( &path );
+                let binary_id = to_binary_id( inode, &binary_name );
+                let binary = state.binary_by_id.get_mut( &binary_id ).unwrap();
+                let resolved = entries.into_iter().map( |e| {
+                    let name = String::from_utf8_lossy( &e.name ).into_owned();
+                    (e.start_svma..e.end_svma, name)
+                });
+                binary.symbols = Some( Symbols::from_resolved_entries( resolved ) );
             },
             Packet::ElfSymbolTable { inode, offset, data, string_table_offset, is_dynamic, path } => {
                 let binary_name = String::from_utf8_lossy( &path );

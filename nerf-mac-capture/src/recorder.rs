@@ -183,10 +183,12 @@ fn emit_binary_loaded<S: SampleSink>(pid: u32, lib: &DyldInfo, sink: &mut S) {
         pid,
         base_avma: lib.base_avma,
         vmsize: lib.vmsize,
+        text_svma: lib.module_info.base_svma,
         path: &lib.file,
         uuid: lib.uuid,
         arch: lib.arch,
         is_executable: lib.is_executable,
+        symbols: &lib.symbols,
     });
 }
 

@@ -21,8 +21,8 @@ use nerf_mac_capture::{
 };
 
 use crate::archive::{
-    BinaryFormat, Bitness, FramedPacket, Inode, Packet, Platform, UserFrame, ARCHIVE_MAGIC,
-    ARCHIVE_VERSION,
+    BinaryFormat, Bitness, FramedPacket, Inode, MachOSymbolEntry, Packet, Platform, UserFrame,
+    ARCHIVE_MAGIC, ARCHIVE_VERSION,
 };
 use crate::args::{self, TargetProcess};
 use crate::utils::SigintHandler;
@@ -141,11 +141,17 @@ fn native_arch_name() -> &'static str {
 /// SampleSink events.
 struct MacSink {
     writer: BufWriter<File>,
+    /// Tracks the address range each loaded image occupies so we can emit
+    /// the exact `MemoryRegionUnmap` range when the image is unloaded.
+    loaded_ranges: std::collections::HashMap<u64, u64>,
 }
 
 impl MacSink {
     fn new(writer: BufWriter<File>, _pid: u32) -> io::Result<Self> {
-        Ok(Self { writer })
+        Ok(Self {
+            writer,
+            loaded_ranges: std::collections::HashMap::new(),
+        })
     }
 
     fn write_packet(&mut self, packet: Packet<'_>) -> io::Result<()> {
@@ -184,14 +190,35 @@ impl SampleSink for MacSink {
     }
 
     fn on_binary_loaded(&mut self, ev: BinaryLoadedEvent<'_>) {
-        // Emit BinaryInfo (Mach-O variant) so the analysis side knows about
-        // the image. We use a synthetic Inode keyed off the base address.
-        let inode = avma_pseudo_inode(ev.base_avma);
+        // We key Mach-O binaries by path (BinaryId::ByName) since macOS
+        // doesn't surface a stable per-image inode the way Linux does.
+        // Inode::empty() trips the `is_invalid()` check on the analysis
+        // side so it falls back to the name-keyed path consistently.
+        let inode = Inode::empty();
+        let path_bytes: Vec<u8> = ev.path.as_bytes().to_owned();
+
+        // Synthesize a single LoadHeader covering the __TEXT segment so
+        // nwind's address_space.reload can compute the slide
+        // (base_avma - text_svma) for symbol lookups.
+        let load_headers = vec![nwind::LoadHeader {
+            address: ev.text_svma,
+            file_offset: 0,
+            file_size: ev.vmsize,
+            memory_size: ev.vmsize,
+            // 16K pages on aarch64-apple-darwin, 4K on x86_64. Use 16K
+            // unconditionally; nwind only uses this for alignment of file
+            // offsets, not for any kernel-level mmap.
+            alignment: 0x4000,
+            is_readable: true,
+            is_writable: false,
+            is_executable: true,
+        }];
+
         if let Err(err) = self.write_packet(Packet::BinaryInfo {
             inode,
             symbol_table_count: 0,
-            path: Cow::Owned(ev.path.as_bytes().to_owned()),
-            load_headers: Cow::Owned(Vec::new()),
+            path: Cow::Owned(path_bytes.clone()),
+            load_headers: Cow::Owned(load_headers),
             format: BinaryFormat::MachO,
         }) {
             warn!("on_binary_loaded BinaryInfo write failed: {}", err);
@@ -202,22 +229,65 @@ impl SampleSink for MacSink {
             let _ = self.write_packet(Packet::BuildId {
                 inode,
                 build_id: uuid.to_vec(),
-                path: Cow::Owned(ev.path.as_bytes().to_owned()),
+                path: Cow::Owned(path_bytes.clone()),
             });
         }
+
+        if !ev.symbols.is_empty() {
+            let entries: Vec<MachOSymbolEntry> = ev
+                .symbols
+                .iter()
+                .map(|s| MachOSymbolEntry {
+                    start_svma: s.start_svma,
+                    end_svma: s.end_svma,
+                    name: s.name.clone(),
+                })
+                .collect();
+            let _ = self.write_packet(Packet::MachOSymbolTable {
+                inode,
+                path: Cow::Owned(path_bytes.clone()),
+                text_svma: ev.text_svma,
+                entries,
+            });
+        }
+
+        // The runtime memory region. The analysis side keys binary lookups
+        // off region.name (since major/minor are 0), so the name here must
+        // match the BinaryInfo path verbatim. We set `inode: 1` so the
+        // address-space reload code doesn't drop the region as an anonymous
+        // mapping (its filter is `inode == 0 && name != "[vdso]"`).
+        self.loaded_ranges.insert(ev.base_avma, ev.vmsize);
+        let _ = self.write_packet(Packet::MemoryRegionMap {
+            pid: ev.pid,
+            range: ev.base_avma..ev.base_avma + ev.vmsize,
+            is_read: true,
+            is_write: false,
+            is_executable: true,
+            is_shared: false,
+            file_offset: 0,
+            inode: 1,
+            major: 0,
+            minor: 0,
+            name: Cow::Owned(path_bytes.clone()),
+        });
 
         let _ = self.write_packet(Packet::BinaryLoaded {
             pid: ev.pid,
             inode: Some(inode),
-            name: Cow::Owned(ev.path.as_bytes().to_owned()),
+            name: Cow::Owned(path_bytes),
         });
     }
 
     fn on_binary_unloaded(&mut self, ev: BinaryUnloadedEvent<'_>) {
-        let inode = avma_pseudo_inode(ev.base_avma);
+        if let Some(vmsize) = self.loaded_ranges.remove(&ev.base_avma) {
+            let _ = self.write_packet(Packet::MemoryRegionUnmap {
+                pid: ev.pid,
+                range: ev.base_avma..ev.base_avma + vmsize,
+            });
+        }
         let _ = self.write_packet(Packet::BinaryUnloaded {
             pid: ev.pid,
-            inode: Some(inode),
+            inode: Some(Inode::empty()),
             name: Cow::Owned(ev.path.as_bytes().to_owned()),
         });
     }
@@ -228,18 +298,6 @@ impl SampleSink for MacSink {
             tid: ev.tid,
             name: Cow::Owned(ev.name.as_bytes().to_owned()),
         });
-    }
-}
-
-/// nperf's archive uses an `Inode` to identify a binary across packets.
-/// macOS doesn't have a perf-style inode-on-disk identity per loaded image
-/// (the same dyld_shared_cache slice is shared by many processes), so we
-/// fabricate one by hashing the base AVMA into the `inode` field.
-fn avma_pseudo_inode(base_avma: u64) -> Inode {
-    Inode {
-        inode: base_avma,
-        dev_major: 0,
-        dev_minor: 0,
     }
 }
 

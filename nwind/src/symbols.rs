@@ -179,7 +179,64 @@ impl Symbols {
         let rhs: &dyn ByteContainer< Output = [u8] > = &**strtab_owner;
         to_ptr( lhs ) == to_ptr( rhs )
     }
+
+    /// Build a `Symbols` from already-resolved `(start..end, name)` entries.
+    ///
+    /// Useful when the parser is upstream of nwind (e.g. mac records that
+    /// pre-resolve Mach-O `LC_SYMTAB` at capture time, since the unwind side
+    /// of nwind doesn't know Mach-O). The names are concatenated into a
+    /// single owned buffer so the final `&'static str` references are valid
+    /// for the lifetime of the resulting `Symbols`.
+    pub fn from_resolved_entries< I, S >( entries: I ) -> Self
+        where I: IntoIterator< Item = ( Range< u64 >, S ) >,
+              S: AsRef< str >
+    {
+        let mut buffer: Vec< u8 > = Vec::new();
+        let mut staged: Vec< ( Range< u64 >, Range< usize > ) > = Vec::new();
+        for ( range, name ) in entries {
+            let bytes = name.as_ref().as_bytes();
+            let start = buffer.len();
+            buffer.extend_from_slice( bytes );
+            let end = buffer.len();
+            staged.push( ( range, start..end ) );
+        }
+
+        let owner: Arc< OwnedBuffer > = Arc::new( OwnedBuffer { bytes: buffer } );
+
+        // SAFETY: the Arc<OwnedBuffer> we store as `strtab_owner` keeps the
+        // backing bytes alive for as long as `Symbols` is alive. The
+        // `&'static str` references below actually point into that Arc's
+        // buffer, so the static lifetime is a stand-in for "as long as the
+        // Symbols exists" -- the same trick `load()` uses above.
+        let symbols: Vec< ( Range< u64 >, &'static str ) > = staged
+            .into_iter()
+            .filter_map( |( range, str_range )| {
+                let bytes = &owner.bytes[ str_range ];
+                let s: &str = std::str::from_utf8( bytes ).ok()?;
+                let s: &'static str = unsafe { mem::transmute( s ) };
+                Some( ( range, s ) )
+            })
+            .collect();
+
+        Symbols {
+            strtab_owner: ManuallyDrop::new( owner ),
+            symbols: ManuallyDrop::new( RangeMap::from_vec( symbols ) )
+        }
+    }
 }
+
+struct OwnedBuffer {
+    bytes: Vec< u8 >
+}
+
+impl Index< Range< u64 > > for OwnedBuffer {
+    type Output = [u8];
+    fn index( &self, range: Range< u64 > ) -> &[u8] {
+        &self.bytes[ range.start as usize..range.end as usize ]
+    }
+}
+
+unsafe impl StableIndex for OwnedBuffer {}
 
 #[inline]
 fn to_ptr< T: ?Sized >( reference: &T ) -> *const u8 {

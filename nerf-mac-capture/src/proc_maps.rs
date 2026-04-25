@@ -43,8 +43,9 @@ use mach2::{structs::arm_thread_state64_t, thread_status::ARM_THREAD_STATE64};
 #[cfg(target_arch = "x86_64")]
 use mach2::{structs::x86_thread_state64_t, thread_status::x86_THREAD_STATE64};
 use object::macho::{
-    MachHeader64, SegmentCommand64, CPU_SUBTYPE_ARM64E, CPU_SUBTYPE_ARM64_ALL, CPU_SUBTYPE_MASK,
-    CPU_SUBTYPE_X86_64_ALL, CPU_SUBTYPE_X86_64_H, CPU_TYPE_ARM64, CPU_TYPE_X86_64, MH_EXECUTE,
+    MachHeader64, Nlist64, SegmentCommand64, SymtabCommand, CPU_SUBTYPE_ARM64E,
+    CPU_SUBTYPE_ARM64_ALL, CPU_SUBTYPE_MASK, CPU_SUBTYPE_X86_64_ALL, CPU_SUBTYPE_X86_64_H,
+    CPU_TYPE_ARM64, CPU_TYPE_X86_64, MH_EXECUTE, N_SECT, N_STAB, N_TYPE,
 };
 use object::read::macho::{MachHeader, Section, Segment};
 use object::LittleEndian;
@@ -66,6 +67,21 @@ pub struct DyldInfo {
     pub uuid: Option<[u8; 16]>,
     pub arch: Option<&'static str>,
     pub unwind_sections: UnwindSectionInfo,
+    /// Symbols parsed from `LC_SYMTAB` of the loaded image. Empty if the
+    /// image lives in the dyld_shared_cache or LC_SYMTAB couldn't be read
+    /// (e.g. `__LINKEDIT` not mappable). Each entry's addresses are SVMAs.
+    pub symbols: Vec<MachOSymbol>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MachOSymbol {
+    /// Symbol VMA as it appears in the binary's `nlist_64::n_value` (i.e.
+    /// before applying any ASLR slide).
+    pub start_svma: u64,
+    /// Synthesized end SVMA: the start of the next symbol within the same
+    /// section, or `start_svma + 4` as a fallback.
+    pub end_svma: u64,
+    pub name: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -322,35 +338,74 @@ fn get_dyld_image_info(
     let endian = LittleEndian;
     let commands_start = base_avma + mem::size_of::<MachHeader64<LittleEndian>>() as u64;
     let commands_end = commands_start + header.sizeofcmds(endian) as u64;
-    let header_and_command_data = memory.get_slice(base_avma..commands_end)?;
+    // Take an owned copy of the header + load-commands region so we don't
+    // hold a borrow on `memory` while we recursively call back into it
+    // (e.g. read_symtab below also calls memory.get_slice).
+    let header_and_command_data: Vec<u8> = memory
+        .get_slice(base_avma..commands_end)?
+        .to_vec();
     let mut load_commands = header
-        .load_commands(endian, header_and_command_data, 0)
+        .load_commands(endian, header_and_command_data.as_slice(), 0)
         .map_err(|_| kernel_error::KernelError::InvalidValue)?;
 
     let mut base_svma = 0;
     let mut vmsize: u64 = 0;
     let mut uuid: Option<[u8; 16]> = None;
     let mut sections = HashMap::new();
+    let mut linkedit: Option<(u64, u64)> = None; // (vmaddr_svma, fileoff)
+    let mut symtab: Option<(u32, u32, u32, u32)> = None; // (symoff, nsyms, stroff, strsize)
 
     while let Ok(Some(command)) = load_commands.next() {
         if let Ok(Some((segment, section_data))) = SegmentCommand64::from_command(command) {
-            if segment.name() == b"__TEXT" {
-                base_svma = segment.vmaddr(endian);
-                vmsize = segment.vmsize(endian);
+            match segment.name() {
+                b"__TEXT" => {
+                    base_svma = segment.vmaddr(endian);
+                    vmsize = segment.vmsize(endian);
 
-                for section in segment
-                    .sections(endian, section_data)
-                    .map_err(|_| KernelError::InvalidArgument)?
-                {
-                    let addr = section.addr.get(endian);
-                    let size = section.size.get(endian);
-                    sections.insert(section.name(), (addr, size));
+                    for section in segment
+                        .sections(endian, section_data)
+                        .map_err(|_| KernelError::InvalidArgument)?
+                    {
+                        let addr = section.addr.get(endian);
+                        let size = section.size.get(endian);
+                        sections.insert(section.name(), (addr, size));
+                    }
                 }
+                b"__LINKEDIT" => {
+                    linkedit = Some((segment.vmaddr(endian), segment.fileoff(endian)));
+                }
+                _ => {}
             }
         } else if let Ok(Some(uuid_command)) = command.uuid() {
             uuid = Some(uuid_command.uuid);
+        } else if let Ok(Some(stc)) = command.symtab() {
+            let stc: &SymtabCommand<LittleEndian> = stc;
+            symtab = Some((
+                stc.symoff.get(endian),
+                stc.nsyms.get(endian),
+                stc.stroff.get(endian),
+                stc.strsize.get(endian),
+            ));
         }
     }
+
+    let symbols = match (linkedit, symtab) {
+        (Some((linkedit_svma, linkedit_fileoff)), Some((symoff, nsyms, stroff, strsize))) => {
+            read_symtab(
+                memory,
+                base_avma,
+                base_svma,
+                linkedit_svma,
+                linkedit_fileoff,
+                symoff,
+                nsyms,
+                stroff,
+                strsize,
+            )
+            .unwrap_or_default()
+        }
+        _ => Vec::new(),
+    };
 
     let section_svma_range = |name: &[u8]| -> Option<Range<u64>> {
         sections.get(name).map(|(addr, size)| *addr..*addr + *size)
@@ -378,7 +433,106 @@ fn get_dyld_image_info(
             eh_frame_section: sections.get(&b"__eh_frame"[..]).cloned(),
             text_segment: Some((base_svma, vmsize)),
         },
+        symbols,
     })
+}
+
+/// Read the `LC_SYMTAB` payload (nlist_64 array + string table) from the
+/// loaded image's `__LINKEDIT` segment in the target task, parse function
+/// symbols, and synthesize end addresses by sorting and looking at the next
+/// entry. Quietly returns an empty vec on any failure -- e.g. images that
+/// live in the dyld_shared_cache and don't have their own __LINKEDIT slice
+/// fully readable.
+#[allow(clippy::too_many_arguments)]
+fn read_symtab(
+    memory: &mut ForeignMemory,
+    base_avma: u64,
+    base_svma: u64,
+    linkedit_svma: u64,
+    linkedit_fileoff: u64,
+    symoff: u32,
+    nsyms: u32,
+    stroff: u32,
+    strsize: u32,
+) -> kernel_error::Result<Vec<MachOSymbol>> {
+    if nsyms == 0 || strsize == 0 {
+        return Ok(Vec::new());
+    }
+
+    // Slide between SVMA and AVMA.
+    let slide = base_avma.wrapping_sub(base_svma);
+    // Runtime address of __LINKEDIT.
+    let linkedit_avma = linkedit_svma.wrapping_add(slide);
+    // Translate file offsets within __LINKEDIT into runtime addresses.
+    let symtab_avma = linkedit_avma + (symoff as u64 - linkedit_fileoff);
+    let strtab_avma = linkedit_avma + (stroff as u64 - linkedit_fileoff);
+
+    let symtab_size = nsyms as u64 * mem::size_of::<Nlist64<LittleEndian>>() as u64;
+    let symtab_bytes: Vec<u8> = memory
+        .get_slice(symtab_avma..symtab_avma + symtab_size)?
+        .to_vec();
+    let strtab_bytes: Vec<u8> = memory
+        .get_slice(strtab_avma..strtab_avma + strsize as u64)?
+        .to_vec();
+
+    let endian = LittleEndian;
+    let nlist_size = mem::size_of::<Nlist64<LittleEndian>>();
+    let mut staged: Vec<(u64, &[u8])> = Vec::new();
+    for i in 0..nsyms as usize {
+        let off = i * nlist_size;
+        if off + nlist_size > symtab_bytes.len() {
+            break;
+        }
+        // SAFETY: nlist_64 is repr(C); we read aligned (offsets in the
+        // loaded image are 4-byte aligned for the symtab).
+        let nlist: &Nlist64<LittleEndian> =
+            unsafe { &*(symtab_bytes.as_ptr().add(off) as *const Nlist64<LittleEndian>) };
+
+        let n_type = nlist.n_type;
+        // Skip stabs (debug symbols) and undefined / type-N_INDR entries.
+        if n_type & N_STAB != 0 {
+            continue;
+        }
+        if n_type & N_TYPE != N_SECT {
+            continue;
+        }
+        let n_value = nlist.n_value.get(endian);
+        if n_value == 0 {
+            continue;
+        }
+        let n_strx = nlist.n_strx.get(endian) as usize;
+        if n_strx >= strtab_bytes.len() {
+            continue;
+        }
+        // C string from strtab[n_strx..].
+        let name_end = strtab_bytes[n_strx..]
+            .iter()
+            .position(|&b| b == 0)
+            .map(|p| n_strx + p)
+            .unwrap_or(strtab_bytes.len());
+        if name_end == n_strx {
+            continue;
+        }
+        let name_slice = &strtab_bytes[n_strx..name_end];
+        staged.push((n_value, name_slice));
+    }
+
+    // Sort by start address, then synthesize end addresses (gap to next).
+    staged.sort_by_key(|&(start, _)| start);
+    let mut out = Vec::with_capacity(staged.len());
+    for window in 0..staged.len() {
+        let (start, name) = staged[window];
+        let end = staged
+            .get(window + 1)
+            .map(|&(s, _)| s)
+            .unwrap_or(start.saturating_add(4));
+        out.push(MachOSymbol {
+            start_svma: start,
+            end_svma: end,
+            name: name.to_vec(),
+        });
+    }
+    Ok(out)
 }
 
 // bindgen seemed to put all the members for this struct as a single opaque blob:

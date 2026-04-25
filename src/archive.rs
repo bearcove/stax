@@ -161,11 +161,23 @@ pub enum Packet< 'a > {
     },
     MachOSymbolTable {
         inode: Inode,
-        offset: u64,
-        string_table_offset: u64,
-        data: Cow< 'a, [u8] >,
-        path: Cow< 'a, [u8] >
+        path: Cow< 'a, [u8] >,
+        /// Address of the binary's `__TEXT` segment in its own preferred
+        /// VM (i.e. the SVMA the linker laid out symbols against). At
+        /// load time the symbols are shifted by `(base_avma - text_svma)`.
+        text_svma: u64,
+        /// Pre-resolved symbols. `start_svma` and `end_svma` are SVMAs as
+        /// recorded in the `nlist_64::n_value` field plus a synthesized
+        /// length (the gap to the next symbol within the same section).
+        entries: Vec< MachOSymbolEntry >
     }
+}
+
+#[derive(Clone, Debug, Readable, Writable)]
+pub struct MachOSymbolEntry {
+    pub start_svma: u64,
+    pub end_svma: u64,
+    pub name: Vec< u8 >
 }
 
 #[derive(Debug)]
