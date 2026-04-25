@@ -32,7 +32,8 @@ features = ["log", "rustc-demangle"]
 default-features = false
 
 [dev-dependencies]
-quickcheck = { version = "0.9", default-features = false, features = ["log"] }
+quickcheck = { version = "1", default-features = false, features = ["use_logging"] }
+quickcheck_macros = "1"
 criterion = "0.5"
 env_logger = "0.11"
 

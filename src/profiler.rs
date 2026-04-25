@@ -211,7 +211,7 @@ mod tests {
     struct TestRegion( u64, u64, u64, &'static str );
 
     impl Arbitrary for TestRegion {
-        fn arbitrary< G: Gen >( gen: &mut G ) -> Self {
+        fn arbitrary( gen: &mut Gen ) -> Self {
             let start = u8::arbitrary( gen ) as u64;
             let end = u8::arbitrary( gen ) as u64;
             let (start, end) = if start < end { (start, end) } else { (end, start) };
@@ -227,17 +227,16 @@ mod tests {
         }
     }
 
-    quickcheck! {
-        fn reloading_never_panics( all_regions: Vec< Vec< TestRegion > > ) -> bool {
-            let _ = env_logger::try_init();
+    #[quickcheck_macros::quickcheck]
+    fn reloading_never_panics( all_regions: Vec< Vec< TestRegion > > ) -> bool {
+        let _ = env_logger::try_init();
 
-            let all_regions = all_regions.into_iter().map( |regions| regions.into_iter().map( |entry| {
-                region( entry.0, entry.1, entry.2, entry.3 )
-            }).collect() ).collect();
+        let all_regions = all_regions.into_iter().map( |regions| regions.into_iter().map( |entry| {
+            region( entry.0, entry.1, entry.2, entry.3 )
+        }).collect() ).collect();
 
-            test_reload_with_regions( all_regions );
-            true
-        }
+        test_reload_with_regions( all_regions );
+        true
     }
 }
 
