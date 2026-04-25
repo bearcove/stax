@@ -86,26 +86,46 @@ pub fn write_trace<W: Write>(
     }
     sample_streams.sort_by_key(|&(_, _, s, _)| s.timestamp_ns);
 
-    // Anchor for the ClockSnapshot.
     let anchor_ns = sample_streams
         .first()
         .map(|&(_, _, s, _)| s.timestamp_ns)
         .unwrap_or(0);
 
-    // Bootstrap packet: ClockSnapshot + ProcessDescriptor + InternedData,
-    // cleared + first_on_sequence.
-    write_bootstrap_packet(w, process_pid, process_name, anchor_ns, &interner)?;
+    // ClockSnapshot first (own packet, no incremental-state interaction).
+    write_clock_snapshot(w, anchor_ns)?;
 
-    // Per-sample packets.
-    for (tid, pid, sample, cs_iid) in &sample_streams {
+    // ProcessDescriptor (own packet, gives the timeline a labelled track).
+    write_process_descriptor(w, process_pid, process_name)?;
+
+    // Build the InternedData payload once; we'll attach it to the first
+    // sample's TracePacket. Perfetto's stack-profile parser only finds
+    // interned ids in the same packet sequence's incremental state, and
+    // sequencing it with the first user packet (rather than as a standalone
+    // bootstrap packet) matches the structure traced_perf actually emits.
+    let interned_payload = interner.encode_interned_data()?;
+
+    for (idx, (tid, pid, sample, cs_iid)) in sample_streams.iter().enumerate() {
+        let is_first = idx == 0;
         write_message(w, FIELD_TRACE_PACKET, |buf| {
             write_uint64(buf, tp::TIMESTAMP, sample.timestamp_ns)?;
             write_uint32(buf, tp::TRUSTED_PACKET_SEQUENCE_ID, SEQUENCE_ID)?;
-            write_uint64(buf, tp::SEQUENCE_FLAGS, SEQ_FLAG_NEEDS_INCREMENTAL_STATE)?;
+            // First packet on the sample sequence: clear + needs incremental
+            // state, plus the global InternedData. Subsequent packets just
+            // need to declare they consume incremental state.
+            let flags = if is_first {
+                SEQ_FLAG_INCREMENTAL_STATE_CLEARED | SEQ_FLAG_NEEDS_INCREMENTAL_STATE
+            } else {
+                SEQ_FLAG_NEEDS_INCREMENTAL_STATE
+            };
+            write_uint64(buf, tp::SEQUENCE_FLAGS, flags)?;
+            if is_first {
+                write_uint64(buf, tp::FIRST_PACKET_ON_SEQUENCE, 1)?;
+                write_bytes(buf, tp::INTERNED_DATA, &interned_payload)?;
+            }
             write_message(buf, tp::PERF_SAMPLE, |ps| {
-                // PerfSample fields: cpu=1, pid=2, tid=3, callstack_iid=4,
+                // PerfSample: cpu=1, pid=2, tid=3, callstack_iid=4,
                 // cpu_mode=5, timebase_count=6.
-                write_uint32(ps, 1, 0)?; // cpu (we don't track it; 0 placeholder)
+                write_uint32(ps, 1, 0)?;
                 write_uint32(ps, 2, *pid)?;
                 write_uint32(ps, 3, *tid)?;
                 write_uint64(ps, 4, *cs_iid)?;
@@ -116,30 +136,17 @@ pub fn write_trace<W: Write>(
         })?;
     }
 
-    let _ = threads; // thread names are currently surfaced only via the
-                     // sample-time tid; we could emit ThreadDescriptors
-                     // for richer UI labels, but PerfSample's tid is enough
-                     // for the timeline + flame views.
-
+    let _ = threads;
     Ok(())
 }
 
-fn write_bootstrap_packet<W: Write>(
-    w: &mut W,
-    process_pid: u32,
-    process_name: &str,
-    anchor_ns: u64,
-    interner: &Interner,
-) -> io::Result<()> {
-    // First, the ClockSnapshot. Some Perfetto-internal parsers demand a
-    // mapping for MONOTONIC; emitting one keeps `clock_sync_failure_*`
-    // import warnings out of the way.
+fn write_clock_snapshot<W: Write>(w: &mut W, anchor_ns: u64) -> io::Result<()> {
     write_message(w, FIELD_TRACE_PACKET, |buf| {
         write_uint32(buf, tp::TRUSTED_PACKET_SEQUENCE_ID, SEQUENCE_ID)?;
         write_message(buf, tp::CLOCK_SNAPSHOT, |snap| {
             write_message(snap, 1 /* clocks */, |c| {
-                write_uint64(c, 1 /* clock_id */, BUILTIN_CLOCK_BOOTTIME)?;
-                write_uint64(c, 2 /* timestamp */, anchor_ns)?;
+                write_uint64(c, 1, BUILTIN_CLOCK_BOOTTIME)?;
+                write_uint64(c, 2, anchor_ns)?;
                 Ok(())
             })?;
             write_message(snap, 1 /* clocks */, |c| {
@@ -147,41 +154,27 @@ fn write_bootstrap_packet<W: Write>(
                 write_uint64(c, 2, anchor_ns)?;
                 Ok(())
             })?;
-            write_uint64(snap, 2 /* primary_trace_clock */, BUILTIN_CLOCK_BOOTTIME)?;
+            write_uint64(snap, 2, BUILTIN_CLOCK_BOOTTIME)?; // primary_trace_clock
             Ok(())
         })?;
         Ok(())
-    })?;
+    })
+}
 
-    // ProcessDescriptor. Gives the timeline a friendly process name.
+fn write_process_descriptor<W: Write>(
+    w: &mut W,
+    pid: u32,
+    name: &str,
+) -> io::Result<()> {
     write_message(w, FIELD_TRACE_PACKET, |buf| {
         write_uint32(buf, tp::TRUSTED_PACKET_SEQUENCE_ID, SEQUENCE_ID)?;
         write_message(buf, tp::PROCESS_DESCRIPTOR, |pd| {
-            write_uint32(pd, 1 /* pid */, process_pid)?;
-            write_string(pd, 6 /* process_name */, process_name)?;
+            write_uint32(pd, 1 /* pid */, pid)?;
+            write_string(pd, 6 /* process_name */, name)?;
             Ok(())
         })?;
         Ok(())
-    })?;
-
-    // InternedData payload. Bundle everything (function_names + frames +
-    // callstacks) in one packet at trace-start; subsequent sample packets
-    // reference these iids and inherit them via NEEDS_INCREMENTAL_STATE.
-    let interned_payload = interner.encode_interned_data()?;
-    write_message(w, FIELD_TRACE_PACKET, |buf| {
-        write_uint64(buf, tp::TIMESTAMP, anchor_ns)?;
-        write_uint32(buf, tp::TRUSTED_PACKET_SEQUENCE_ID, SEQUENCE_ID)?;
-        write_uint64(
-            buf,
-            tp::SEQUENCE_FLAGS,
-            SEQ_FLAG_INCREMENTAL_STATE_CLEARED | SEQ_FLAG_NEEDS_INCREMENTAL_STATE,
-        )?;
-        write_uint64(buf, tp::FIRST_PACKET_ON_SEQUENCE, 1)?;
-        write_bytes(buf, tp::INTERNED_DATA, &interned_payload)?;
-        Ok(())
-    })?;
-
-    Ok(())
+    })
 }
 
 /// Per-trace interning state. Function-name strings, frames (one per
