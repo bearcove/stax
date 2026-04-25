@@ -225,20 +225,26 @@ fn write_thread_sequence<W: Write>(
     })?;
 
     // Emit one TracePacket per sample with a single-element
-    // StreamingProfilePacket. Each sample packet gets
-    // `SEQ_NEEDS_INCREMENTAL_STATE` so Perfetto carries the InternedData
-    // emitted in the bootstrap packet forward to the iid lookups here.
+    // StreamingProfilePacket. Each sample packet gets:
+    //   * `SEQ_NEEDS_INCREMENTAL_STATE` so Perfetto carries the
+    //     InternedData emitted in the bootstrap packet forward to iid
+    //     lookups here.
+    //   * `timestamp_clock_id = BOOTTIME` explicitly. Without this,
+    //     Perfetto's StreamingProfilePacket parser internally references
+    //     MONOTONIC (clock 3) when converting timestamps, even when
+    //     timestamp_delta_us is zero -- which trips
+    //     clock_sync_failure_unknown_source_clock on every sample.
+    //     Pinning the clock to BOOTTIME (the trace's primary_trace_clock
+    //     from the ClockSnapshot we emit at the start) avoids the
+    //     conversion.
     for (sample, &cs_iid) in thread.samples.iter().zip(sample_callstack_iids.iter()) {
         write_message(w, FIELD_TRACE_PACKET, |buf| {
             write_uint64(buf, tp::TIMESTAMP, sample.timestamp_ns)?;
+            write_uint64(buf, tp::TIMESTAMP_CLOCK_ID, BUILTIN_CLOCK_BOOTTIME)?;
             write_uint32(buf, tp::TRUSTED_PACKET_SEQUENCE_ID, sequence_id)?;
             write_uint64(buf, tp::SEQUENCE_FLAGS, SEQ_FLAG_NEEDS_INCREMENTAL_STATE)?;
             write_message(buf, tp::STREAMING_PROFILE_PACKET, |sp| {
-                // `repeated uint64 callstack_iid = 1`
                 write_packed_uint64(sp, 1, &[cs_iid])?;
-                // `repeated int64 timestamp_delta_us = 2` (microseconds!)
-                // 0 delta because each sample has its own absolute timestamp
-                // on the TracePacket.
                 write_packed_uint64(sp, 2, &[0])?;
                 Ok(())
             })?;
