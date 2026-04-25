@@ -1,6 +1,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 use std::mem::{self, ManuallyDrop};
+use std::num::NonZeroUsize;
 use std::time::Instant;
 use std::marker::PhantomData;
 
@@ -596,10 +597,10 @@ impl< 'a, E: Endianity > UnwindInfo< 'a, E > {
             _ => return
         };
 
-        let cache = unwind_cache.cache.get_or_insert_with( || LruCache::new( 4096 ) );
+        let cache = unwind_cache.cache.get_or_insert_with( || LruCache::new( NonZeroUsize::new( 4096 ).unwrap() ) );
 
         let mut rules = Vec::new();
-        if cache.len() == cache.cap() {
+        if cache.len() == cache.cap().get() {
             rules = cache.pop_lru().map( |(_, old)| old.rules ).unwrap();
             rules.clear();
         } else {
