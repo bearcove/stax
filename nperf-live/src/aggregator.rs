@@ -2,6 +2,13 @@ use std::collections::HashMap;
 
 use nperf_live_proto::TopEntry;
 
+#[derive(Clone, Copy)]
+pub struct RawTopEntry {
+    pub address: u64,
+    pub self_count: u64,
+    pub total_count: u64,
+}
+
 #[derive(Default)]
 pub struct Aggregator {
     /// Self-count: the leaf frame of each sample.
@@ -37,10 +44,25 @@ impl Aggregator {
     }
 
     pub fn top(&self, limit: usize) -> Vec<TopEntry> {
-        let mut entries: Vec<TopEntry> = self
+        self.top_raw(limit)
+            .into_iter()
+            .map(|e| TopEntry {
+                address: e.address,
+                self_count: e.self_count,
+                total_count: e.total_count,
+                function_name: None,
+                binary: None,
+            })
+            .collect()
+    }
+
+    /// Top-N as raw addresses + counts, for callers (the live server)
+    /// that want to layer symbol resolution on top.
+    pub fn top_raw(&self, limit: usize) -> Vec<RawTopEntry> {
+        let mut entries: Vec<RawTopEntry> = self
             .self_counts
             .iter()
-            .map(|(&address, &self_count)| TopEntry {
+            .map(|(&address, &self_count)| RawTopEntry {
                 address,
                 self_count,
                 total_count: self.total_counts.get(&address).copied().unwrap_or(0),

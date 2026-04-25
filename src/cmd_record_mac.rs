@@ -24,7 +24,10 @@ use crate::archive::{
     ARCHIVE_MAGIC, ARCHIVE_VERSION,
 };
 use crate::args::{self, TargetProcess};
-use crate::live_sink::{LiveSink, SampleEvent as LiveSampleEvent};
+use crate::live_sink::{
+    BinaryLoadedEvent as LiveBinaryLoadedEvent, BinaryUnloadedEvent as LiveBinaryUnloadedEvent,
+    LiveSink, LiveSymbol, SampleEvent as LiveSampleEvent,
+};
 use crate::utils::SigintHandler;
 
 pub fn main(args: args::RecordArgs) -> Result<(), Box<dyn Error>> {
@@ -400,6 +403,29 @@ impl SampleSink for MacSink {
     }
 
     fn on_binary_loaded(&mut self, ev: BinaryLoadedEvent<'_>) {
+        // Tee to the live sink (if any) so the live aggregator can resolve
+        // addresses against this image even though we still write the same
+        // archive packets below.
+        if let Some(sink) = self.live_sink.as_ref() {
+            let live_symbols: Vec<LiveSymbol<'_>> = ev
+                .symbols
+                .iter()
+                .map(|s| LiveSymbol {
+                    start_svma: s.start_svma,
+                    end_svma: s.end_svma,
+                    name: &s.name,
+                })
+                .collect();
+            sink.on_binary_loaded(&LiveBinaryLoadedEvent {
+                path: ev.path,
+                base_avma: ev.base_avma,
+                vmsize: ev.vmsize,
+                text_svma: ev.text_svma,
+                arch: ev.arch,
+                symbols: &live_symbols,
+            });
+        }
+
         // We key Mach-O binaries by path (BinaryId::ByName) since macOS
         // doesn't surface a stable per-image inode the way Linux does.
         // Inode::empty() trips the `is_invalid()` check on the analysis
@@ -489,6 +515,12 @@ impl SampleSink for MacSink {
     }
 
     fn on_binary_unloaded(&mut self, ev: BinaryUnloadedEvent<'_>) {
+        if let Some(sink) = self.live_sink.as_ref() {
+            sink.on_binary_unloaded(&LiveBinaryUnloadedEvent {
+                path: ev.path,
+                base_avma: ev.base_avma,
+            });
+        }
         if let Some(vmsize) = self.loaded_ranges.remove(&ev.base_avma) {
             let _ = self.write_packet(Packet::MemoryRegionUnmap {
                 pid: ev.pid,

@@ -14,6 +14,13 @@ pub struct TopEntry {
     pub address: u64,
     pub self_count: u64,
     pub total_count: u64,
+    /// Demangled symbol name when the live binary registry has the
+    /// containing image loaded. `None` for JIT'd code, kernel frames,
+    /// or images that haven't been observed yet.
+    pub function_name: Option<String>,
+    /// Basename of the image (e.g. "libsystem_malloc.dylib"). Same
+    /// availability semantics as `function_name`.
+    pub binary: Option<String>,
 }
 
 #[derive(Clone, Debug, Facet)]

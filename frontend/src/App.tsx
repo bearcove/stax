@@ -110,7 +110,8 @@ function TopTable({
     <table>
       <thead>
         <tr>
-          <th>address</th>
+          <th>function</th>
+          <th>binary</th>
           <th style={{ textAlign: "right" }}>self</th>
           <th style={{ textAlign: "right" }}>total</th>
         </tr>
@@ -122,7 +123,12 @@ function TopTable({
             className={selected === e.address ? "selected" : ""}
             onClick={() => onSelect(e.address)}
           >
-            <td>0x{e.address.toString(16)}</td>
+            <td className="fn">
+              {e.function_name ?? (
+                <span className="addr">0x{e.address.toString(16)}</span>
+              )}
+            </td>
+            <td className="bin">{e.binary ?? ""}</td>
             <td className="num">{e.self_count.toString()}</td>
             <td className="num">{e.total_count.toString()}</td>
           </tr>

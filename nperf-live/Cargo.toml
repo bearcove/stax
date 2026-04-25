@@ -13,5 +13,12 @@ eyre = "0.6"
 tracing = "0.1"
 parking_lot = "0.12"
 arborium = { version = "2.16", features = ["lang-asm"] }
+yaxpeax-arch = { version = "0.3", default-features = false, features = ["std"] }
+yaxpeax-x86 = { version = "2", default-features = false, features = ["std", "fmt"] }
+yaxpeax-arm = { version = "0.4.0", default-features = false, features = ["std", "fmt"] }
+object = { version = "0.39.1", default-features = false, features = ["std", "read_core", "elf", "macho", "compression"] }
+memmap2 = "0.9"
+rustc-demangle = "0.1"
+cpp_demangle = "0.4"
 
 vox = { git = "https://github.com/bearcove/vox", rev = "1bdc0aa4911765af726a4142ceb67812b0f6963d", features = ["transport-websocket"] }

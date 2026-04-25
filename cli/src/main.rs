@@ -26,7 +26,9 @@ use nperf_core::cmd_flamegraph;
 
 fn main_impl() -> Result< (), Box< dyn Error > > {
     if env::var( "RUST_LOG" ).is_err() {
-        env::set_var( "RUST_LOG", "info" );
+        // cranelift_jit/cranelift_codegen log every JIT'd function at info,
+        // which floods the terminal once we start the live RPC server.
+        env::set_var( "RUST_LOG", "info,cranelift_jit=warn,cranelift_codegen=warn" );
     }
 
     #[cfg(feature = "env_logger")]
