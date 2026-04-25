@@ -40,7 +40,10 @@ pub fn main(args: args::RecordArgs) -> Result<(), Box<dyn Error>> {
 
     match TargetProcess::from(args.profiler_args.process_filter.clone()) {
         TargetProcess::ByPid(pid) => record_existing_pid(args, pid),
-        TargetProcess::ByName(name) => record_child_launch(args, name, Vec::new()),
+        TargetProcess::ByName(name) => {
+            let prog_args = args.program_args.clone();
+            record_child_launch(args, name, prog_args)
+        }
         TargetProcess::ByNameWaiting(_, _) => {
             Err("--wait is not supported on macOS (the launched child is the one we wait for)".into())
         }

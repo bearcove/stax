@@ -202,6 +202,13 @@ pub struct RecordArgs {
     /// Do not send SIGSTOP before hooking into the process
     #[structopt(long)]
     pub do_not_send_sigstop: bool,
+
+    /// Arguments to pass to the launched child process. Use `--` to
+    /// separate nperf flags from the target's arguments:
+    ///
+    ///     nperf record --process /bin/foo -- --some-flag bar baz
+    #[structopt(raw(last = "true"), name = "PROGRAM_ARGS")]
+    pub program_args: Vec< String >,
 }
 
 #[derive(StructOpt, Debug)]
