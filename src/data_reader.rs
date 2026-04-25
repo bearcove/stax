@@ -1194,6 +1194,7 @@ mod test {
         let args = ReadDataArgs {
             input_path: path.as_os_str(),
             debug_symbols: Vec::new(),
+            jitdump_path: None,
             force_stack_size: None,
             only_sample: None,
             without_kernel_callstacks: false,
@@ -1265,6 +1266,10 @@ mod test {
                 let binary = data.state.get_binary( binary_id );
                 let symbol = data.interner.resolve( symbol ).unwrap();
                 format!( "{}:{}", symbol, binary.basename )
+            },
+            FrameKind::UserByFunctionJit { symbol } => {
+                let symbol = data.interner.resolve( symbol ).unwrap();
+                format!( "{}:[jit]", symbol )
             },
             FrameKind::UserBinary( ref binary_id, _ ) => {
                 let binary = data.state.get_binary( binary_id );
