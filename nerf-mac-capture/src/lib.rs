@@ -23,7 +23,15 @@ pub mod error;
 pub mod kernel_error;
 pub mod mach_ipc;
 pub mod proc_maps;
+pub mod recorder;
+pub mod sample_sink;
 pub mod thread_act;
 pub mod thread_info;
 pub mod time;
 pub mod types;
+pub mod unwinder_setup;
+
+pub use recorder::{record, RecordOptions};
+pub use sample_sink::{
+    BinaryLoadedEvent, BinaryUnloadedEvent, SampleEvent, SampleSink, ThreadNameEvent,
+};
