@@ -1,3 +1,7 @@
+// Vendored from samply (https://github.com/mstange/samply) at commit
+// 1920bd32c569de5650d1129eb035f43bd28ace27. MIT OR Apache-2.0; see
+// LICENSE-MIT and LICENSE-APACHE at the crate root.
+
 // LLVM_CONFIG_PATH=~/.mozbuild/clang/bin/llvm-config bindgen -o thread_info.rs --no-layout-tests --no-derive-copy --whitelist-type thread_basic_info --whitelist-type thread_identifier_info_data_t --whitelist-type 'thread_.*' --whitelist-type io_stat_info_t --whitelist-var 'TH(READ)?_.*' --whitelist-var MAXTHREADNAMESIZE /Library/Developer/CommandLineTools/SDKs/MacOSX10.15.sdk/System/Library/Frameworks/Kernel.framework/Versions/A/Headers/mach/thread_info.h
 
 #![allow(non_camel_case_types)]

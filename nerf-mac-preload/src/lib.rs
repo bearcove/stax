@@ -1,3 +1,9 @@
+// Vendored from samply-mac-preload (https://github.com/mstange/samply) at
+// commit 1920bd32c569de5650d1129eb035f43bd28ace27. The bootstrap-server
+// environment variable was renamed SAMPLY_BOOTSTRAP_SERVER_NAME ->
+// NERF_BOOTSTRAP_SERVER_NAME so this dylib does not collide with samply.
+// MIT OR Apache-2.0; see LICENSE-MIT and LICENSE-APACHE at the crate root.
+
 #![no_main]
 #![no_std]
 

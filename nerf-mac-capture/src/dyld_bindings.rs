@@ -1,3 +1,7 @@
+// Vendored from samply (https://github.com/mstange/samply) at commit
+// 1920bd32c569de5650d1129eb035f43bd28ace27. MIT OR Apache-2.0; see
+// LICENSE-MIT and LICENSE-APACHE at the crate root.
+
 #![allow(dead_code)]
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]

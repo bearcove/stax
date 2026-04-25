@@ -1,3 +1,8 @@
+// Vendored via samply-mac-preload (https://github.com/mstange/samply) at
+// commit 1920bd32c569de5650d1129eb035f43bd28ace27. samply itself vendored
+// this from Servo's ipc-channel; the Servo header below is preserved.
+// MIT OR Apache-2.0; see LICENSE-MIT and LICENSE-APACHE at the crate root.
+
 // Copyright 2015 The Servo Project Developers. See the COPYRIGHT
 // file at the top-level directory of this distribution.
 //

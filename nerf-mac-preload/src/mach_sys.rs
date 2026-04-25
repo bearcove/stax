@@ -1,3 +1,8 @@
+// Vendored from samply-mac-preload (https://github.com/mstange/samply) at
+// commit 1920bd32c569de5650d1129eb035f43bd28ace27. Auto-generated bindgen
+// output. MIT OR Apache-2.0; see LICENSE-MIT and LICENSE-APACHE at the
+// crate root.
+
 #![allow(
     dead_code,
     non_camel_case_types,
