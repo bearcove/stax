@@ -828,7 +828,7 @@ impl Perf {
     }
 
     #[inline]
-    pub fn iter( &mut self ) -> EventIter {
+    pub fn iter( &mut self ) -> EventIter<'_> {
         EventIter::new( self )
     }
 }

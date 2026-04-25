@@ -58,7 +58,7 @@ pub unsafe fn initialize_pthread_key< T >(
     key: *mut libc::pthread_key_t,
     once: &AtomicUsize
 ) -> libc::pthread_key_t {
-    unsafe extern fn destructor< T >( cell: *mut libc::c_void ) {
+    unsafe extern "C" fn destructor< T >( cell: *mut libc::c_void ) {
         let kind = cell as *mut SlotKind< T >;
         if let SlotKind::Initialized( mut value ) = std::ptr::replace( kind, SlotKind::Destroyed ) {
             std::mem::ManuallyDrop::drop( &mut value );

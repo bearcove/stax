@@ -334,7 +334,7 @@ impl DebugInfoIndex {
             return;
         }
 
-        let mut owned_path;
+        let owned_path;
         let mut path: &Path = &path;
 
         if let Ok(target) = path.read_link() {

@@ -50,6 +50,7 @@ struct CodeLoadRecordHeader {
 }
 
 /// Describes source line information for a jitted function
+#[allow(dead_code)] // format definition; JIT_CODE_DEBUG_INFO parsing not implemented yet
 #[derive(Debug, Default)]
 #[derive(speedy::Readable)]
 #[repr(C)]
@@ -67,6 +68,7 @@ struct DebugEntry {
 /// Describes debug information for a jitted function. An array of debug entries are
 /// appended to this record during writting. Note, this record must preceed the code
 /// load record that describes the same jitted function.
+#[allow(dead_code)] // format definition; JIT_CODE_DEBUG_INFO parsing not implemented yet
 #[derive(Debug, Default, Clone, Copy)]
 #[derive(speedy::Readable)]
 #[repr(C)]
@@ -90,6 +92,7 @@ struct RecordHeader {
     pub timestamp: u64,
 }
 
+#[allow(dead_code)] // some fields are populated by the parser but no consumer reads them yet
 pub enum Record< 'a > {
     CodeLoad {
         timestamp: u64,

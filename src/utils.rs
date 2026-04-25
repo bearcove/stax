@@ -24,12 +24,12 @@ impl SigintHandler {
     pub fn new() -> Self {
         SIGINT_FLAG.store( false, Ordering::Relaxed ); // To initialize the `lazy_static`.
 
-        extern fn handler( _: libc::c_int ) {
+        extern "C" fn handler( _: libc::c_int ) {
             SIGINT_FLAG.store( true, Ordering::Relaxed );
         }
 
         unsafe {
-            libc::signal( libc::SIGINT, handler as libc::size_t );
+            libc::signal( libc::SIGINT, handler as *const () as libc::size_t );
         }
         SigintHandler {}
     }

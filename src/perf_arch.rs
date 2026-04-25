@@ -1,26 +1,3 @@
-use nwind::DwarfRegs;
-use nwind::arch::Registers;
-
-pub trait IntoDwarfRegs {
-    fn copy_to_dwarf_regs( &self, regs: &mut DwarfRegs );
-
-    #[inline]
-    fn to_dwarf_regs( &self ) -> DwarfRegs {
-        let mut regs = DwarfRegs::new();
-        self.copy_to_dwarf_regs( &mut regs );
-        regs
-    }
-}
-
-impl< T: IntoDwarfRegs > IntoDwarfRegs for Option< T > {
-    fn copy_to_dwarf_regs( &self, regs: &mut DwarfRegs ) {
-        regs.clear();
-        if let Some( itself ) = self.as_ref() {
-            itself.copy_to_dwarf_regs( regs );
-        }
-    }
-}
-
 macro_rules! count {
     ($item:tt, $($next_item:tt),+) => { count!( $item ) + count!( $($next_item),+ ) };
     ($item:tt) => { 1 };

@@ -328,7 +328,7 @@ impl PerfGroup {
         poll_events( &mut self.poll_fds, self.members.values() );
     }
 
-    pub fn iter( &mut self ) -> vec::Drain< EventRef > {
+    pub fn iter( &mut self ) -> vec::Drain< '_, EventRef > {
         self.event_buffer.clear();
 
         let mut fds_to_remove = Vec::new();

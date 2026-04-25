@@ -346,6 +346,7 @@ impl Binary {
         self.data.as_ref()
     }
 
+    #[allow(dead_code)] // wired up for future symbolicate/annotate paths
     pub(crate) fn debug_data( &self ) -> Option< &Arc< BinaryData > > {
         self.debug_data.as_ref()
     }
@@ -534,7 +535,7 @@ pub(crate) fn read_data< F >( args: ReadDataArgs, mut on_event: F ) -> Result< S
     where F: FnMut( Event )
 {
     let input_path = args.input_path;
-    let fp = fs::File::open( args.input_path ).map_err( |err| format!( "cannot open {:?}: {}", input_path.clone(), err ) )?;
+    let fp = fs::File::open( args.input_path ).map_err( |err| format!( "cannot open {:?}: {}", input_path, err ) )?;
     let mut reader = ArchiveReader::new( fp ).validate_header().unwrap().skip_unknown();
 
     let mut state = State {
@@ -1134,7 +1135,7 @@ pub(crate) fn write_frame< T: fmt::Write >(
 }
 
 
-pub(crate) fn repack_cli_args( args: &args::SharedCollationArgs ) -> (Option< Regex >, ReadDataArgs) {
+pub(crate) fn repack_cli_args( args: &args::SharedCollationArgs ) -> (Option< Regex >, ReadDataArgs<'_>) {
     let omit_regex = if args.omit.is_empty() {
         None
     } else {
