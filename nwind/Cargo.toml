@@ -13,7 +13,7 @@ memmap2 = "0.9"
 log = { version = "0.4", optional = true }
 speedy = "0.8"
 lru = "0.12"
-cpp_demangle = "0.3"
+cpp_demangle = "0.4"
 rustc-demangle = { version = "0.1", optional = true }
 addr2line = { version = "0.16", optional = true, default-features = false, features = ["std"] }
 proc-maps = { version = "0.1", path = "../proc-maps" }
