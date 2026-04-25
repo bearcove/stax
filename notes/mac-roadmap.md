@@ -59,27 +59,39 @@ Small, isolated, verifiable.
 
 Stop and review before M1.
 
-## M1 — Workspace skeleton
+## M1 — Workspace skeleton (done)
 
 Crates compile, no integration yet.
 
-- New crate `nerf-mac-capture`, gated on `#[cfg(target_os = "macos")]`
-  everywhere it's referenced from the workspace.
-- New crate `nerf-mac-preload` (the `DYLD_INSERT_LIBRARIES` shim).
-- Dependencies:
-  - git-dep: `framehop`, `wholesym`
-  - crates.io: `mach2`
-  - pin samply's revision in a comment in `Cargo.toml` for traceability
-- Vendor the files listed above. Replace `fxprof-processed-profile` /
-  `UnresolvedSamples` coupling with a small `Sample` callback trait owned by
-  `nerf-mac-capture`.
-
-Stop and review before M2.
+- ✅ New crate `nerf-mac-capture`, gated on `#[cfg(target_os = "macos")]`.
+- ✅ New crate `nerf-mac-preload` (standalone workspace, since it needs
+  `no_std` + `panic = "abort"` settings that don't work as a workspace
+  member). Vendored verbatim from samply with the bootstrap env var
+  renamed `SAMPLY_BOOTSTRAP_SERVER_NAME` → `NERF_BOOTSTRAP_SERVER_NAME`.
+- ✅ Leaf-level Mach utilities vendored into `nerf-mac-capture`:
+  `dyld_bindings`, `kernel_error`, `thread_act`, `thread_info`, `time`,
+  `error`, `mach_ipc`. One behaviour change: `mach_ipc::nonce_i64`
+  replaces samply's `rand::rng().random::<i64>()` (rand 0.10 has a
+  pre-release-only chacha20 transitive dep).
+- Dependencies wired up: `mach2 = "0.6"`, `libc`, `framehop = "0.16"`,
+  `lazy_static`, `crossbeam-channel`, `thiserror`. samply commit pinned
+  in `nerf-mac-capture/Cargo.toml`.
+- ⏭ Folded into M2: vendoring + stripping `proc_maps`, `process_launcher`,
+  `sampler`, `task_profiler`, `thread_profiler`, `profiler`. These files
+  carry heavy `fxprof-processed-profile` / `wholesym` / `samply-symbols` /
+  `crate::shared::*` coupling. The same surgery that strips that coupling
+  also rewires the output to the nperf packet writer, so it makes more
+  sense to do it in M2 than to land an intermediate stubbed-out state.
 
 ## M2 — Online recording
 
 Mac records, analysis pipeline reads the result.
 
+- Vendor + strip the heavy-coupling samply files (`proc_maps`,
+  `process_launcher`, `sampler`, `task_profiler`, `thread_profiler`,
+  `profiler`). Replace `fxprof-processed-profile` / `UnresolvedSamples` /
+  `crate::shared::*` glue with a small `Sample` callback trait that
+  emits `Packet::Sample` directly into the nperf writer.
 - `cmd_record.rs` dispatches by platform: linux → existing path, mac →
   `nerf-mac-capture`.
 - Mac path: framehop unwinds at sample time. Each sample becomes
