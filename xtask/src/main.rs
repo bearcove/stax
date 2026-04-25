@@ -13,6 +13,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
+mod codegen;
 mod migrate_archive;
 
 const BIN_NAME: &str = "nperf";
@@ -23,6 +24,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     match task {
         "install" => install()?,
         "migrate-archives" => migrate_archive::run(&args[2..])?,
+        "codegen" => codegen::run()?,
         "" | "help" | "--help" | "-h" => {
             print_usage();
         }
@@ -45,6 +47,9 @@ fn print_usage() {
     );
     eprintln!(
         "  migrate-archives     Rewrite v1 .nperf archives in place to v2 (one-shot fixture migration)"
+    );
+    eprintln!(
+        "  codegen              Generate TypeScript bindings for nperf-live into frontend/src/generated/"
     );
 }
 

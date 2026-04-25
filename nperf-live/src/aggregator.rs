@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::TopEntry;
+use nperf_live_proto::TopEntry;
 
 #[derive(Default)]
 pub struct Aggregator {
@@ -14,6 +14,10 @@ pub struct Aggregator {
 impl Aggregator {
     pub fn total_samples(&self) -> u64 {
         self.total_samples
+    }
+
+    pub fn self_count(&self, address: u64) -> u64 {
+        self.self_counts.get(&address).copied().unwrap_or(0)
     }
 
     pub fn record(&mut self, user_addrs: &[u64]) {

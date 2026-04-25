@@ -132,6 +132,71 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
 
 [[package]]
+name = "arborium"
+version = "2.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db65328fda517795f476b9d1b0794199cce180077e204629946a0705f0093093"
+dependencies = [
+ "arborium-asm",
+ "arborium-highlight",
+ "arborium-theme",
+ "arborium-tree-sitter",
+ "dlmalloc",
+]
+
+[[package]]
+name = "arborium-asm"
+version = "2.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edea866e8e57cdbf94f1832cc5c619308f3133036e00d41f1c1b60dc17a0dcfb"
+dependencies = [
+ "arborium-sysroot",
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "arborium-highlight"
+version = "2.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "517a6778e29dc5d73d3c9993836bad9bc6fdd8bd8037fe7fd3f295e866d5cdab"
+dependencies = [
+ "arborium-theme",
+ "arborium-tree-sitter",
+ "streaming-iterator",
+]
+
+[[package]]
+name = "arborium-sysroot"
+version = "2.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43374e79fbeaedc2bf27eed475c26686c8ed8eef2180854eef22340b9e25b64a"
+dependencies = [
+ "cc",
+ "dlmalloc",
+]
+
+[[package]]
+name = "arborium-theme"
+version = "2.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b6dc64ecabaad99640e27c351008b1fd6df46bcfaefab6c0e315aac3247d1d9"
+
+[[package]]
+name = "arborium-tree-sitter"
+version = "2.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5a9280a27a2fd42ffbf3b72b99d60122f2c28c55c16c39da8ba2d126d1856c4"
+dependencies = [
+ "arborium-sysroot",
+ "cc",
+ "regex",
+ "regex-syntax",
+ "streaming-iterator",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "arc-swap"
 version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -731,6 +796,17 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer",
  "crypto-common",
+]
+
+[[package]]
+name = "dlmalloc"
+version = "0.2.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f5b01c17f85ee988d832c40e549a64bd89ab2c9f8d8a613bdf5122ae507e294"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1734,12 +1810,21 @@ dependencies = [
 name = "nperf-live"
 version = "0.1.0"
 dependencies = [
+ "arborium",
  "eyre",
- "facet",
  "nperf-core",
+ "nperf-live-proto",
  "parking_lot",
  "tokio",
  "tracing",
+ "vox",
+]
+
+[[package]]
+name = "nperf-live-proto"
+version = "0.1.0"
+dependencies = [
+ "facet",
  "vox",
 ]
 
@@ -2382,6 +2467,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9091b6114800a5f2141aee1d1b9d6ca3592ac062dc5decb3764ec5895a47b4eb"
 
 [[package]]
+name = "streaming-iterator"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b2231b7c3057d5e4ad0156fb3dc807d900806020c5ffa3ee6ff2c8c76fb8520"
+
+[[package]]
 name = "string-interner"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2615,6 +2706,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-language"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
+
+[[package]]
 name = "tungstenite"
 version = "0.26.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2740,6 +2837,17 @@ dependencies = [
  "vox-stream",
  "vox-types",
  "vox-websocket",
+]
+
+[[package]]
+name = "vox-codegen"
+version = "0.4.0"
+source = "git+https://github.com/bearcove/vox?rev=1bdc0aa4911765af726a4142ceb67812b0f6963d#1bdc0aa4911765af726a4142ceb67812b0f6963d"
+dependencies = [
+ "facet-cbor",
+ "facet-core",
+ "heck 0.5.0",
+ "vox-types",
 ]
 
 [[package]]
@@ -3351,7 +3459,10 @@ dependencies = [
 name = "xtask"
 version = "0.0.0"
 dependencies = [
+ "arborium-theme",
+ "nperf-live-proto",
  "speedy",
+ "vox-codegen",
 ]
 
 [[package]]

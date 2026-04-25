@@ -24,9 +24,17 @@ use crate::archive::{
     ARCHIVE_MAGIC, ARCHIVE_VERSION,
 };
 use crate::args::{self, TargetProcess};
+use crate::live_sink::{LiveSink, SampleEvent as LiveSampleEvent};
 use crate::utils::SigintHandler;
 
 pub fn main(args: args::RecordArgs) -> Result<(), Box<dyn Error>> {
+    main_with_live_sink(args, None)
+}
+
+pub fn main_with_live_sink(
+    args: args::RecordArgs,
+    live_sink: Option<Box<dyn LiveSink>>,
+) -> Result<(), Box<dyn Error>> {
     if args.discard_all {
         return Err("--discard-all is not supported on macOS yet".into());
     }
@@ -38,10 +46,10 @@ pub fn main(args: args::RecordArgs) -> Result<(), Box<dyn Error>> {
     }
 
     match TargetProcess::from(args.profiler_args.process_filter.clone()) {
-        TargetProcess::ByPid(pid) => record_existing_pid(args, pid),
+        TargetProcess::ByPid(pid) => record_existing_pid(args, pid, live_sink),
         TargetProcess::ByName(name) => {
             let prog_args = args.program_args.clone();
-            record_child_launch(args, name, prog_args)
+            record_child_launch(args, name, prog_args, live_sink)
         }
         TargetProcess::ByNameWaiting(_, _) => {
             Err("--wait is not supported on macOS (the launched child is the one we wait for)".into())
@@ -52,6 +60,7 @@ pub fn main(args: args::RecordArgs) -> Result<(), Box<dyn Error>> {
 fn record_existing_pid(
     args: args::RecordArgs,
     pid: u32,
+    live_sink: Option<Box<dyn LiveSink>>,
 ) -> Result<(), Box<dyn Error>> {
     let exe_path = proc_pidpath(pid).unwrap_or_else(|err| {
         warn!("proc_pidpath({}) failed: {}", pid, err);
@@ -62,6 +71,7 @@ fn record_existing_pid(
     info!("Recording PID {} -> {}", pid, output_path.display());
 
     let mut sink = open_sink(&output_path, pid, &exe_path, &args)?;
+    sink.live_sink = live_sink;
     let sigint = SigintHandler::new();
     let start = std::time::Instant::now();
     let time_limit = args.profiler_args.time_limit.map(Duration::from_secs);
@@ -86,6 +96,7 @@ fn record_child_launch(
     args: args::RecordArgs,
     program: String,
     program_args: Vec<String>,
+    live_sink: Option<Box<dyn LiveSink>>,
 ) -> Result<(), Box<dyn Error>> {
     let mut accepter = TaskAccepter::new()
         .map_err(|err| format!("setting up Mach IPC accepter: {:?}", err))?;
@@ -109,6 +120,7 @@ fn record_child_launch(
     let output_path = resolve_output_path(&args, pid, &exe_path);
     info!("Recording PID {} -> {}", pid, output_path.display());
     let mut sink = open_sink(&output_path, pid, &exe_path, &args)?;
+    sink.live_sink = live_sink;
 
     // Resume the child now that we have the task port and the headers
     // are written.
@@ -293,6 +305,9 @@ struct MacSink {
     loaded_ranges: std::collections::HashMap<u64, u64>,
     /// Jitdump paths the preload dylib reported during recording.
     jitdump_paths: Vec<PathBuf>,
+    /// Optional live sink fed from `on_sample` so `--serve` can stream
+    /// aggregations alongside the on-disk archive.
+    live_sink: Option<Box<dyn LiveSink>>,
 }
 
 impl MacSink {
@@ -301,6 +316,7 @@ impl MacSink {
             writer,
             loaded_ranges: std::collections::HashMap::new(),
             jitdump_paths: Vec::new(),
+            live_sink: None,
         })
     }
 
@@ -360,6 +376,16 @@ impl SampleSink for MacSink {
                 initial_address: None,
             })
             .collect();
+        if let Some(sink) = self.live_sink.as_ref() {
+            sink.on_sample(&LiveSampleEvent {
+                timestamp: ev.timestamp_ns,
+                pid: ev.pid,
+                tid: ev.tid,
+                cpu: u32::MAX,
+                kernel_backtrace: &[],
+                user_backtrace: &user_backtrace,
+            });
+        }
         let packet = Packet::Sample {
             timestamp: ev.timestamp_ns,
             pid: ev.pid,
