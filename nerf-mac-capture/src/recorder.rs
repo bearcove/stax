@@ -290,10 +290,16 @@ impl Drop for ThreadList {
         if self.ptr.is_null() {
             return;
         }
-        let bytes = self.len as u64 * std::mem::size_of::<mach_port_t>() as u64;
+        // Release each per-thread port reference. samply's TaskProfiler
+        // keeps the ports alive across ticks; we re-acquire them every tick
+        // so we must deallocate here to avoid steadily leaking thread-port
+        // rights.
         unsafe {
-            let _ =
-                mach_vm_deallocate(mach_task_self(), self.ptr as u64, bytes);
+            for &port in self.as_slice() {
+                let _ = mach2::mach_port::mach_port_deallocate(mach_task_self(), port);
+            }
+            let bytes = self.len as u64 * std::mem::size_of::<mach_port_t>() as u64;
+            let _ = mach_vm_deallocate(mach_task_self(), self.ptr as u64, bytes);
         }
     }
 }
