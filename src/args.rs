@@ -460,11 +460,26 @@ pub enum Opt {
     #[structopt(name = "metadata")]
     Metadata( MetadataArgs ),
 
+    /// Emits a Perfetto-protobuf trace for use with https://ui.perfetto.dev/
+    #[structopt(name = "perfetto")]
+    Perfetto( PerfettoArgs ),
+
     /// Codesign this nperf binary with the entitlements needed to call
     /// task_for_pid against existing processes (macOS only).
     #[cfg(target_os = "macos")]
     #[structopt(name = "setup")]
     Setup( SetupArgs )
+}
+
+#[derive(StructOpt, Debug)]
+#[structopt(rename_all = "kebab-case")]
+pub struct PerfettoArgs {
+    #[structopt(flatten)]
+    pub collation_args: SharedCollationArgs,
+
+    /// The file to write the Perfetto trace to. Convention: `.perfetto-trace`.
+    #[structopt(long, short = "o", parse(from_os_str))]
+    pub output: OsString
 }
 
 #[cfg(target_os = "macos")]

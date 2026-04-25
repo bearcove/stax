@@ -12,6 +12,7 @@ use nperf_core::{
     cmd_collate,
     cmd_csv,
     cmd_metadata,
+    cmd_perfetto,
     cmd_trace_events
 };
 
@@ -61,6 +62,9 @@ fn main_impl() -> Result< (), Box< dyn Error > > {
         },
         args::Opt::Metadata( args ) => {
             cmd_metadata::main( args )?;
+        },
+        args::Opt::Perfetto( args ) => {
+            cmd_perfetto::main( args )?;
         },
         args::Opt::TraceEvents( args ) => {
             cmd_trace_events::main( args )?;

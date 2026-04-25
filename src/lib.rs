@@ -37,5 +37,7 @@ pub mod cmd_csv;
 pub mod cmd_collate;
 pub mod cmd_annotate;
 pub mod cmd_metadata;
+pub mod cmd_perfetto;
 pub mod cmd_trace_events;
+pub mod perfetto;
 mod jitdump;
