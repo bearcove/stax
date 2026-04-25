@@ -16,6 +16,12 @@ pub trait SampleSink {
 
     /// A thread was discovered for the first time, with a name.
     fn on_thread_name(&mut self, ev: ThreadNameEvent<'_>);
+
+    /// The preload dylib reported the target opened a `jit-<pid>.dump`
+    /// file. The default impl does nothing -- only the child-launch path
+    /// generates these events.
+    #[allow(unused_variables)]
+    fn on_jitdump(&mut self, ev: JitdumpEvent<'_>) {}
 }
 
 /// One sample. `backtrace` is callee-most first; addresses are absolute
@@ -58,4 +64,9 @@ pub struct ThreadNameEvent<'a> {
     pub pid: u32,
     pub tid: u32,
     pub name: &'a str,
+}
+
+pub struct JitdumpEvent<'a> {
+    pub pid: u32,
+    pub path: &'a std::path::Path,
 }

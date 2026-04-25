@@ -1,9 +1,6 @@
-//! macOS implementation of `nperf record`. Drives nerf-mac-capture against
-//! an existing PID and writes packets directly into the nperf archive.
-//!
-//! Scope: existing-PID only (`--pid`). Child-launch (`--process`) requires
-//! the DYLD_INSERT_LIBRARIES preload-dylib bundling pipeline, which is a
-//! follow-up. See notes/mac-roadmap.md.
+//! macOS implementation of `nperf record`. Drives nerf-mac-capture for
+//! both `--pid <PID>` (attach to an existing process) and `--process
+//! <NAME>` (spawn a fresh child via the preload-dylib bootstrap).
 
 use std::borrow::Cow;
 use std::error::Error;
@@ -15,9 +12,10 @@ use std::time::Duration;
 
 use speedy::{Endianness, Writable};
 
+use nerf_mac_capture::process_launcher::{ReceivedStuff, TaskAccepter, TaskLauncher};
 use nerf_mac_capture::{
-    record as mac_record, BinaryLoadedEvent, BinaryUnloadedEvent, RecordOptions, SampleEvent,
-    SampleSink, ThreadNameEvent,
+    record as mac_record, record_with_task_and_tick_hook, BinaryLoadedEvent, BinaryUnloadedEvent,
+    JitdumpEvent, RecordOptions, SampleEvent, SampleSink, ThreadNameEvent,
 };
 
 use crate::archive::{
@@ -30,44 +28,175 @@ use crate::utils::SigintHandler;
 const DEFAULT_OUTPUT: &str = "perf.data";
 
 pub fn main(args: args::RecordArgs) -> Result<(), Box<dyn Error>> {
-    let pid = match TargetProcess::from(args.profiler_args.process_filter.clone()) {
-        TargetProcess::ByPid(pid) => pid,
-        TargetProcess::ByName(_) | TargetProcess::ByNameWaiting(_, _) => {
-            return Err(
-                "macOS record currently supports only --pid; --process child-launch is not yet wired up"
-                    .into(),
-            );
-        }
-    };
-
     if args.discard_all {
         return Err("--discard-all is not supported on macOS yet".into());
     }
     if args.profiler_args.offline {
         return Err(
-            "--offline is not supported on macOS yet (raw-stack capture is M3 of the roadmap)"
+            "--offline is not supported on macOS yet (raw-stack capture is M3b of the roadmap)"
                 .into(),
         );
     }
 
-    let output_path: PathBuf = args
-        .profiler_args
-        .output
-        .clone()
-        .unwrap_or_else(|| OsString::from(DEFAULT_OUTPUT))
-        .into();
-
-    let exe_path = match proc_pidpath(pid) {
-        Ok(p) => p,
-        Err(err) => {
-            warn!("proc_pidpath({}) failed: {}", pid, err);
-            String::new()
+    match TargetProcess::from(args.profiler_args.process_filter.clone()) {
+        TargetProcess::ByPid(pid) => record_existing_pid(args, pid),
+        TargetProcess::ByName(name) => record_child_launch(args, name, Vec::new()),
+        TargetProcess::ByNameWaiting(_, _) => {
+            Err("--wait is not supported on macOS (the launched child is the one we wait for)".into())
         }
-    };
+    }
+}
+
+fn record_existing_pid(
+    args: args::RecordArgs,
+    pid: u32,
+) -> Result<(), Box<dyn Error>> {
+    let output_path = resolve_output_path(&args);
+    let exe_path = proc_pidpath(pid).unwrap_or_else(|err| {
+        warn!("proc_pidpath({}) failed: {}", pid, err);
+        String::new()
+    });
 
     info!("Recording PID {} -> {}", pid, output_path.display());
 
-    let writer = BufWriter::new(File::create(&output_path)?);
+    let mut sink = open_sink(&output_path, pid, &exe_path, &args)?;
+    let sigint = SigintHandler::new();
+    let start = std::time::Instant::now();
+    let time_limit = args.profiler_args.time_limit.map(Duration::from_secs);
+    let should_stop = || sigint_or_deadline(&sigint, &start, &time_limit);
+    let opts = RecordOptions {
+        pid,
+        frequency_hz: args.frequency,
+        duration: None,
+        fold_recursive_prefix: false,
+    };
+
+    info!("Running... press Ctrl-C to stop.");
+    if let Err(err) = mac_record(opts, &mut sink, should_stop) {
+        return Err(format!("nerf-mac-capture::record failed: {}", err).into());
+    }
+
+    sink.finish()?;
+    Ok(())
+}
+
+fn record_child_launch(
+    args: args::RecordArgs,
+    program: String,
+    program_args: Vec<String>,
+) -> Result<(), Box<dyn Error>> {
+    let output_path = resolve_output_path(&args);
+
+    let mut accepter = TaskAccepter::new()
+        .map_err(|err| format!("setting up Mach IPC accepter: {:?}", err))?;
+    let server_name = accepter.server_name().to_owned();
+    let launcher = TaskLauncher::new(
+        OsString::from(&program),
+        program_args.into_iter().map(OsString::from),
+        &server_name,
+    )
+    .map_err(|err| format!("preparing TaskLauncher: {:?}", err))?;
+
+    info!("Launching {}...", program);
+    let mut child = launcher.launch_child();
+
+    info!("Waiting for child to bootstrap via preload dylib...");
+    let accepted_task = wait_for_my_task(&mut accepter, Duration::from_secs(10))?;
+    let pid = accepted_task.pid();
+    info!("Child bootstrapped: PID {}", pid);
+
+    let exe_path = proc_pidpath(pid).unwrap_or_else(|_| program.clone());
+    let mut sink = open_sink(&output_path, pid, &exe_path, &args)?;
+
+    // Resume the child now that we have the task port and the headers
+    // are written.
+    accepted_task.start_execution();
+
+    let sigint = SigintHandler::new();
+    let start = std::time::Instant::now();
+    let time_limit = args.profiler_args.time_limit.map(Duration::from_secs);
+    let opts = RecordOptions {
+        pid,
+        frequency_hz: args.frequency,
+        duration: None,
+        fold_recursive_prefix: false,
+    };
+
+    let should_stop = || {
+        if sigint_or_deadline(&sigint, &start, &time_limit) {
+            return true;
+        }
+        // Also stop if the child has exited.
+        match child.try_wait() {
+            Ok(Some(_)) => true,
+            _ => false,
+        }
+    };
+
+    let drain_messages = |sink: &mut MacSink| {
+        // Non-blocking-ish drain of any new IPC messages from the preload
+        // dylib (jitdump-path notifications mostly).
+        while let Ok(msg) = accepter.next_message(Duration::from_millis(0)) {
+            match msg {
+                ReceivedStuff::JitdumpPath(pid, path) => {
+                    sink.on_jitdump(JitdumpEvent {
+                        pid,
+                        path: path.as_path(),
+                    });
+                }
+                ReceivedStuff::AcceptedTask(_) => {
+                    // We don't currently support multi-process recording; ignore
+                    // additional task ports (descendants).
+                }
+                ReceivedStuff::Ignored => {}
+            }
+        }
+    };
+
+    info!("Running... press Ctrl-C to stop.");
+    if let Err(err) = record_with_task_and_tick_hook(
+        accepted_task.task(),
+        opts,
+        &mut sink,
+        should_stop,
+        drain_messages,
+    ) {
+        return Err(format!("nerf-mac-capture::record failed: {}", err).into());
+    }
+
+    // Best-effort shutdown of the child if it's still running.
+    let _ = child.kill();
+    let _ = child.wait();
+
+    sink.finish()?;
+    Ok(())
+}
+
+fn wait_for_my_task(
+    accepter: &mut TaskAccepter,
+    timeout: Duration,
+) -> Result<nerf_mac_capture::process_launcher::AcceptedTask, Box<dyn Error>> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err("timed out waiting for child to bootstrap via preload dylib".into());
+        }
+        match accepter.next_message(remaining) {
+            Ok(ReceivedStuff::AcceptedTask(task)) => return Ok(task),
+            Ok(_) => continue, // jitdump-before-task or ignored kind; keep waiting
+            Err(err) => return Err(format!("Mach IPC error: {:?}", err).into()),
+        }
+    }
+}
+
+fn open_sink(
+    output_path: &std::path::Path,
+    pid: u32,
+    exe_path: &str,
+    args: &args::RecordArgs,
+) -> Result<MacSink, Box<dyn Error>> {
+    let writer = BufWriter::new(File::create(output_path)?);
     let mut sink = MacSink::new(writer, pid)?;
 
     sink.write_packet(Packet::Header {
@@ -83,46 +212,38 @@ pub fn main(args: args::RecordArgs) -> Result<(), Box<dyn Error>> {
     })?;
     sink.write_packet(Packet::ProcessInfo {
         pid,
-        executable: Cow::Owned(exe_path.into_bytes()),
+        executable: Cow::Owned(exe_path.as_bytes().to_owned()),
         binary_id: Inode::empty(),
     })?;
     sink.write_packet(Packet::ProfilingFrequency {
         frequency: args.frequency,
     })?;
 
-    let sigint = SigintHandler::new();
-    let start = std::time::Instant::now();
-    let time_limit = args.profiler_args.time_limit.map(Duration::from_secs);
-    let should_stop = || {
-        if sigint.was_triggered() {
+    Ok(sink)
+}
+
+fn resolve_output_path(args: &args::RecordArgs) -> PathBuf {
+    args.profiler_args
+        .output
+        .clone()
+        .unwrap_or_else(|| OsString::from(DEFAULT_OUTPUT))
+        .into()
+}
+
+fn sigint_or_deadline(
+    sigint: &SigintHandler,
+    start: &std::time::Instant,
+    time_limit: &Option<Duration>,
+) -> bool {
+    if sigint.was_triggered() {
+        return true;
+    }
+    if let Some(limit) = time_limit {
+        if start.elapsed() >= *limit {
             return true;
         }
-        if let Some(limit) = time_limit {
-            if start.elapsed() >= limit {
-                return true;
-            }
-        }
-        false
-    };
-
-    let opts = RecordOptions {
-        pid,
-        frequency_hz: args.frequency,
-        // We rely on `should_stop()` for the time limit so the elapsed time
-        // is reported uniformly with the rest of the codebase. RecordOptions::duration
-        // is a hard backstop only.
-        duration: None,
-        fold_recursive_prefix: false,
-    };
-
-    info!("Running... press Ctrl-C to stop.");
-    if let Err(err) = mac_record(opts, &mut sink, should_stop) {
-        return Err(format!("nerf-mac-capture::record failed: {}", err).into());
     }
-
-    sink.finish()?;
-    info!("Recording complete.");
-    Ok(())
+    false
 }
 
 fn native_arch_name() -> &'static str {
@@ -144,6 +265,8 @@ struct MacSink {
     /// Tracks the address range each loaded image occupies so we can emit
     /// the exact `MemoryRegionUnmap` range when the image is unloaded.
     loaded_ranges: std::collections::HashMap<u64, u64>,
+    /// Jitdump paths the preload dylib reported during recording.
+    jitdump_paths: Vec<PathBuf>,
 }
 
 impl MacSink {
@@ -151,6 +274,7 @@ impl MacSink {
         Ok(Self {
             writer,
             loaded_ranges: std::collections::HashMap::new(),
+            jitdump_paths: Vec::new(),
         })
     }
 
@@ -162,7 +286,17 @@ impl MacSink {
 
     fn finish(mut self) -> io::Result<()> {
         use std::io::Write;
-        self.writer.flush()
+        self.writer.flush()?;
+        if !self.jitdump_paths.is_empty() {
+            info!("Recording complete.");
+            info!("JIT runtime detected. To resolve JIT'd symbols, pass --jitdump:");
+            for path in &self.jitdump_paths {
+                info!("    nperf collate <archive> --jitdump {}", path.display());
+            }
+        } else {
+            info!("Recording complete.");
+        }
+        Ok(())
     }
 }
 
@@ -298,6 +432,18 @@ impl SampleSink for MacSink {
             tid: ev.tid,
             name: Cow::Owned(ev.name.as_bytes().to_owned()),
         });
+    }
+
+    fn on_jitdump(&mut self, ev: JitdumpEvent<'_>) {
+        let path = ev.path.to_path_buf();
+        if !self.jitdump_paths.iter().any(|p| p == &path) {
+            info!(
+                "Detected JIT runtime: {} (PID {})",
+                path.display(),
+                ev.pid
+            );
+            self.jitdump_paths.push(path);
+        }
     }
 }
 

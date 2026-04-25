@@ -66,10 +66,33 @@ impl Default for RecordOptions {
 pub fn record<S: SampleSink>(
     opts: RecordOptions,
     sink: &mut S,
-    should_stop: impl Fn() -> bool,
+    should_stop: impl FnMut() -> bool,
 ) -> Result<(), SamplingError> {
     let task = task_for_pid_existing(opts.pid)?;
+    record_with_task(task, opts, sink, should_stop)
+}
 
+/// Same as [`record`], but the caller has already acquired a task port
+/// (e.g. via the child-launch / `TaskAccepter` flow).
+pub fn record_with_task<S: SampleSink>(
+    task: mach_port_t,
+    opts: RecordOptions,
+    sink: &mut S,
+    should_stop: impl FnMut() -> bool,
+) -> Result<(), SamplingError> {
+    record_with_task_and_tick_hook(task, opts, sink, should_stop, |_| {})
+}
+
+/// Same as [`record_with_task`] but invokes `on_tick` at the top of every
+/// sampling tick. The hook is handed `&mut S` so it can emit additional
+/// events (e.g. Jitdump paths discovered via the IPC accepter).
+pub fn record_with_task_and_tick_hook<S: SampleSink>(
+    task: mach_port_t,
+    opts: RecordOptions,
+    sink: &mut S,
+    mut should_stop: impl FnMut() -> bool,
+    mut on_tick: impl FnMut(&mut S),
+) -> Result<(), SamplingError> {
     let mut dyld_manager = DyldInfoManager::new(task);
     let mut unwinder: UnwinderNative<UnwindSectionBytes, MayAllocateDuringUnwind> =
         UnwinderNative::new();
@@ -94,6 +117,10 @@ pub fn record<S: SampleSink>(
                 break;
             }
         }
+
+        // Caller-provided per-tick hook (e.g. drain a Mach IPC accepter
+        // for jitdump-path messages from the preload dylib).
+        on_tick(sink);
 
         // Pick up dyld load/unload events.
         if let Err(err) = apply_dyld_changes(&mut dyld_manager, &mut unwinder, task, opts.pid, sink)
