@@ -17,7 +17,7 @@ addr2line = { version = "0.21", default-features = false, features = ["std"] }
 yaxpeax-arch = { version = "0.3", default-features = false, features = ["std"] }
 yaxpeax-x86 = { version = "2", default-features = false, features = ["std", "fmt"] }
 yaxpeax-arm = { version = "0.4.0", default-features = false, features = ["std", "fmt"] }
-object = { version = "0.39.1", default-features = false, features = ["std", "read_core", "elf", "macho", "compression"] }
+object = { version = "0.39.1", default-features = false, features = ["std", "read_core", "elf", "macho", "compression", "archive"] }
 memmap2 = "0.9"
 rustc-demangle = "0.1"
 cpp_demangle = "0.4"

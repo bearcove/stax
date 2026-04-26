@@ -19,11 +19,12 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         write_if_changed(&out_path, ts)?;
     }
 
-    // Theme CSS: catppuccin-mocha, scoped to `.asm-line` so it only colors
-    // the disassembly pane. arborium emits `<a-k>`, `<a-f>`, etc. tags by
-    // default and `Theme::to_css` produces the matching rules.
+    // Theme CSS: catppuccin-mocha, scoped to anywhere we render
+    // arborium-highlighted content (asm pane + interleaved source
+    // snippets). `:where()` keeps specificity at zero so explicit
+    // overrides in index.css still win.
     let theme = arborium_theme::theme::builtin::catppuccin_mocha();
-    let css = theme.to_css(".asm-line");
+    let css = theme.to_css(":where(.asm-line, .src-snip)");
     write_if_changed(&out_dir.join("theme.css"), css)?;
 
     Ok(())

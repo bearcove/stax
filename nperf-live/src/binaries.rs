@@ -193,9 +193,11 @@ impl BinaryRegistry {
 
     /// Resolve `address` (AVMA) into a function: which binary, which
     /// symbol, and the bytes of the function. Lazily loads the binary's
-    /// `CodeImage` on first hit. When no image is mapped at `address`
-    /// (typical for JIT'd code), falls back to reading bytes directly
-    /// out of the target process via `mach_vm_read`.
+    /// `CodeImage` on first hit. Falls through several layers:
+    ///   1. binary mapped + image loadable → bytes from disk (enables DWARF)
+    ///   2. binary mapped + image NOT loadable → bytes via mach_vm_read
+    ///      (still gives disassembly, just no DWARF/source)
+    ///   3. address not in any mapped binary → read window of target memory
     pub fn resolve(&mut self, address: u64) -> Option<ResolvedAddress> {
         let binary_idx = match self
             .by_base
@@ -224,10 +226,11 @@ impl BinaryRegistry {
             )
         };
 
-        let image = self.image_for(&path, arch.as_deref())?;
+        let image = self.image_for(&path, arch.as_deref());
 
         // Re-borrow the binary now that the registry mutation is done.
         let binary = &self.by_base[binary_idx];
+        let basename = short_path(&binary.path).to_owned();
         let (function_name, fn_start_svma, fn_end_svma) = match sym_idx {
             Some(i) => {
                 let s = &binary.symbols[i];
@@ -240,7 +243,7 @@ impl BinaryRegistry {
                 let svma = svma_for(binary, address);
                 let window = 64u64;
                 (
-                    format!("{}+{:#x}", short_path(&binary.path), svma),
+                    format!("{}+{:#x}", basename, svma),
                     svma.saturating_sub(window / 2),
                     svma.saturating_add(window / 2),
                 )
@@ -251,10 +254,27 @@ impl BinaryRegistry {
         if len == 0 {
             return None;
         }
-        let bytes = image.fetch(fn_start_svma, len)?.to_vec();
-
         let base_address = avma_for_svma(base_avma, text_svma, fn_start_svma);
         let end_address = avma_for_svma(base_avma, text_svma, fn_end_svma);
+
+        // Prefer disk bytes when we have them (lets DWARF/source work);
+        // fall back to live target memory for binaries we couldn't load
+        // (typically when the dyld shared cache lookup failed).
+        let bytes = match image
+            .as_ref()
+            .and_then(|img| img.fetch(fn_start_svma, len))
+        {
+            Some(b) => b.to_vec(),
+            None => {
+                tracing::debug!(
+                    "resolve: image_for {} unavailable, reading {} bytes from target",
+                    path,
+                    len
+                );
+                self.read_target_memory(base_address, len)?
+            }
+        };
+
         Some(ResolvedAddress {
             binary_path: path,
             arch,
@@ -263,7 +283,7 @@ impl BinaryRegistry {
             end_address,
             bytes,
             fn_start_svma,
-            image: Some(image),
+            image,
         })
     }
 

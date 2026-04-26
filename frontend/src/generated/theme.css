@@ -1,4 +1,4 @@
-.asm-line {
+:where(.asm-line, .src-snip) {
   background: #1e1e2e;
   --bg: #1e1e2e;
   --surface: #30303f;
