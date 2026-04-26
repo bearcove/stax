@@ -62,6 +62,18 @@ pub struct FlamegraphUpdate {
     pub root: FlameNode,
 }
 
+#[derive(Clone, Debug, Facet)]
+pub struct ThreadInfo {
+    pub tid: u32,
+    pub name: Option<String>,
+    pub sample_count: u64,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct ThreadsUpdate {
+    pub threads: Vec<ThreadInfo>,
+}
+
 /// Source-line header attached to the first instruction generated from
 /// a given (file, line) pair. The frontend renders one of these as a
 /// banner row above the asm row whenever the source location changes
@@ -105,24 +117,46 @@ pub struct AnnotatedView {
 
 #[vox::service]
 pub trait Profiler {
-    /// Snapshot of the top-N functions, ranked by `sort`.
-    async fn top(&self, limit: u32, sort: TopSort) -> Vec<TopEntry>;
+    /// Snapshot of the top-N functions, ranked by `sort`. `tid` filters
+    /// to one thread; `None` aggregates across all threads.
+    async fn top(&self, limit: u32, sort: TopSort, tid: Option<u32>) -> Vec<TopEntry>;
 
     /// Stream periodic top-N updates to the client, ranked by `sort`.
-    async fn subscribe_top(&self, limit: u32, sort: TopSort, output: vox::Tx<TopUpdate>);
+    /// `tid` filters to one thread; `None` aggregates across all.
+    async fn subscribe_top(
+        &self,
+        limit: u32,
+        sort: TopSort,
+        tid: Option<u32>,
+        output: vox::Tx<TopUpdate>,
+    );
 
     /// Total number of samples observed since the server started.
     async fn total_samples(&self) -> u64;
 
-    /// Stream annotated disassembly for the function containing `address`.
-    /// Sample counts update live; the disassembly itself only changes if
-    /// the binary is unloaded/reloaded.
-    async fn subscribe_annotated(&self, address: u64, output: vox::Tx<AnnotatedView>);
+    /// Stream annotated disassembly for the function containing
+    /// `address`. Sample counts update live; the disassembly itself
+    /// only changes if the binary is unloaded/reloaded. `tid` filters
+    /// the per-instruction count overlay (the disassembly bytes are
+    /// the same regardless).
+    async fn subscribe_annotated(
+        &self,
+        address: u64,
+        tid: Option<u32>,
+        output: vox::Tx<AnnotatedView>,
+    );
 
     /// Stream periodic flamegraph snapshots. Nodes whose `count` is
     /// below ~0.5% of `total_samples` are pruned to bound the wire
-    /// size; children are sorted hot-first (largest count leftmost).
-    async fn subscribe_flamegraph(&self, output: vox::Tx<FlamegraphUpdate>);
+    /// size; children are sorted hot-first.
+    async fn subscribe_flamegraph(
+        &self,
+        tid: Option<u32>,
+        output: vox::Tx<FlamegraphUpdate>,
+    );
+
+    /// Stream the live list of threads (tid, name, sample count).
+    async fn subscribe_threads(&self, output: vox::Tx<ThreadsUpdate>);
 }
 
 /// All service descriptors exposed by nperf-live; the codegen iterates over

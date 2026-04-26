@@ -13,6 +13,8 @@ import {
   connectProfiler,
   type AnnotatedView,
   type ProfilerClient,
+  type ThreadInfo,
+  type ThreadsUpdate,
   type TopEntry,
   type TopSort,
   type TopUpdate,
@@ -36,8 +38,12 @@ export function App() {
   const [client, setClient] = useState<ProfilerClient | null>(null);
   const [displayed, setDisplayed] = useState<TopUpdate | null>(null);
   const [selected, setSelected] = useState<bigint | null>(null);
-  const [frozen, setFrozen] = useState(false);
+  const [tableFrozen, setTableFrozen] = useState(false);
+  const [flameFrozen, setFlameFrozen] = useState(false);
+  const frozen = tableFrozen || flameFrozen;
   const [sort, setSort] = useState<SortKey>("self");
+  const [selectedTid, setSelectedTid] = useState<number | null>(null);
+  const [threads, setThreads] = useState<ThreadInfo[]>([]);
   // Latest update kept in a ref so the frozen-gate logic can pull the
   // most recent snapshot when the mouse leaves without re-running the
   // subscribe effect.
@@ -62,7 +68,7 @@ export function App() {
         const [tx, rx] = channel<TopUpdate>();
         const sortArg: TopSort =
           sort === "self" ? { tag: "BySelf" } : { tag: "ByTotal" };
-        c.subscribeTop(50, sortArg, tx).catch((err) => {
+        await c.subscribeTop(50, sortArg, selectedTid, tx).catch((err) => {
           if (!cancelled) {
             setStatus("err");
             setError(String(err));
@@ -76,7 +82,7 @@ export function App() {
           // The mouse-leave handler will pull the freshest one.
           // Use a functional update so we can read the *current* frozen
           // value without it being a dep.
-          setDisplayed((prev) => (frozenRef.current ? prev : next));
+          setDisplayed((prev) => (tableFrozenRef.current ? prev : next));
         }
       } catch (err) {
         if (cancelled) return;
@@ -88,17 +94,35 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [committedUrl, sort]);
+  }, [committedUrl, sort, selectedTid]);
 
-  // Mirror `frozen` into a ref so the rx loop can check it without re-running.
-  const frozenRef = useRef(frozen);
+  // Subscribe to the live thread list whenever the client connects.
   useEffect(() => {
-    frozenRef.current = frozen;
+    if (!client) return;
+    let cancelled = false;
+    const [tx, rx] = channel<ThreadsUpdate>();
+    client.subscribeThreads(tx).catch(() => {});
+    (async () => {
+      for await (const next of rx) {
+        if (cancelled) break;
+        setThreads(next.threads);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [client]);
+
+  // Mirror table-pane frozen into a ref so the rx loop can check it
+  // without re-running.
+  const tableFrozenRef = useRef(tableFrozen);
+  useEffect(() => {
+    tableFrozenRef.current = tableFrozen;
     // When unfreezing, immediately apply whatever the latest snapshot is.
-    if (!frozen && latest.current) {
+    if (!tableFrozen && latest.current) {
       setDisplayed(latest.current);
     }
-  }, [frozen]);
+  }, [tableFrozen]);
 
   return (
     <div className="shell">
@@ -124,6 +148,11 @@ export function App() {
           />
           <button onClick={() => setCommittedUrl(url)}>connect</button>
           {error && <span className="err-text">{error}</span>}
+          <ThreadSwitcher
+            threads={threads}
+            selectedTid={selectedTid}
+            onSelect={setSelectedTid}
+          />
           <span className="spacer" />
           <span className="meta">
             {displayed
@@ -134,14 +163,19 @@ export function App() {
       </header>
       {client && (
         <section className="flame-pane">
-          <Flamegraph client={client} onSelectAddress={setSelected} />
+          <Flamegraph
+            client={client}
+            tid={selectedTid}
+            onSelectAddress={setSelected}
+            onFrozenChange={setFlameFrozen}
+          />
         </section>
       )}
       <main className="split">
         <section
-          className={`pane top-pane${frozen ? " frozen" : ""}`}
-          onMouseEnter={() => setFrozen(true)}
-          onMouseLeave={() => setFrozen(false)}
+          className={`pane top-pane${tableFrozen ? " frozen" : ""}`}
+          onMouseEnter={() => setTableFrozen(true)}
+          onMouseLeave={() => setTableFrozen(false)}
         >
           <TopTable
             entries={displayed?.entries ?? []}
@@ -154,7 +188,12 @@ export function App() {
         </section>
         <section className="pane ann-pane">
           {client && selected !== null ? (
-            <Annotation client={client} address={selected} key={String(selected)} />
+            <Annotation
+              client={client}
+              address={selected}
+              tid={selectedTid}
+              key={String(selected)}
+            />
           ) : (
             <div className="placeholder">click a row to see disassembly</div>
           )}
@@ -344,12 +383,46 @@ function heatBg(count: bigint, max: bigint): string {
   return `hsla(${hue}, 70%, 45%, ${alpha})`;
 }
 
+function ThreadSwitcher({
+  threads,
+  selectedTid,
+  onSelect,
+}: {
+  threads: ThreadInfo[];
+  selectedTid: number | null;
+  onSelect: (tid: number | null) => void;
+}) {
+  return (
+    <select
+      className="thread-switcher"
+      value={selectedTid === null ? "all" : String(selectedTid)}
+      onChange={(e) => {
+        const v = e.target.value;
+        onSelect(v === "all" ? null : Number(v));
+      }}
+      title="filter by thread"
+    >
+      <option value="all">all threads</option>
+      {threads.map((t) => {
+        const label = t.name ? `[${t.tid}] ${t.name}` : `[${t.tid}]`;
+        return (
+          <option key={t.tid} value={String(t.tid)}>
+            {label} ({t.sample_count.toString()})
+          </option>
+        );
+      })}
+    </select>
+  );
+}
+
 function Annotation({
   client,
   address,
+  tid,
 }: {
   client: ProfilerClient;
   address: bigint;
+  tid: number | null;
 }) {
   const [view, setView] = useState<AnnotatedView | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -361,7 +434,7 @@ function Annotation({
     setErr(null);
 
     const [tx, rx] = channel<AnnotatedView>();
-    client.subscribeAnnotated(address, tx).catch((e) => {
+    client.subscribeAnnotated(address, tid, tx).catch((e) => {
       if (!cancelled) setErr(String(e));
     });
 
@@ -375,7 +448,7 @@ function Annotation({
     return () => {
       cancelled = true;
     };
-  }, [client, address]);
+  }, [client, address, tid]);
 
   const lines = view?.lines ?? [];
   const maxSelf = lines.reduce(

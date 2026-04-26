@@ -30,6 +30,7 @@ use crate::args::{self, TargetProcess};
 use crate::live_sink::{
     BinaryLoadedEvent as LiveBinaryLoadedEvent, BinaryUnloadedEvent as LiveBinaryUnloadedEvent,
     LiveSink, LiveSymbol, SampleEvent as LiveSampleEvent, TargetAttached,
+    ThreadName as LiveThreadName,
 };
 use crate::utils::SigintHandler;
 
@@ -663,6 +664,13 @@ impl SampleSink for MacSink {
     }
 
     fn on_thread_name(&mut self, ev: ThreadNameEvent<'_>) {
+        if let Some(sink) = self.live_sink.as_ref() {
+            sink.on_thread_name(&LiveThreadName {
+                pid: ev.pid,
+                tid: ev.tid,
+                name: ev.name,
+            });
+        }
         let _ = self.write_packet(Packet::ThreadName {
             pid: ev.pid,
             tid: ev.tid,

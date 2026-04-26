@@ -57,6 +57,15 @@ pub struct TargetAttached {
     pub task_port: u64,
 }
 
+/// One thread in the target acquired (or had its name updated to)
+/// `name`. The live aggregator stashes these by tid so the UI can
+/// label thread-filter selections.
+pub struct ThreadName< 'a > {
+    pub pid: u32,
+    pub tid: u32,
+    pub name: &'a str,
+}
+
 pub trait LiveSink: Send + Sync {
     fn on_sample( &self, event: &SampleEvent );
 
@@ -72,4 +81,9 @@ pub trait LiveSink: Send + Sync {
     /// A previously-loaded image was unmapped.
     #[allow(unused_variables)]
     fn on_binary_unloaded( &self, event: &BinaryUnloadedEvent ) {}
+
+    /// A thread was discovered (or renamed). Fires whenever the
+    /// recorder learns a tid → name mapping.
+    #[allow(unused_variables)]
+    fn on_thread_name( &self, event: &ThreadName ) {}
 }

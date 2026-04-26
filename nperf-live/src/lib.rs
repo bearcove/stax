@@ -12,11 +12,11 @@ use parking_lot::RwLock;
 use tokio::sync::mpsc;
 
 use nperf_core::live_sink::{
-    BinaryLoadedEvent, BinaryUnloadedEvent, LiveSink, SampleEvent, TargetAttached,
+    BinaryLoadedEvent, BinaryUnloadedEvent, LiveSink, SampleEvent, TargetAttached, ThreadName,
 };
 use nperf_live_proto::{
     AnnotatedLine, AnnotatedView, FlameNode, FlamegraphUpdate, Profiler, ProfilerDispatcher,
-    TopEntry, TopSort, TopUpdate,
+    ThreadInfo, ThreadsUpdate, TopEntry, TopSort, TopUpdate,
 };
 
 mod aggregator;
@@ -31,17 +31,11 @@ pub use binaries::{BinaryRegistry, LoadedBinary};
 /// What the sampler thread pushes into tokio. Owned data so we can move
 /// across the thread boundary cheaply.
 pub(crate) enum LiveEvent {
-    Sample {
-        user_addrs: Vec<u64>,
-    },
+    Sample { tid: u32, user_addrs: Vec<u64> },
     BinaryLoaded(binaries::LoadedBinary),
-    BinaryUnloaded {
-        base_avma: u64,
-    },
-    TargetAttached {
-        pid: u32,
-        task_port: u64,
-    },
+    BinaryUnloaded { base_avma: u64 },
+    TargetAttached { pid: u32, task_port: u64 },
+    ThreadName { tid: u32, name: String },
 }
 
 #[derive(Clone)]
@@ -52,7 +46,10 @@ pub struct LiveSinkImpl {
 impl LiveSink for LiveSinkImpl {
     fn on_sample(&self, event: &SampleEvent) {
         let user_addrs: Vec<u64> = event.user_backtrace.iter().map(|f| f.address).collect();
-        let _ = self.tx.send(LiveEvent::Sample { user_addrs });
+        let _ = self.tx.send(LiveEvent::Sample {
+            tid: event.tid,
+            user_addrs,
+        });
     }
 
     fn on_binary_loaded(&self, event: &BinaryLoadedEvent) {
@@ -89,6 +86,13 @@ impl LiveSink for LiveSinkImpl {
             task_port: event.task_port,
         });
     }
+
+    fn on_thread_name(&self, event: &ThreadName) {
+        let _ = self.tx.send(LiveEvent::ThreadName {
+            tid: event.tid,
+            name: event.name.to_owned(),
+        });
+    }
 }
 
 #[derive(Clone)]
@@ -102,63 +106,107 @@ pub struct LiveServer {
 }
 
 impl Profiler for LiveServer {
-    async fn top(&self, limit: u32, sort: TopSort) -> Vec<TopEntry> {
-        build_top_entries(&self.aggregator, &self.binaries, limit as usize, sort)
+    async fn top(&self, limit: u32, sort: TopSort, tid: Option<u32>) -> Vec<TopEntry> {
+        build_top_entries(&self.aggregator, &self.binaries, limit as usize, sort, tid)
     }
 
-    async fn subscribe_top(&self, limit: u32, sort: TopSort, output: vox::Tx<TopUpdate>) {
+    async fn subscribe_top(
+        &self,
+        limit: u32,
+        sort: TopSort,
+        tid: Option<u32>,
+        output: vox::Tx<TopUpdate>,
+    ) {
         let aggregator = self.aggregator.clone();
         let binaries = self.binaries.clone();
-        let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
-        loop {
-            interval.tick().await;
-            let snapshot = {
-                let entries = build_top_entries(&aggregator, &binaries, limit as usize, sort);
-                let total_samples = aggregator.read().total_samples();
-                TopUpdate {
-                    total_samples,
-                    entries,
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
+            loop {
+                interval.tick().await;
+                let snapshot = {
+                    let entries =
+                        build_top_entries(&aggregator, &binaries, limit as usize, sort, tid);
+                    let total_samples = aggregator.read().total_samples(tid);
+                    TopUpdate {
+                        total_samples,
+                        entries,
+                    }
+                };
+                if output.send(snapshot).await.is_err() {
+                    break;
                 }
-            };
-            if output.send(snapshot).await.is_err() {
-                break;
             }
-        }
+        });
     }
 
     async fn total_samples(&self) -> u64 {
-        self.aggregator.read().total_samples()
+        self.aggregator.read().total_samples(None)
     }
 
-    async fn subscribe_annotated(&self, address: u64, output: vox::Tx<AnnotatedView>) {
+    async fn subscribe_annotated(
+        &self,
+        address: u64,
+        tid: Option<u32>,
+        output: vox::Tx<AnnotatedView>,
+    ) {
         let aggregator = self.aggregator.clone();
         let binaries = self.binaries.clone();
         let source = self.source.clone();
-        let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
-        loop {
-            interval.tick().await;
-            // Build the view in a sync block so neither the parking_lot guards
-            // nor the (non-Send) arborium Highlighter cross an await.
-            let view = build_annotated_view(&aggregator, &binaries, &source, address);
-            if output.send(view).await.is_err() {
-                break;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
+            loop {
+                interval.tick().await;
+                let view = build_annotated_view(&aggregator, &binaries, &source, address, tid);
+                if output.send(view).await.is_err() {
+                    break;
+                }
             }
-        }
+        });
     }
 
-    async fn subscribe_flamegraph(&self, output: vox::Tx<FlamegraphUpdate>) {
+    async fn subscribe_flamegraph(
+        &self,
+        tid: Option<u32>,
+        output: vox::Tx<FlamegraphUpdate>,
+    ) {
         let aggregator = self.aggregator.clone();
         let binaries = self.binaries.clone();
-        // Slower cadence than top-N — the tree is much heavier to
-        // build and to push over the wire.
-        let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
-        loop {
-            interval.tick().await;
-            let update = build_flame_update(&aggregator, &binaries);
-            if output.send(update).await.is_err() {
-                break;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+            loop {
+                interval.tick().await;
+                let update = build_flame_update(&aggregator, &binaries, tid);
+                if output.send(update).await.is_err() {
+                    break;
+                }
             }
-        }
+        });
+    }
+
+    async fn subscribe_threads(&self, output: vox::Tx<ThreadsUpdate>) {
+        let aggregator = self.aggregator.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+            loop {
+                interval.tick().await;
+                let update = {
+                    let agg = aggregator.read();
+                    let mut threads: Vec<ThreadInfo> = agg
+                        .iter_threads()
+                        .map(|(tid, sample_count)| ThreadInfo {
+                            tid,
+                            name: agg.thread_name(tid).map(|s| s.to_owned()),
+                            sample_count,
+                        })
+                        .collect();
+                    threads.sort_by(|a, b| b.sample_count.cmp(&a.sample_count));
+                    ThreadsUpdate { threads }
+                };
+                if output.send(update).await.is_err() {
+                    break;
+                }
+            }
+        });
     }
 }
 
@@ -167,13 +215,14 @@ fn build_top_entries(
     binaries: &Arc<RwLock<BinaryRegistry>>,
     limit: usize,
     sort: TopSort,
+    tid: Option<u32>,
 ) -> Vec<TopEntry> {
     use std::collections::HashMap;
 
     // Pull *all* per-address counts. We're going to collapse multiple
     // addresses inside one symbol into a single row, so truncating to
     // `limit` here would miss the symbol totals.
-    let raw = aggregator.read().top_raw(usize::MAX);
+    let raw = aggregator.read().top_raw(usize::MAX, tid);
     let binaries = binaries.read();
 
     // Group key: (function_name, binary_basename). When unresolved (no
@@ -181,9 +230,6 @@ fn build_top_entries(
     // hex form so it stays unique).
     struct Agg {
         address: u64,
-        /// Self-count of `address` alone — used to decide which address
-        /// to keep as the group's representative when a hotter one comes
-        /// in. Not what we report; that's `self_total`.
         representative_self: u64,
         self_total: u64,
         total_total: u64,
@@ -198,8 +244,6 @@ fn build_top_entries(
             Some(r) => (Some(r.function_name), Some(r.binary), r.is_main),
             None => (None, None, false),
         };
-        // Unresolved entries get their own group (keyed by address) so
-        // we don't collapse different unknown rows into one.
         let key: (String, String) = match (&fn_name, &bin) {
             (Some(n), Some(b)) => (n.clone(), b.clone()),
             _ => (format!("{:#x}", e.address), String::new()),
@@ -209,10 +253,6 @@ fn build_top_entries(
             .and_modify(|g| {
                 g.self_total += e.self_count;
                 g.total_total += e.total_count;
-                // Keep the hottest address as the representative — clicking
-                // it opens the same function's disassembly anyway, but
-                // starting at the hottest line is a friendlier default
-                // scroll position.
                 if e.self_count > g.representative_self {
                     g.address = e.address;
                     g.representative_self = e.self_count;
@@ -257,21 +297,23 @@ fn build_top_entries(
 fn build_flame_update(
     aggregator: &Arc<RwLock<Aggregator>>,
     binaries: &Arc<RwLock<BinaryRegistry>>,
+    tid: Option<u32>,
 ) -> FlamegraphUpdate {
     let agg = aggregator.read();
     let bins = binaries.read();
-    let total = agg.total_samples();
-    // Drop nodes that account for less than 0.5% of total samples.
-    // Keeps the wire size bounded as the tree grows.
+    let total = agg.total_samples(tid);
     let threshold = (total / 200).max(1);
 
-    let mut children: Vec<FlameNode> = agg
-        .flame_root
+    let flame_root = agg.flame_root(tid);
+    let mut children: Vec<FlameNode> = flame_root
         .children
         .iter()
         .filter(|(_, c)| c.count >= threshold)
         .map(|(a, c)| flame_node_to_proto(*a, c, threshold, &bins))
         .collect();
+    for c in &mut children {
+        fold_recursion(c);
+    }
     children.sort_by(|a, b| b.count.cmp(&a.count));
 
     let root = FlameNode {
@@ -286,6 +328,24 @@ fn build_flame_update(
         total_samples: total,
         root,
     }
+}
+
+/// Collapse runs of same-symbol parent→child into a single node.
+/// Recursive functions (and inlined call chains that share a name)
+/// otherwise produce towers of identical boxes that eat vertical
+/// space without adding information.
+fn fold_recursion(node: &mut FlameNode) {
+    while node.children.len() == 1 && symbol_eq(&node.children[0], node) {
+        let child = node.children.remove(0);
+        node.children = child.children;
+    }
+    for c in &mut node.children {
+        fold_recursion(c);
+    }
+}
+
+fn symbol_eq(a: &FlameNode, b: &FlameNode) -> bool {
+    a.function_name.is_some() && a.function_name == b.function_name && a.binary == b.binary
 }
 
 fn flame_node_to_proto(
@@ -321,31 +381,25 @@ fn build_annotated_view(
     binaries: &Arc<RwLock<BinaryRegistry>>,
     source: &Arc<parking_lot::Mutex<source::SourceResolver>>,
     address: u64,
+    tid: Option<u32>,
 ) -> AnnotatedView {
-    // Resolve binary + symbol + bytes outside the aggregator lock; the
-    // binary registry is its own RwLock and may need to lazily load a
-    // CodeImage off disk on first hit.
     let resolved = binaries.write().resolve(address);
 
     let mut hl = highlight::AsmHighlighter::new();
     let mut lines: Vec<AnnotatedLine> = match &resolved {
         Some(r) => {
             let agg = aggregator.read();
-            disassemble::disassemble(r, &mut hl, |addr| agg.self_count(addr))
+            disassemble::disassemble(r, &mut hl, |addr| agg.self_count(addr, tid))
         }
         None => Vec::new(),
     };
 
-    // Layer source-line headers onto the asm rows. Only mapped binaries
-    // with DWARF participate; for the unmapped (target-memory) path,
-    // `image` is None and we just leave `source_header` unset.
     if let Some(r) = resolved.as_ref()
         && let Some(image) = r.image.as_ref()
     {
         let mut src = source.lock();
         let mut last: Option<(String, u32)> = None;
         for line in lines.iter_mut() {
-            // The asm address is in AVMA space; addr2line wants SVMA.
             let svma = r.fn_start_svma + (line.address - r.base_address);
             let here = src.locate(&r.binary_path, image, svma);
             if here != last {
@@ -366,10 +420,7 @@ fn build_annotated_view(
         Some(r) => r.function_name.clone(),
         None => format!("(no binary mapped at {:#x})", address),
     };
-    let base_address = resolved
-        .as_ref()
-        .map(|r| r.base_address)
-        .unwrap_or(address);
+    let base_address = resolved.as_ref().map(|r| r.base_address).unwrap_or(address);
     AnnotatedView {
         function_name,
         base_address,
@@ -379,9 +430,6 @@ fn build_annotated_view(
 }
 
 /// Spawn the live-serving infrastructure on the current tokio runtime.
-///
-/// Returns the `LiveSinkImpl` to install on `ProfilingController` and a
-/// JoinHandle for the server task.
 pub async fn start(addr: &str) -> Result<(LiveSinkImpl, tokio::task::JoinHandle<()>)> {
     let aggregator = Arc::new(RwLock::new(Aggregator::default()));
     let binaries = Arc::new(RwLock::new(BinaryRegistry::new()));
@@ -393,8 +441,11 @@ pub async fn start(addr: &str) -> Result<(LiveSinkImpl, tokio::task::JoinHandle<
         tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
                 match event {
-                    LiveEvent::Sample { user_addrs } => {
-                        aggregator.write().record(&user_addrs);
+                    LiveEvent::Sample { tid, user_addrs } => {
+                        aggregator.write().record(tid, &user_addrs);
+                    }
+                    LiveEvent::ThreadName { tid, name } => {
+                        aggregator.write().set_thread_name(tid, name);
                     }
                     LiveEvent::BinaryLoaded(loaded) => {
                         binaries.write().insert(loaded);

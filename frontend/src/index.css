@@ -89,6 +89,22 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+select.thread-switcher {
+  background: #16181c;
+  color: #e6e8eb;
+  border: 1px solid #232629;
+  border-radius: 4px;
+  padding: 4px 8px;
+  font: inherit;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  max-width: 22em;
+}
+
+select.thread-switcher:hover {
+  border-color: #2a2e34;
+}
+
 .err-text {
   color: #d35f5f;
 }

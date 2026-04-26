@@ -68,30 +68,47 @@ function layout(root: FlameNode): { boxes: Box[]; depth: number } {
 
 export function Flamegraph({
   client,
+  tid,
   onSelectAddress,
+  onFrozenChange,
 }: {
   client: ProfilerClient;
+  tid: number | null;
   onSelectAddress: (a: bigint) => void;
+  onFrozenChange?: (frozen: boolean) => void;
 }) {
   const [update, setUpdate] = useState<FlamegraphUpdate | null>(null);
   const [hover, setHover] = useState<Box | null>(null);
+  const [frozen, setFrozen] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const frozenRef = useRef(false);
+  const latestRef = useRef<FlamegraphUpdate | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     setUpdate(null);
+    latestRef.current = null;
     const [tx, rx] = channel<FlamegraphUpdate>();
-    client.subscribeFlamegraph(tx).catch(() => {});
+    client.subscribeFlamegraph(tid, tx).catch(() => {});
     (async () => {
       for await (const next of rx) {
         if (cancelled) break;
-        setUpdate(next);
+        latestRef.current = next;
+        if (!frozenRef.current) setUpdate(next);
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [client]);
+  }, [client, tid]);
+
+  useEffect(() => {
+    frozenRef.current = frozen;
+    if (!frozen && latestRef.current) {
+      setUpdate(latestRef.current);
+    }
+    onFrozenChange?.(frozen);
+  }, [frozen, onFrozenChange]);
 
   if (!update) {
     return <div className="flame placeholder">building flamegraph…</div>;
@@ -102,12 +119,18 @@ export function Flamegraph({
   const total = update.total_samples;
 
   return (
-    <div className="flame-wrap">
+    <div
+      className="flame-wrap"
+      onMouseEnter={() => setFrozen(true)}
+      onMouseLeave={() => {
+        setFrozen(false);
+        setHover(null);
+      }}
+    >
       <div
         ref={containerRef}
         className="flame"
         style={{ height: `${height}px` }}
-        onMouseLeave={() => setHover(null)}
       >
         {boxes.map((b) => {
           const c = colorFor(b.node);
