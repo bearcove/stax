@@ -674,6 +674,13 @@ impl PerfBuilder {
         attr.sample_stack_user = stack_size;
         attr.sample_period_or_freq = frequency;
 
+        // Pin sample timestamps to CLOCK_MONOTONIC so they're directly
+        // comparable with jitdump CodeLoad timestamps (the spec recommends
+        // CLOCK_MONOTONIC for jitdump entries). Without use_clockid the kernel
+        // falls back to local_clock(), which is typically TSC-coherent with
+        // CLOCK_MONOTONIC but not formally guaranteed to be.
+        attr.clock_id = libc::CLOCK_MONOTONIC as i32;
+
         attr.flags =
             PERF_ATTR_FLAG_DISABLED |
             PERF_ATTR_FLAG_MMAP |
@@ -681,7 +688,8 @@ impl PerfBuilder {
             PERF_ATTR_FLAG_MMAP_DATA |
             PERF_ATTR_FLAG_COMM |
             PERF_ATTR_FLAG_FREQ |
-            PERF_ATTR_FLAG_TASK;
+            PERF_ATTR_FLAG_TASK |
+            PERF_ATTR_FLAG_USE_CLOCKID;
 
         if exclude_kernel {
             attr.flags |= PERF_ATTR_FLAG_EXCLUDE_KERNEL;

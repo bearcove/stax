@@ -1,25 +1,11 @@
-// Vendored from samply (https://github.com/mstange/samply) at commit
-// 1920bd32c569de5650d1129eb035f43bd28ace27. MIT OR Apache-2.0; see
-// LICENSE-MIT and LICENSE-APACHE at the crate root.
-
-use std::sync::OnceLock;
-
-use mach2::mach_time;
-
-static NANOS_PER_TICK: OnceLock<mach_time::mach_timebase_info> = OnceLock::new();
+// CLOCK_MONOTONIC matches what perf-jitdump producers (and the spec) use, so
+// sample timestamps stay comparable with embedded jitdump CodeLoad timestamps.
+// On macOS, CLOCK_MONOTONIC includes time spent asleep, while
+// mach_absolute_time / CLOCK_UPTIME_RAW does not -- using the latter here can
+// leave the two clocks differing by hours or days after a sleep cycle.
 
 pub fn get_monotonic_timestamp() -> u64 {
-    let nanos_per_tick = NANOS_PER_TICK.get_or_init(|| unsafe {
-        let mut info = mach_time::mach_timebase_info::default();
-        let errno = mach_time::mach_timebase_info(&mut info as *mut _);
-        if errno != 0 || info.denom == 0 {
-            info.numer = 1;
-            info.denom = 1;
-        };
-        info
-    });
-
-    let time = unsafe { mach_time::mach_absolute_time() };
-
-    time * nanos_per_tick.numer as u64 / nanos_per_tick.denom as u64
+    let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    (ts.tv_sec as u64) * 1_000_000_000 + (ts.tv_nsec as u64)
 }
