@@ -105,13 +105,17 @@ pub struct Region {
 
 /// Walk the target process's address space via
 /// `proc_pidinfo(PROC_PIDREGIONPATHINFO)`. Returns one entry per
-/// distinct VM region, in ascending address order.
+/// vnode-backed VM region, in ascending address order.
 ///
-/// Errors out with `ESRCH` if the process is gone; otherwise yields
-/// whatever the kernel hands us.
-pub fn enumerate_regions(pid: u32) -> std::io::Result<Vec<Region>> {
+/// `PROC_PIDREGIONPATHINFO` advances internally over non-vnode
+/// regions and returns the next vnode-backed one; we stop walking on
+/// the first negative or zero return code (which the kernel uses to
+/// signal "no more vnode-backed regions at or after `arg`"). Errors
+/// other than ESRCH/EINVAL get logged but don't propagate.
+pub fn enumerate_regions(pid: u32) -> Vec<Region> {
     let mut out = Vec::new();
     let mut addr: u64 = 0;
+    let buf_size = std::mem::size_of::<ProcRegionWithPathInfo>() as c_int;
     loop {
         let mut info: ProcRegionWithPathInfo = unsafe { std::mem::zeroed() };
         let n = unsafe {
@@ -120,21 +124,26 @@ pub fn enumerate_regions(pid: u32) -> std::io::Result<Vec<Region>> {
                 PROC_PIDREGIONPATHINFO,
                 addr,
                 &mut info as *mut _ as *mut c_void,
-                std::mem::size_of::<ProcRegionWithPathInfo>() as c_int,
+                buf_size,
             )
         };
         if n <= 0 {
-            let err = std::io::Error::last_os_error();
-            // ESRCH after at least one successful iteration just means
-            // we walked off the end of the address space; treat it as
-            // a clean stop.
-            if err.raw_os_error() == Some(ESRCH) && !out.is_empty() {
-                break;
+            if n < 0 {
+                let err = std::io::Error::last_os_error();
+                let raw = err.raw_os_error();
+                if raw == Some(ESRCH) || raw == Some(libc::EINVAL) {
+                    // Normal terminator: kernel walked off the end of
+                    // vnode-backed regions, or process vanished.
+                    log::debug!(
+                        "enumerate_regions(pid={pid}): stop at addr={addr:#x}, errno={raw:?} (terminator)"
+                    );
+                } else {
+                    log::warn!(
+                        "enumerate_regions(pid={pid}): proc_pidinfo failed at addr={addr:#x}: {err}"
+                    );
+                }
             }
-            if n == 0 {
-                break;
-            }
-            return Err(err);
+            break;
         }
         let pri = &info.prp_prinfo;
         let path_bytes = info.prp_vip.vip_path;
@@ -149,12 +158,14 @@ pub fn enumerate_regions(pid: u32) -> std::io::Result<Vec<Region>> {
         });
         let next = pri.pri_address.saturating_add(pri.pri_size);
         if next <= addr {
-            // Defensive: kernel didn't advance; bail rather than loop.
+            log::warn!(
+                "enumerate_regions(pid={pid}): kernel didn't advance past addr={addr:#x}; bailing"
+            );
             break;
         }
         addr = next;
     }
-    Ok(out)
+    out
 }
 
 /// Mirror of `<sys/proc_info.h>` `struct proc_threadinfo`. libc's

@@ -50,13 +50,15 @@ impl ImageScanner {
     }
 
     pub fn rescan<S: SampleSink>(&mut self, pid: u32, sink: &mut S) {
-        let regions = match libproc::enumerate_regions(pid) {
-            Ok(r) => r,
-            Err(err) => {
-                log::debug!("libproc::enumerate_regions(pid={pid}) failed: {err}");
-                return;
-            }
-        };
+        let regions = libproc::enumerate_regions(pid);
+        let exec_count = regions.iter().filter(|r| r.is_executable && !r.path.is_empty()).count();
+        if self.known.is_empty() {
+            log::info!(
+                "image_scan: pid={pid} -> {} total regions, {} vnode-backed executable",
+                regions.len(),
+                exec_count
+            );
+        }
 
         // Build the current set: one entry per (path, base_avma) for
         // the executable region of each loaded image. Multiple images
