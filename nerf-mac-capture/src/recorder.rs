@@ -278,6 +278,7 @@ fn sample_all_threads<S: SampleSink>(
             tid,
             backtrace: &backtrace,
             kernel_backtrace: &[],
+            is_offcpu: false,
         });
     }
     Ok(())

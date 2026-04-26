@@ -515,6 +515,7 @@ impl SampleSink for MacSink {
                 cpu: u32::MAX,
                 kernel_backtrace: &kernel_backtrace,
                 user_backtrace: &user_backtrace,
+                is_offcpu: ev.is_offcpu,
             });
         }
         let packet = Packet::Sample {

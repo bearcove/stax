@@ -103,6 +103,21 @@ pub struct SymbolRef {
     pub binary: Option<String>,
 }
 
+/// Which subset of samples to count.
+///
+/// `Both` is the default "wall-clock" view -- on-CPU PET samples plus
+/// the synthesised off-CPU samples that fill in time the thread spent
+/// blocked. `OnCpu` reproduces what samply / Instruments' Time
+/// Profiler show; `OffCpu` is the inverted view where only blocked
+/// stacks are counted.
+#[derive(Clone, Copy, Debug, Facet)]
+#[repr(u8)]
+pub enum SampleMode {
+    Both = 0,
+    OnCpu = 1,
+    OffCpu = 2,
+}
+
 /// Filter applied at query time over the raw sample log. When all
 /// fields are at their defaults, the server hits the fast pre-aggregated
 /// path; any non-default field forces re-aggregation.
@@ -111,6 +126,9 @@ pub struct LiveFilter {
     pub time_range: Option<TimeRange>,
     /// Drop any sample whose stack contains *any* of these symbols.
     pub exclude_symbols: Vec<SymbolRef>,
+    /// Restrict to on-CPU samples (what samply sees), off-CPU samples
+    /// (where the thread was blocked), or both (wall-clock).
+    pub sample_mode: SampleMode,
 }
 
 /// Bundle of "what to look at" knobs shared by every view

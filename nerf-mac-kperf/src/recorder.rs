@@ -464,6 +464,7 @@ fn drain_loop<S: SampleSink>(
                     tid: sample.tid,
                     backtrace: sample.user_backtrace,
                     kernel_backtrace: sample.kernel_backtrace,
+                    is_offcpu: false,
                 });
             });
         }
@@ -485,6 +486,7 @@ fn drain_loop<S: SampleSink>(
                     tid: interval.tid,
                     backtrace: &interval.user_stack,
                     kernel_backtrace: &interval.kernel_stack,
+                    is_offcpu: true,
                 });
                 ts = ts.saturating_add(period_ns);
             }

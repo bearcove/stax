@@ -18,6 +18,7 @@ import {
   type AnnotatedView,
   type LiveFilter,
   type ProfilerClient,
+  type SampleMode,
   type ThreadInfo,
   type ThreadsUpdate,
   type TopEntry,
@@ -52,6 +53,7 @@ function initialTheme(): Theme {
 export const EMPTY_FILTER: LiveFilter = {
   time_range: null,
   exclude_symbols: [],
+  sample_mode: { tag: "Both" },
 };
 
 /// Bundle thread/filter knobs for a subscription. Centralising this so
@@ -313,6 +315,12 @@ export function App() {
               .*
             </button>
           </span>
+          <SampleModeFilter
+            mode={filter.sample_mode}
+            onChange={(m) =>
+              setFilter((prev) => ({ ...prev, sample_mode: m }))
+            }
+          />
           <KindFilter hidden={hiddenKinds} onChange={setHiddenKinds} />
           <button
             type="button"
@@ -620,6 +628,50 @@ const KIND_LABEL: Record<ObjKind, string> = {
 };
 
 const KIND_ORDER: ObjKind[] = ["main", "dylib", "system", "unknown"];
+
+function SampleModeFilter({
+  mode,
+  onChange,
+}: {
+  mode: SampleMode;
+  onChange: (m: SampleMode) => void;
+}) {
+  const options: { tag: "Both" | "OnCpu" | "OffCpu"; label: string; title: string }[] = [
+    {
+      tag: "Both",
+      label: "wall",
+      title: "wall-clock: on-CPU + off-CPU samples (default)",
+    },
+    {
+      tag: "OnCpu",
+      label: "on-cpu",
+      title: "on-CPU only — what samply / Time Profiler show",
+    },
+    {
+      tag: "OffCpu",
+      label: "off-cpu",
+      title: "off-CPU only — where threads are blocked",
+    },
+  ];
+  return (
+    <span className="kind-filter">
+      {options.map((opt) => {
+        const active = mode.tag === opt.tag;
+        return (
+          <button
+            key={opt.tag}
+            type="button"
+            className={`kind-pill mode-${opt.tag.toLowerCase()}${active ? "" : " off"}`}
+            onClick={() => onChange({ tag: opt.tag } as SampleMode)}
+            title={opt.title}
+          >
+            {opt.label}
+          </button>
+        );
+      })}
+    </span>
+  );
+}
 
 function KindFilter({
   hidden,

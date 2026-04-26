@@ -38,6 +38,7 @@ pub(crate) enum LiveEvent {
         tid: u32,
         timestamp_ns: u64,
         user_addrs: Vec<u64>,
+        is_offcpu: bool,
     },
     BinaryLoaded(binaries::LoadedBinary),
     BinaryUnloaded {
@@ -65,6 +66,7 @@ impl LiveSink for LiveSinkImpl {
             tid: event.tid,
             timestamp_ns: event.timestamp,
             user_addrs,
+            is_offcpu: event.is_offcpu,
         });
     }
 
@@ -362,12 +364,15 @@ impl Profiler for LiveServer {
 }
 
 fn is_filter_empty(filter: &LiveFilter) -> bool {
-    filter.time_range.is_none() && filter.exclude_symbols.is_empty()
+    filter.time_range.is_none()
+        && filter.exclude_symbols.is_empty()
+        && matches!(filter.sample_mode, nperf_live_proto::SampleMode::Both)
 }
 
 /// Build the predicate that `aggregate_filtered` calls for each raw
 /// sample. Captures `filter` + `binaries` + the recording origin so
-/// time-range and exclude-symbol filters can be applied in one pass.
+/// time-range, sample-mode, and exclude-symbol filters can all be
+/// applied in one pass.
 fn make_predicate<'a>(
     filter: &'a LiveFilter,
     session_start_ns: u64,
@@ -380,6 +385,19 @@ fn make_predicate<'a>(
         .map(|s| (s.function_name.clone(), s.binary.clone()))
         .collect();
     move |sample: &RawSample| {
+        match filter.sample_mode {
+            nperf_live_proto::SampleMode::Both => {}
+            nperf_live_proto::SampleMode::OnCpu => {
+                if sample.is_offcpu {
+                    return false;
+                }
+            }
+            nperf_live_proto::SampleMode::OffCpu => {
+                if !sample.is_offcpu {
+                    return false;
+                }
+            }
+        }
         if let Some(ref tr) = filter.time_range {
             let rel = sample.timestamp_ns.saturating_sub(session_start_ns);
             if rel < tr.start_ns || rel >= tr.end_ns {
@@ -916,8 +934,11 @@ pub async fn start(addr: &str) -> Result<(LiveSinkImpl, tokio::task::JoinHandle<
                         tid,
                         timestamp_ns,
                         user_addrs,
+                        is_offcpu,
                     } => {
-                        aggregator.write().record(tid, timestamp_ns, &user_addrs);
+                        aggregator
+                            .write()
+                            .record(tid, timestamp_ns, &user_addrs, is_offcpu);
                     }
                     LiveEvent::ThreadName { tid, name } => {
                         aggregator.write().set_thread_name(tid, name);

@@ -46,6 +46,11 @@ pub struct SampleEvent<'a> {
     /// suspend-and-walk path) always emits empty here; nerf-mac-kperf
     /// fills it when kperf walked the kernel side.
     pub kernel_backtrace: &'a [u64],
+    /// `true` if this is a synthesised "off-CPU" sample standing in
+    /// for time the thread spent blocked between two PET ticks. The
+    /// stack is borrowed from the last on-CPU sample, the timestamp
+    /// is somewhere in the off-CPU interval. samply has no equivalent.
+    pub is_offcpu: bool,
 }
 
 pub struct BinaryLoadedEvent<'a> {

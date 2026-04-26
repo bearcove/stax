@@ -7,6 +7,12 @@ pub struct SampleEvent< 'a > {
     pub cpu: u32,
     pub kernel_backtrace: &'a [u64],
     pub user_backtrace: &'a [UserFrame],
+    /// Synthesised "off-CPU" sample standing in for time the thread
+    /// spent blocked between two PET ticks. Stack is borrowed from
+    /// the last on-CPU sample, the timestamp is somewhere in the
+    /// off-CPU interval. Always `false` on the Linux backend (we
+    /// don't synthesise off-CPU samples there yet).
+    pub is_offcpu: bool,
 }
 
 /// One symbol from a binary's symbol table (Mach-O `nlist_64` or ELF

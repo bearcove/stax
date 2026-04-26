@@ -54,6 +54,12 @@ pub struct ThreadStats {
     self_counts: HashMap<u64, u64>,
     total_counts: HashMap<u64, u64>,
     total_samples: u64,
+    /// Same maps, but counting only off-CPU samples. Lets queries
+    /// pick "wall clock" / "on-CPU only" / "off-CPU only" views by
+    /// subtracting one from the other (no extra raw-log scan).
+    offcpu_self_counts: HashMap<u64, u64>,
+    offcpu_total_counts: HashMap<u64, u64>,
+    offcpu_samples: u64,
     pub(crate) flame_root: StackNode,
     /// FIFO ring of raw samples. Capped at MAX_SAMPLES_PER_THREAD so
     /// memory doesn't grow unbounded; when full, we drop the oldest
@@ -67,6 +73,9 @@ impl Default for ThreadStats {
             self_counts: HashMap::new(),
             total_counts: HashMap::new(),
             total_samples: 0,
+            offcpu_self_counts: HashMap::new(),
+            offcpu_total_counts: HashMap::new(),
+            offcpu_samples: 0,
             flame_root: StackNode::default(),
             samples: std::collections::VecDeque::new(),
         }
@@ -78,6 +87,11 @@ impl Default for ThreadStats {
 pub struct RawSample {
     pub timestamp_ns: u64,
     pub stack: Box<[u64]>,
+    /// `true` if this sample was synthesised to fill an off-CPU
+    /// interval (the thread was blocked, stack frozen from the last
+    /// on-CPU sample). Lets the UI filter wall-clock vs strict
+    /// on-CPU views.
+    pub is_offcpu: bool,
 }
 
 /// Per-thread cap on the raw sample log. ~100k * (avg ~30 frames * 8B
@@ -86,15 +100,24 @@ pub struct RawSample {
 const MAX_SAMPLES_PER_THREAD: usize = 100_000;
 
 impl ThreadStats {
-    pub fn record(&mut self, timestamp_ns: u64, user_addrs: &[u64]) {
+    pub fn record(&mut self, timestamp_ns: u64, user_addrs: &[u64], is_offcpu: bool) {
         self.total_samples += 1;
+        if is_offcpu {
+            self.offcpu_samples += 1;
+        }
         if let Some(&leaf) = user_addrs.first() {
             *self.self_counts.entry(leaf).or_insert(0) += 1;
+            if is_offcpu {
+                *self.offcpu_self_counts.entry(leaf).or_insert(0) += 1;
+            }
         }
         let mut seen: smallset::SmallSet = Default::default();
         for &addr in user_addrs {
             if seen.insert(addr) {
                 *self.total_counts.entry(addr).or_insert(0) += 1;
+                if is_offcpu {
+                    *self.offcpu_total_counts.entry(addr).or_insert(0) += 1;
+                }
             }
         }
         // Build the call tree: user_addrs is leaf-first, walk reversed
@@ -103,6 +126,9 @@ impl ThreadStats {
         for &addr in user_addrs.iter().rev() {
             node = node.children.entry(addr).or_default();
             node.count += 1;
+            if is_offcpu {
+                node.offcpu_count += 1;
+            }
         }
 
         // Append to the raw log; FIFO-drop the oldest when over cap.
@@ -112,6 +138,7 @@ impl ThreadStats {
         self.samples.push_back(RawSample {
             timestamp_ns,
             stack: user_addrs.to_vec().into_boxed_slice(),
+            is_offcpu,
         });
     }
 
@@ -142,11 +169,15 @@ pub struct Aggregator {
 #[derive(Default)]
 pub struct StackNode {
     pub(crate) count: u64,
+    /// Subset of `count` from off-CPU samples; subtract from `count`
+    /// to get on-CPU samples. Carried per-node so flame-graph views
+    /// can pivot on it without rescanning the raw log.
+    pub(crate) offcpu_count: u64,
     pub(crate) children: HashMap<u64, StackNode>,
 }
 
 impl Aggregator {
-    pub fn record(&mut self, tid: u32, timestamp_ns: u64, user_addrs: &[u64]) {
+    pub fn record(&mut self, tid: u32, timestamp_ns: u64, user_addrs: &[u64], is_offcpu: bool) {
         if self.session_start_ns.is_none() {
             self.session_start_ns = Some(timestamp_ns);
         }
@@ -154,7 +185,7 @@ impl Aggregator {
         self.threads
             .entry(tid)
             .or_default()
-            .record(timestamp_ns, user_addrs);
+            .record(timestamp_ns, user_addrs, is_offcpu);
     }
 
     pub fn session_start_ns(&self) -> Option<u64> {
@@ -341,6 +372,7 @@ impl Aggregator {
 impl StackNode {
     fn merge(&mut self, other: &StackNode) {
         self.count += other.count;
+        self.offcpu_count += other.offcpu_count;
         for (&addr, child) in &other.children {
             self.children.entry(addr).or_default().merge(child);
         }
@@ -351,6 +383,7 @@ impl Clone for StackNode {
     fn clone(&self) -> Self {
         Self {
             count: self.count,
+            offcpu_count: self.offcpu_count,
             children: self.children.clone(),
         }
     }
