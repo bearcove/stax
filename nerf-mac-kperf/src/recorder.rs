@@ -46,11 +46,13 @@ impl Default for RecordOptions {
     }
 }
 
-/// Sampler bitmask used for stack-only profiling (no PMC values).
-/// `TH_INFO` lets us correlate a record back to a tid; `USTACK` /
-/// `KSTACK` are the user/kernel callchains we actually want.
+/// Sampler bitmask. `TH_INFO` lets us correlate a record back to a
+/// tid; `USTACK`/`KSTACK` are the user/kernel callchains; `PMC_THREAD`
+/// asks kperf to read per-thread CPU performance counters at each
+/// PET tick (cycles + instructions retired on Apple Silicon's fixed
+/// counters).
 const STACK_SAMPLER_BITS: u32 =
-    sampler::TH_INFO | sampler::USTACK | sampler::KSTACK;
+    sampler::TH_INFO | sampler::USTACK | sampler::KSTACK | sampler::PMC_THREAD;
 
 /// Drive a recording session. Blocks until `should_stop` returns true,
 /// the duration elapses, or an unrecoverable error occurs.
@@ -241,6 +243,21 @@ impl<'a> Session<'a> {
         )?;
         kperf_call(unsafe { (fw.kperf_timer_pet_set)(timerid) }, "timer_pet_set")?;
 
+        // Enable Apple Silicon's fixed counters (cycles + instructions
+        // retired). FIXED counters are pre-determined by hardware so
+        // there are no event configs to push -- just turn the class
+        // on at the system + per-thread level. PMC_THREAD in the
+        // sampler bits then tells kperf to read these counters at
+        // every PET tick and emit them as DBG_PERF/PERF_KPC records.
+        kperf_call(
+            unsafe { (fw.kpc_set_counting)(bindings::KPC_CLASS_FIXED_MASK) },
+            "kpc_set_counting(FIXED)",
+        )?;
+        kperf_call(
+            unsafe { (fw.kpc_set_thread_counting)(bindings::KPC_CLASS_FIXED_MASK) },
+            "kpc_set_thread_counting(FIXED)",
+        )?;
+
         // Lightweight PET + sample_set must precede kdebug setup so
         // kdebug ops aren't blocked by an exclusive KTRACE_KPERF.
         kdebug::set_lightweight_pet(1)?;
@@ -357,6 +374,13 @@ fn drain_loop<S: SampleSink>(
     let mut histogram: BTreeMap<(u8, u16, u32), u64> = BTreeMap::new();
     let mut total_drained: u64 = 0;
     let mut offcpu = OffCpuTracker::new();
+    // Sums of per-thread fixed counter deltas across every sample.
+    // Apple Silicon: pmc[0] = cycles, pmc[1] = instructions retired.
+    // Empty-slice samples (no PMC_THREAD record arrived) contribute
+    // nothing.
+    let mut pmu_total_cycles: u64 = 0;
+    let mut pmu_total_insns: u64 = 0;
+    let mut pmu_samples: u64 = 0;
 
     loop {
         if should_stop() {
@@ -420,6 +444,15 @@ fn drain_loop<S: SampleSink>(
                         est.observe(avma);
                     }
                 }
+                if !sample.pmc.is_empty() {
+                    pmu_samples += 1;
+                    if let Some(&c) = sample.pmc.first() {
+                        pmu_total_cycles = pmu_total_cycles.saturating_add(c);
+                    }
+                    if let Some(&i) = sample.pmc.get(1) {
+                        pmu_total_insns = pmu_total_insns.saturating_add(i);
+                    }
+                }
                 offcpu.note_sample(
                     sample.tid,
                     sample.user_backtrace,
@@ -459,6 +492,24 @@ fn drain_loop<S: SampleSink>(
     }
 
     log_session_summary(total_drained, &parser, &histogram, &offcpu);
+    if pmu_samples > 0 {
+        let ipc = if pmu_total_cycles > 0 {
+            pmu_total_insns as f64 / pmu_total_cycles as f64
+        } else {
+            0.0
+        };
+        log::info!(
+            "PMU (fixed counters across {pmu_samples} samples): \
+             cycles={pmu_total_cycles} insns={pmu_total_insns} avg_ipc={ipc:.3}"
+        );
+    } else {
+        log::warn!(
+            "PMU: no per-sample counter records observed -- \
+             kperf likely didn't emit DBG_PERF/PERF_KPC/DATA_THREAD \
+             (kpc_set_thread_counting may need different gating, or PMC_THREAD \
+             might require kpc_force_all_ctrs_set permission this run lacks)"
+        );
+    }
     Ok(())
 }
 

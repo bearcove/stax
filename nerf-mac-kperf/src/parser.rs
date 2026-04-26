@@ -35,6 +35,12 @@ pub struct Sample<'a> {
     /// Kernel frames, callee-most first. Empty if no kernel walk
     /// was attempted or it failed.
     pub kernel_backtrace: &'a [u64],
+    /// Per-thread CPU performance counter deltas at this PET tick.
+    /// On Apple Silicon's fixed counters: index 0 is cycles, index 1
+    /// is instructions retired. Empty if PMC_THREAD wasn't in the
+    /// sampler bits or the kernel didn't emit a record for this
+    /// sample.
+    pub pmc: &'a [u64],
 }
 
 #[derive(Default)]
@@ -50,6 +56,7 @@ pub struct Parser {
     state: State,
     user_frames: Vec<u64>,
     kernel_frames: Vec<u64>,
+    pmc: Vec<u64>,
     user_remaining: u32,
     kernel_remaining: u32,
     pub stats: ParserStats,
@@ -66,6 +73,7 @@ impl Parser {
             state: State::Idle,
             user_frames: Vec::with_capacity(128),
             kernel_frames: Vec::with_capacity(32),
+            pmc: Vec::with_capacity(4),
             user_remaining: 0,
             kernel_remaining: 0,
             stats: ParserStats::default(),
@@ -92,6 +100,7 @@ impl Parser {
                 }
                 self.user_frames.clear();
                 self.kernel_frames.clear();
+                self.pmc.clear();
                 self.user_remaining = 0;
                 self.kernel_remaining = 0;
                 self.state = State::InSample {
@@ -102,11 +111,23 @@ impl Parser {
             }
             (perf::sc::GENERIC, 0, DBG_FUNC_END) => {
                 if let State::InSample { tid, timestamp_ns } = self.state {
+                    // Trim trailing zeros from the PMC slice: a 4-arg
+                    // record covers up to 4 counters, but Apple
+                    // Silicon's fixed class only populates 2 (cycles,
+                    // instructions). Anything past the last non-zero
+                    // is padding.
+                    let pmc_len = self
+                        .pmc
+                        .iter()
+                        .rposition(|&v| v != 0)
+                        .map(|i| i + 1)
+                        .unwrap_or(0);
                     emit(Sample {
                         timestamp_ns,
                         tid,
                         user_backtrace: &self.user_frames,
                         kernel_backtrace: &self.kernel_frames,
+                        pmc: &self.pmc[..pmc_len],
                     });
                     self.stats.samples_emitted += 1;
                 }
@@ -140,6 +161,16 @@ impl Parser {
             (perf::sc::CALLSTACK, perf::cs::KDATA, _) => {
                 if matches!(self.state, State::InSample { .. }) {
                     self.append_chunk(rec, /* user = */ false);
+                }
+            }
+
+            // -- PMU counter values -----------------------------------------
+            (perf::sc::KPC, perf::kpc::DATA_THREAD, _) => {
+                if matches!(self.state, State::InSample { .. }) {
+                    self.pmc.push(rec.arg1);
+                    self.pmc.push(rec.arg2);
+                    self.pmc.push(rec.arg3);
+                    self.pmc.push(rec.arg4);
                 }
             }
 
