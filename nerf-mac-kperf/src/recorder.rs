@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use nerf_mac_capture::recorder::ThreadNameCache;
-use nerf_mac_capture::{JitdumpEvent, SampleEvent, SampleSink, ThreadNameEvent};
+use nerf_mac_capture::{JitdumpEvent, SampleEvent, SampleSink, ThreadNameEvent, WakeupEvent};
 
 use crate::bindings::{self, sampler, Frameworks};
 use crate::error::Error;
@@ -510,6 +510,21 @@ fn drain_loop<S: SampleSink>(
                     l1d_misses,
                     branch_mispreds,
                 });
+            });
+        }
+
+        // Emit any wakeup events captured this batch. The waker's
+        // stack is borrowed from its last PET tick, so the sink gets
+        // "thread X woke thread Y at time T from this stack". The
+        // live aggregator builds a "who woke me?" panel from these.
+        for w in offcpu.drain_wakeups() {
+            sink.on_wakeup(WakeupEvent {
+                timestamp_ns: w.timestamp_ns,
+                pid: opts.pid,
+                waker_tid: w.waker_tid,
+                wakee_tid: w.wakee_tid,
+                waker_user_stack: &w.waker_user_stack,
+                waker_kernel_stack: &w.waker_kernel_stack,
             });
         }
 

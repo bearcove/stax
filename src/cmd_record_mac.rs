@@ -18,7 +18,7 @@ use nerf_mac_capture::process_launcher::{
 };
 use nerf_mac_capture::{
     record_with_task, record_with_task_and_tick_hook, BinaryLoadedEvent, BinaryUnloadedEvent,
-    JitdumpEvent, RecordOptions, SampleEvent, SampleSink, ThreadNameEvent,
+    JitdumpEvent, RecordOptions, SampleEvent, SampleSink, ThreadNameEvent, WakeupEvent,
 };
 use nerf_mac_kperf::{record as kperf_record, RecordOptions as KperfRecordOptions};
 
@@ -30,7 +30,7 @@ use crate::args::{self, TargetProcess};
 use crate::live_sink::{
     BinaryLoadedEvent as LiveBinaryLoadedEvent, BinaryUnloadedEvent as LiveBinaryUnloadedEvent,
     LiveSink, LiveSymbol, SampleEvent as LiveSampleEvent, TargetAttached,
-    ThreadName as LiveThreadName,
+    ThreadName as LiveThreadName, WakeupEvent as LiveWakeupEvent,
 };
 use crate::utils::SigintHandler;
 
@@ -701,6 +701,21 @@ impl SampleSink for MacSink {
             path: Cow::Borrowed(b"/proc/kallsyms"),
             data: Cow::Borrowed(data),
         });
+    }
+
+    fn on_wakeup(&mut self, ev: WakeupEvent<'_>) {
+        // Forward to the live sink only -- the offline analysis
+        // pipeline doesn't yet have a place for wakeup edges.
+        if let Some(sink) = self.live_sink.as_ref() {
+            sink.on_wakeup(&LiveWakeupEvent {
+                timestamp: ev.timestamp_ns,
+                pid: ev.pid,
+                waker_tid: ev.waker_tid,
+                wakee_tid: ev.wakee_tid,
+                waker_user_stack: ev.waker_user_stack,
+                waker_kernel_stack: ev.waker_kernel_stack,
+            });
+        }
     }
 }
 

@@ -40,6 +40,10 @@ pub struct OffCpuTracker {
     /// Closed off-CPU intervals waiting to be expanded into samples
     /// by the drain loop.
     pending: Vec<OffCpuInterval>,
+    /// Wakeup events captured this batch. Drained by the recorder
+    /// after each kdebug pull, paired with the waker's last PET
+    /// stack and emitted via `SampleSink::on_wakeup`.
+    pending_wakeups: Vec<PendingWakeup>,
 }
 
 #[derive(Default)]
@@ -61,6 +65,19 @@ pub struct OffCpuInterval {
     pub on_ns: u64,
     pub user_stack: Vec<u64>,
     pub kernel_stack: Vec<u64>,
+}
+
+/// One observed wakeup. Captured at `MACH_MAKERUNNABLE` time using
+/// the *waker* thread's most recent PET stack -- so we know "thread
+/// X got woken at time T by thread Y, here's where Y was when it
+/// did the wake-up call." Pure differentiator: samply has no kernel
+/// hook capable of producing this.
+pub struct PendingWakeup {
+    pub timestamp_ns: u64,
+    pub waker_tid: u32,
+    pub wakee_tid: u32,
+    pub waker_user_stack: Vec<u64>,
+    pub waker_kernel_stack: Vec<u64>,
 }
 
 impl OffCpuTracker {
@@ -131,6 +148,32 @@ impl OffCpuTracker {
             }
             mach_sched::MAKERUNNABLE => {
                 self.makerunnable_count += 1;
+                // The cpu emitting this record is currently running
+                // the waker; arg2 is the wakee's tid (matches the
+                // shape of MACH_SCHED's "new tid" argument). If the
+                // waker has had at least one PET tick already we can
+                // attribute the wake to whichever stack we cached
+                // for it.
+                let waker_tid = self.on_cpu.get(&rec.cpuid).copied().unwrap_or(0);
+                let wakee_tid = rec.arg2;
+                if waker_tid == 0 || wakee_tid == 0 || waker_tid == wakee_tid {
+                    return;
+                }
+                let Some(waker_state) = self.threads.get(&waker_tid) else {
+                    return;
+                };
+                if waker_state.last_user_stack.is_empty()
+                    && waker_state.last_kernel_stack.is_empty()
+                {
+                    return;
+                }
+                self.pending_wakeups.push(PendingWakeup {
+                    timestamp_ns: ts,
+                    waker_tid: waker_tid as u32,
+                    wakee_tid: wakee_tid as u32,
+                    waker_user_stack: waker_state.last_user_stack.clone(),
+                    waker_kernel_stack: waker_state.last_kernel_stack.clone(),
+                });
             }
             _ => {}
         }
@@ -141,6 +184,11 @@ impl OffCpuTracker {
     /// sink at the kperf sampling cadence.
     pub fn drain_pending(&mut self) -> Vec<OffCpuInterval> {
         std::mem::take(&mut self.pending)
+    }
+
+    /// Take any wakeup events captured this batch.
+    pub fn drain_wakeups(&mut self) -> Vec<PendingWakeup> {
+        std::mem::take(&mut self.pending_wakeups)
     }
 
     pub fn log_summary(&self) {

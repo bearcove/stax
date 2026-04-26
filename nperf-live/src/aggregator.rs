@@ -41,6 +41,15 @@ pub struct PmuSample {
     pub branch_mispreds: u64,
 }
 
+/// One row in `Aggregator::top_wakers`: how many times waker_tid
+/// (with leaf frame at `waker_leaf_address`) woke the queried thread.
+#[derive(Clone, Copy)]
+pub struct RawWakerEntry {
+    pub waker_tid: u32,
+    pub waker_leaf_address: u64,
+    pub count: u64,
+}
+
 #[derive(Clone, Copy)]
 pub struct RawTopEntry {
     pub address: u64,
@@ -99,6 +108,9 @@ pub struct ThreadStats {
     self_counts: HashMap<u64, u64>,
     total_counts: HashMap<u64, u64>,
     total_samples: u64,
+    /// Wakeups received by this thread, capped FIFO so memory is
+    /// bounded the same way `samples` is.
+    pub(crate) wakeups: std::collections::VecDeque<RawWakeup>,
     /// Same maps, but counting only off-CPU samples. Lets queries
     /// pick "wall clock" / "on-CPU only" / "off-CPU only" views by
     /// subtracting one from the other (no extra raw-log scan).
@@ -124,6 +136,7 @@ impl Default for ThreadStats {
             self_counts: HashMap::new(),
             total_counts: HashMap::new(),
             total_samples: 0,
+            wakeups: std::collections::VecDeque::new(),
             offcpu_self_counts: HashMap::new(),
             offcpu_total_counts: HashMap::new(),
             offcpu_samples: 0,
@@ -148,6 +161,16 @@ pub struct RawSample {
     /// PMU counter deltas at this PET tick. All-zero for
     /// synthesised off-CPU samples and on the Linux backend.
     pub pmc: PmuSample,
+}
+
+/// One observed wakeup edge. We keep them in a FIFO ring per wakee
+/// and rebuild aggregations on subscription, the same way RawSample
+/// works for the on-CPU flame graph.
+pub struct RawWakeup {
+    pub timestamp_ns: u64,
+    pub waker_tid: u32,
+    pub waker_user_stack: Box<[u64]>,
+    pub waker_kernel_stack: Box<[u64]>,
 }
 
 /// Per-thread cap on the raw sample log. ~100k * (avg ~30 frames * 8B
@@ -263,6 +286,62 @@ impl Aggregator {
             .entry(tid)
             .or_default()
             .record(timestamp_ns, user_addrs, is_offcpu, pmc);
+    }
+
+    /// Append one wakeup edge into the wakee's per-thread ledger.
+    /// FIFO-cap matches `MAX_SAMPLES_PER_THREAD` so memory stays
+    /// bounded for long-lived recordings.
+    pub fn record_wakeup(
+        &mut self,
+        timestamp_ns: u64,
+        waker_tid: u32,
+        wakee_tid: u32,
+        waker_user_stack: Vec<u64>,
+        waker_kernel_stack: Vec<u64>,
+    ) {
+        let stats = self.threads.entry(wakee_tid).or_default();
+        if stats.wakeups.len() >= MAX_SAMPLES_PER_THREAD {
+            stats.wakeups.pop_front();
+        }
+        stats.wakeups.push_back(RawWakeup {
+            timestamp_ns,
+            waker_tid,
+            waker_user_stack: waker_user_stack.into_boxed_slice(),
+            waker_kernel_stack: waker_kernel_stack.into_boxed_slice(),
+        });
+    }
+
+    /// Aggregate wakers for a given wakee tid: top-N (waker_tid +
+    /// waker leaf-frame) groups by count. Used by the live UI's
+    /// "who woke me?" panel.
+    pub fn top_wakers(&self, wakee_tid: u32, limit: usize) -> Vec<RawWakerEntry> {
+        let Some(stats) = self.threads.get(&wakee_tid) else {
+            return Vec::new();
+        };
+        let mut groups: HashMap<(u32, u64), RawWakerEntry> = HashMap::new();
+        for w in &stats.wakeups {
+            // Pick the leaf user frame as the representative
+            // address, falling back to the leaf kernel frame.
+            let leaf = w
+                .waker_user_stack
+                .first()
+                .copied()
+                .or_else(|| w.waker_kernel_stack.first().copied())
+                .unwrap_or(0);
+            let key = (w.waker_tid, leaf);
+            groups
+                .entry(key)
+                .and_modify(|e| e.count += 1)
+                .or_insert(RawWakerEntry {
+                    waker_tid: w.waker_tid,
+                    waker_leaf_address: leaf,
+                    count: 1,
+                });
+        }
+        let mut out: Vec<RawWakerEntry> = groups.into_values().collect();
+        out.sort_by(|a, b| b.count.cmp(&a.count));
+        out.truncate(limit);
+        out
     }
 
     pub fn session_start_ns(&self) -> Option<u64> {

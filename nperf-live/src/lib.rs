@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 
 use nperf_core::live_sink::{
     BinaryLoadedEvent, BinaryUnloadedEvent, LiveSink, SampleEvent, TargetAttached, ThreadName,
+    WakeupEvent as LiveWakeupEvent,
 };
 use nperf_live_proto::{
     AnnotatedLine, AnnotatedView, FlameNode, FlamegraphUpdate, LiveFilter, NeighborsUpdate,
@@ -55,6 +56,13 @@ pub(crate) enum LiveEvent {
     ThreadName {
         tid: u32,
         name: String,
+    },
+    Wakeup {
+        timestamp_ns: u64,
+        waker_tid: u32,
+        wakee_tid: u32,
+        waker_user_stack: Vec<u64>,
+        waker_kernel_stack: Vec<u64>,
     },
 }
 
@@ -117,6 +125,16 @@ impl LiveSink for LiveSinkImpl {
         let _ = self.tx.send(LiveEvent::ThreadName {
             tid: event.tid,
             name: event.name.to_owned(),
+        });
+    }
+
+    fn on_wakeup(&self, event: &LiveWakeupEvent) {
+        let _ = self.tx.send(LiveEvent::Wakeup {
+            timestamp_ns: event.timestamp,
+            waker_tid: event.waker_tid,
+            wakee_tid: event.wakee_tid,
+            waker_user_stack: event.waker_user_stack.to_vec(),
+            waker_kernel_stack: event.waker_kernel_stack.to_vec(),
         });
     }
 }
@@ -342,6 +360,27 @@ impl Profiler for LiveServer {
         });
     }
 
+    async fn subscribe_wakers(
+        &self,
+        wakee_tid: u32,
+        output: vox::Tx<nperf_live_proto::WakersUpdate>,
+    ) {
+        tracing::info!(?wakee_tid, "subscribe_wakers: starting stream");
+        let aggregator = self.aggregator.clone();
+        let binaries = self.binaries.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+            loop {
+                interval.tick().await;
+                let update = build_wakers_update(&aggregator, &binaries, wakee_tid);
+                if let Err(e) = output.send(update).await {
+                    tracing::info!(?wakee_tid, "subscribe_wakers: stream ended: {e:?}");
+                    break;
+                }
+            }
+        });
+    }
+
     async fn subscribe_threads(&self, output: vox::Tx<ThreadsUpdate>) {
         tracing::info!("subscribe_threads: starting stream");
         let aggregator = self.aggregator.clone();
@@ -368,6 +407,44 @@ impl Profiler for LiveServer {
                 }
             }
         });
+    }
+}
+
+fn build_wakers_update(
+    aggregator: &Arc<RwLock<Aggregator>>,
+    binaries: &Arc<RwLock<BinaryRegistry>>,
+    wakee_tid: u32,
+) -> nperf_live_proto::WakersUpdate {
+    let agg = aggregator.read();
+    let bin = binaries.read();
+    let raw = agg.top_wakers(wakee_tid, 50);
+    let total: u64 = raw.iter().map(|w| w.count).sum();
+    let entries: Vec<nperf_live_proto::WakerEntry> = raw
+        .into_iter()
+        .map(|w| {
+            let resolved = bin.lookup_symbol(w.waker_leaf_address);
+            let (function_name, binary, language) = match resolved {
+                Some(r) => (
+                    Some(r.function_name),
+                    Some(r.binary),
+                    r.language.as_str().to_owned(),
+                ),
+                None => (None, None, "unknown".to_owned()),
+            };
+            nperf_live_proto::WakerEntry {
+                waker_tid: w.waker_tid,
+                waker_address: w.waker_leaf_address,
+                waker_function_name: function_name,
+                waker_binary: binary,
+                language,
+                count: w.count,
+            }
+        })
+        .collect();
+    nperf_live_proto::WakersUpdate {
+        wakee_tid,
+        total_wakeups: total,
+        entries,
     }
 }
 
@@ -1023,6 +1100,21 @@ pub async fn start(addr: &str) -> Result<(LiveSinkImpl, tokio::task::JoinHandle<
                                 l1d_misses,
                                 branch_mispreds,
                             },
+                        );
+                    }
+                    LiveEvent::Wakeup {
+                        timestamp_ns,
+                        waker_tid,
+                        wakee_tid,
+                        waker_user_stack,
+                        waker_kernel_stack,
+                    } => {
+                        aggregator.write().record_wakeup(
+                            timestamp_ns,
+                            waker_tid,
+                            wakee_tid,
+                            waker_user_stack,
+                            waker_kernel_stack,
                         );
                     }
                     LiveEvent::ThreadName { tid, name } => {

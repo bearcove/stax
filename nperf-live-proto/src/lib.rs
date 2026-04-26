@@ -95,6 +95,28 @@ pub struct FlamegraphUpdate {
     pub root: FlameNode,
 }
 
+/// One row in a "who woke this thread?" panel. Aggregated server-side
+/// across the wakee's wakeup ledger, grouped by (waker_tid,
+/// waker_function). The leaf frame is what gets named so a user sees
+/// e.g. "tid 5103 / dispatch_async_f · 24 wakeups" -- the function
+/// where the wake-up call was issued.
+#[derive(Clone, Debug, Facet)]
+pub struct WakerEntry {
+    pub waker_tid: u32,
+    pub waker_address: u64,
+    pub waker_function_name: Option<String>,
+    pub waker_binary: Option<String>,
+    pub language: String,
+    pub count: u64,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct WakersUpdate {
+    pub wakee_tid: u32,
+    pub total_wakeups: u64,
+    pub entries: Vec<WakerEntry>,
+}
+
 #[derive(Clone, Debug, Facet)]
 pub struct ThreadInfo {
     pub tid: u32,
@@ -305,6 +327,17 @@ pub trait Profiler {
         address: u64,
         params: ViewParams,
         output: vox::Tx<NeighborsUpdate>,
+    );
+
+    /// Stream "who woke this thread?" updates: top wakers grouped by
+    /// (waker_tid, waker_function), aggregated from the kperf
+    /// MACH_MAKERUNNABLE wakeup edges. The wakee's tid is required;
+    /// `None` produces an empty update (we don't aggregate across
+    /// threads).
+    async fn subscribe_wakers(
+        &self,
+        wakee_tid: u32,
+        output: vox::Tx<WakersUpdate>,
     );
 }
 

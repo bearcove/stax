@@ -743,6 +743,55 @@ table.top-table tr.match {
   color: var(--danger);
 }
 
+/* "Who woke this thread?" panel — styled like the exclude bar but
+   with denser entries (function · tid · count). */
+.wakers-bar {
+  border-top: 1px solid var(--border-soft);
+  background: var(--bg-elevated);
+}
+
+.wakers-chips {
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.wakers-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  background: var(--bg-button);
+  color: var(--text-primary);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font: inherit;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.wakers-chip:hover {
+  border-color: var(--accent);
+}
+
+.wakers-chip-fn {
+  color: var(--text-primary);
+  max-width: 32em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wakers-chip-tid {
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+
+.wakers-chip-count {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
 .flame-wrap {
   display: flex;
   flex-direction: column;

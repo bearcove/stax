@@ -85,6 +85,19 @@ pub struct ThreadName< 'a > {
     pub name: &'a str,
 }
 
+/// One observed thread-thread wakeup. `waker_*_stack` is the waker
+/// thread's most recent PET tick, so the live aggregator can build
+/// a "who woke me?" view per wakee tid -- naming the symbols where
+/// the wake-up call was issued from.
+pub struct WakeupEvent< 'a > {
+    pub timestamp: u64,
+    pub pid: u32,
+    pub waker_tid: u32,
+    pub wakee_tid: u32,
+    pub waker_user_stack: &'a [u64],
+    pub waker_kernel_stack: &'a [u64],
+}
+
 pub trait LiveSink: Send + Sync {
     fn on_sample( &self, event: &SampleEvent );
 
@@ -105,4 +118,10 @@ pub trait LiveSink: Send + Sync {
     /// recorder learns a tid → name mapping.
     #[allow(unused_variables)]
     fn on_thread_name( &self, event: &ThreadName ) {}
+
+    /// One thread woke another. Backend-specific: only the kperf
+    /// path on macOS emits these (via MACH_MAKERUNNABLE kdebug
+    /// records). Default no-op so other backends compile.
+    #[allow(unused_variables)]
+    fn on_wakeup( &self, event: &WakeupEvent ) {}
 }

@@ -30,6 +30,13 @@ pub trait SampleSink {
     /// `data_reader` picks it up via its existing pre-scan.
     #[allow(unused_variables)]
     fn on_kallsyms(&mut self, data: &[u8]) {}
+
+    /// One thread woke another. The waker is whoever was on-CPU on
+    /// the cpu that emitted the `MACH_MAKERUNNABLE` record, with the
+    /// stack borrowed from its most recent PET tick. Only emitted by
+    /// the kperf backend.
+    #[allow(unused_variables)]
+    fn on_wakeup(&mut self, event: WakeupEvent<'_>) {}
 }
 
 /// One sample. Backtraces are callee-most first; addresses are absolute
@@ -94,6 +101,23 @@ pub struct BinaryUnloadedEvent<'a> {
     pub pid: u32,
     pub base_avma: u64,
     pub path: &'a str,
+}
+
+/// One thread X (the "waker") made another thread Y (the "wakee")
+/// runnable -- typically by signalling a condvar, semaphore, or
+/// dispatching work into a queue.  The stacks are the waker's most
+/// recent on-CPU sample (PET tick), so they're an approximation of
+/// where the wake-up call was issued from. Pairs naturally with
+/// off-CPU sample emission: the waker's stack here is the same one
+/// you'd see on the wakee's flame graph if you flipped to wall-clock
+/// mode.
+pub struct WakeupEvent<'a> {
+    pub timestamp_ns: u64,
+    pub pid: u32,
+    pub waker_tid: u32,
+    pub wakee_tid: u32,
+    pub waker_user_stack: &'a [u64],
+    pub waker_kernel_stack: &'a [u64],
 }
 
 pub struct ThreadNameEvent<'a> {

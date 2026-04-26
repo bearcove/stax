@@ -25,6 +25,7 @@ import {
   type TopSort,
   type TopUpdate,
   type ViewParams,
+  type WakersUpdate,
 } from "./generated/profiler.generated.ts";
 import { Flamegraph } from "./Flamegraph.tsx";
 import { Neighbors } from "./Neighbors.tsx";
@@ -254,6 +255,26 @@ export function App() {
     };
   }, [client]);
 
+  // "Who woke this thread?" — only meaningful when a single tid is
+  // selected. Resubscribe on tid change; reset state on disconnect.
+  const [wakers, setWakers] = useState<WakersUpdate | null>(null);
+  useEffect(() => {
+    setWakers(null);
+    if (!client || selectedTid === null) return;
+    let cancelled = false;
+    const [tx, rx] = channel<WakersUpdate>();
+    client.subscribeWakers(selectedTid, tx).catch(() => {});
+    (async () => {
+      for await (const next of rx) {
+        if (cancelled) break;
+        setWakers(next);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [client, selectedTid]);
+
   // Mirror table-pane frozen into a ref so the rx loop can check it
   // without re-running.
   const tableFrozenRef = useRef(tableFrozen);
@@ -369,6 +390,13 @@ export function App() {
             ))}
           </div>
         </section>
+      )}
+      {wakers && wakers.entries.length > 0 && (
+        <WakersPanel
+          wakers={wakers}
+          threads={threads}
+          onSelectTid={setSelectedTid}
+        />
       )}
       {client && (
         <section className="flame-pane">
@@ -631,6 +659,51 @@ const KIND_LABEL: Record<ObjKind, string> = {
 };
 
 const KIND_ORDER: ObjKind[] = ["main", "dylib", "system", "unknown"];
+
+function WakersPanel({
+  wakers,
+  threads,
+  onSelectTid,
+}: {
+  wakers: WakersUpdate;
+  threads: ThreadInfo[];
+  onSelectTid: (tid: number) => void;
+}) {
+  const wakeeName = threads.find((t) => t.tid === wakers.wakee_tid)?.name;
+  const totalNum = Number(wakers.total_wakeups);
+  return (
+    <section className="filter-bar wakers-bar">
+      <span className="filter-bar-label">
+        woken by · {wakeeName ?? `tid ${wakers.wakee_tid}`} ·{" "}
+        {wakers.total_wakeups.toString()} wakeups
+      </span>
+      <div className="filter-chips wakers-chips">
+        {wakers.entries.slice(0, 10).map((w, i) => {
+          const fn =
+            w.waker_function_name ?? `0x${w.waker_address.toString(16)}`;
+          const wakerName = threads.find((t) => t.tid === w.waker_tid)?.name;
+          const wakerLabel = wakerName ?? `tid ${w.waker_tid}`;
+          const pct = totalNum > 0 ? (Number(w.count) / totalNum) * 100 : 0;
+          return (
+            <button
+              key={i}
+              className="wakers-chip"
+              type="button"
+              onClick={() => onSelectTid(w.waker_tid)}
+              title={`click to switch to ${wakerLabel}${w.waker_binary ? " · " + w.waker_binary : ""}`}
+            >
+              <span className="wakers-chip-fn">{fn}</span>
+              <span className="wakers-chip-tid">{wakerLabel}</span>
+              <span className="wakers-chip-count">
+                {w.count.toString()} ({pct.toFixed(0)}%)
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
 
 function PmuMetricFilter({
   metric,

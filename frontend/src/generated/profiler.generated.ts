@@ -132,6 +132,21 @@ export interface NeighborsUpdate {
   callees_tree: FlameNode;
 }
 
+export interface WakerEntry {
+  waker_tid: number;
+  waker_address: bigint;
+  waker_function_name: string | null;
+  waker_binary: string | null;
+  language: string;
+  count: bigint;
+}
+
+export interface WakersUpdate {
+  wakee_tid: number;
+  total_wakeups: bigint;
+  entries: WakerEntry[];
+}
+
 // Request/Response type aliases
 export type TopRequest = [
   number, // limit
@@ -180,6 +195,12 @@ export type SubscribeNeighborsRequest = [
 ];
 export type SubscribeNeighborsResponse = void;
 
+export type SubscribeWakersRequest = [
+  number, // wakee_tid
+  Tx<WakersUpdate>, // output
+];
+export type SubscribeWakersResponse = void;
+
 // Caller interface for Profiler
 export interface ProfilerCaller {
   /**
@@ -198,6 +219,14 @@ export interface ProfilerCaller {
    */
   subscribeTimeline(tid: number | null, output: Tx<TimelineUpdate>): Promise<void>;
   subscribeNeighbors(address: bigint, params: ViewParams, output: Tx<NeighborsUpdate>): Promise<void>;
+  /**
+   * Stream "who woke this thread?" updates: top wakers grouped by
+   * (waker_tid, waker_function), aggregated from the kperf
+   * MACH_MAKERUNNABLE wakeup edges. The wakee's tid is required;
+   * `None` produces an empty update (we don't aggregate across
+   * threads).
+   */
+  subscribeWakers(wakeeTid: number, output: Tx<WakersUpdate>): Promise<void>;
 }
 
 // Client implementation for Profiler
@@ -408,6 +437,41 @@ export class ProfilerClient implements ProfilerCaller {
       return value as void;
   }
 
+  /**
+   * Stream "who woke this thread?" updates: top wakers grouped by
+   * (waker_tid, waker_function), aggregated from the kperf
+   * MACH_MAKERUNNABLE wakeup edges. The wakee's tid is required;
+   * `None` produces an empty update (we don't aggregate across
+   * threads).
+   */
+  async subscribeWakers(wakeeTid: number, output: Tx<WakersUpdate>): Promise<void> {
+    const descriptor = profiler_subscribeWakers_method;
+    const sendSchemas = profiler_descriptor.send_schemas;
+    const argTypeRefs = argElementRefsForMethod(descriptor.id, sendSchemas);
+    const prepareRetry = () => {
+      const channels = bindChannelsForTypeRefs(
+        argTypeRefs,
+        [wakeeTid, output],
+        this.caller.getChannelAllocator(),
+        this.caller.getChannelRegistry(),
+        sendSchemas.schemas,
+      );
+      const payload = new Uint8Array(0);
+      return { payload, channels };
+    };
+    const { channels } = prepareRetry();
+      const value = await this.caller.call({
+        method: "Profiler.subscribeWakers",
+        args: { wakeeTid, output },
+        descriptor,
+        sendSchemas,
+        channels,
+        prepareRetry,
+        finalizeChannels: () => finalizeBoundChannelsForTypeRefs(argTypeRefs, [wakeeTid, output], sendSchemas.schemas),
+      });
+      return value as void;
+  }
+
 }
 
 /**
@@ -433,6 +497,7 @@ export interface ProfilerHandler {
   subscribeThreads(output: Tx<ThreadsUpdate>): Promise<void> | void;
   subscribeTimeline(tid: number | null, output: Tx<TimelineUpdate>): Promise<void> | void;
   subscribeNeighbors(address: bigint, params: ViewParams, output: Tx<NeighborsUpdate>): Promise<void> | void;
+  subscribeWakers(wakeeTid: number, output: Tx<WakersUpdate>): Promise<void> | void;
 }
 
 // Dispatcher for Profiler
@@ -510,6 +575,14 @@ export class ProfilerDispatcher implements Dispatcher {
       } catch (error) {
         call.replyInternalError(error instanceof Error ? error.message : String(error));
       }
+    } else if (method.id === 0xc6ab2f2a4444e87cn) {
+      try {
+        const result = await this.handler.subscribeWakers(args[0] as number, args[1] as Tx<WakersUpdate>);
+        (args[1] as { close(): void }).close(); // close output before reply
+        call.reply(result);
+      } catch (error) {
+        call.replyInternalError(error instanceof Error ? error.message : String(error));
+      }
     }
   }
 }
@@ -551,6 +624,8 @@ export const profiler_send_schemas: import("@bearcove/vox-core").ServiceSendSche
     [0x4f333ffa36afde57n, { id: 0x4f333ffa36afde57n, type_params: [], kind: { tag: 'struct', name: 'TimelineBucket', fields: [{ name: 'start_ns', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'count', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }] } }],
     [0x54a3a213b0250c32n, { id: 0x54a3a213b0250c32n, type_params: [], kind: { tag: 'struct', name: 'TimelineUpdate', fields: [{ name: 'bucket_size_ns', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'duration_ns', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'total_samples', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'buckets', type_ref: { tag: 'concrete', type_id: 0x0a96b404b4d79d67n, args: [{ tag: 'concrete', type_id: 0x4f333ffa36afde57n, args: [] }] }, required: true }] } }],
     [0x46763dea0f7d31fen, { id: 0x46763dea0f7d31fen, type_params: [], kind: { tag: 'struct', name: 'NeighborsUpdate', fields: [{ name: 'function_name', type_ref: { tag: 'concrete', type_id: 0xdcafd4de6b7969bbn, args: [{ tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }] }, required: true }, { name: 'binary', type_ref: { tag: 'concrete', type_id: 0xdcafd4de6b7969bbn, args: [{ tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }] }, required: true }, { name: 'is_main', type_ref: { tag: 'concrete', type_id: 0x178367a87f66fb46n, args: [] }, required: true }, { name: 'language', type_ref: { tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }, required: true }, { name: 'own_count', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'callers_tree', type_ref: { tag: 'concrete', type_id: 0x4b523cf704b97c49n, args: [] }, required: true }, { name: 'callees_tree', type_ref: { tag: 'concrete', type_id: 0x4b523cf704b97c49n, args: [] }, required: true }] } }],
+    [0xdd37b6551b52fb4fn, { id: 0xdd37b6551b52fb4fn, type_params: [], kind: { tag: 'struct', name: 'WakerEntry', fields: [{ name: 'waker_tid', type_ref: { tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }, required: true }, { name: 'waker_address', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'waker_function_name', type_ref: { tag: 'concrete', type_id: 0xdcafd4de6b7969bbn, args: [{ tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }] }, required: true }, { name: 'waker_binary', type_ref: { tag: 'concrete', type_id: 0xdcafd4de6b7969bbn, args: [{ tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }] }, required: true }, { name: 'language', type_ref: { tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }, required: true }, { name: 'count', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }] } }],
+    [0x5ce6ea672e206d3en, { id: 0x5ce6ea672e206d3en, type_params: [], kind: { tag: 'struct', name: 'WakersUpdate', fields: [{ name: 'wakee_tid', type_ref: { tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }, required: true }, { name: 'total_wakeups', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'entries', type_ref: { tag: 'concrete', type_id: 0x0a96b404b4d79d67n, args: [{ tag: 'concrete', type_id: 0xdd37b6551b52fb4fn, args: [] }] }, required: true }] } }],
   ]),
   methods: new Map<bigint, import("@bearcove/vox-core").MethodSendSchemas>([
     [0x4eb5e594c5e49e21n, { argsRootRef: { tag: 'concrete', type_id: 0xaa510ab07d34f141n, args: [{ tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }, { tag: 'concrete', type_id: 0xa9bc52fb11aa78c0n, args: [] }, { tag: 'concrete', type_id: 0x6353fa11ad0f6f57n, args: [] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0x0a96b404b4d79d67n, args: [{ tag: 'concrete', type_id: 0xc612a43a54600305n, args: [] }] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
@@ -561,6 +636,7 @@ export const profiler_send_schemas: import("@bearcove/vox-core").ServiceSendSche
     [0xbf5f73ea223d9f7dn, { argsRootRef: { tag: 'concrete', type_id: 0x6847ab90feda71c1n, args: [{ tag: 'concrete', type_id: 0xc886545a493d06ebn, args: [{ tag: 'concrete', type_id: 0x1d9ed64b1701f95dn, args: [] }] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0xbc5c33249a2dc720n, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
     [0xc3381210c17fc3c4n, { argsRootRef: { tag: 'concrete', type_id: 0xba0496aa8cee7a4cn, args: [{ tag: 'concrete', type_id: 0xdcafd4de6b7969bbn, args: [{ tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }] }, { tag: 'concrete', type_id: 0xc886545a493d06ebn, args: [{ tag: 'concrete', type_id: 0x54a3a213b0250c32n, args: [] }] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0xbc5c33249a2dc720n, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
     [0x42acdf6aa85cc2d3n, { argsRootRef: { tag: 'concrete', type_id: 0xaa510ab07d34f141n, args: [{ tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, { tag: 'concrete', type_id: 0x6353fa11ad0f6f57n, args: [] }, { tag: 'concrete', type_id: 0xc886545a493d06ebn, args: [{ tag: 'concrete', type_id: 0x46763dea0f7d31fen, args: [] }] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0xbc5c33249a2dc720n, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
+    [0xc6ab2f2a4444e87cn, { argsRootRef: { tag: 'concrete', type_id: 0xba0496aa8cee7a4cn, args: [{ tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }, { tag: 'concrete', type_id: 0xc886545a493d06ebn, args: [{ tag: 'concrete', type_id: 0x5ce6ea672e206d3en, args: [] }] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0xbc5c33249a2dc720n, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
   ]),
 };
 
@@ -612,6 +688,12 @@ export const profiler_subscribeNeighbors_method: MethodDescriptor = {
   retry: { persist: false, idem: false },
 };
 
+export const profiler_subscribeWakers_method: MethodDescriptor = {
+  name: 'subscribeWakers',
+  id: 0xc6ab2f2a4444e87cn,
+  retry: { persist: false, idem: false },
+};
+
 // Service descriptor for runtime dispatch metadata
 export const profiler_descriptor: ServiceDescriptor = {
   service_name: 'Profiler',
@@ -625,6 +707,7 @@ export const profiler_descriptor: ServiceDescriptor = {
     [profiler_subscribeThreads_method.id, profiler_subscribeThreads_method],
     [profiler_subscribeTimeline_method.id, profiler_subscribeTimeline_method],
     [profiler_subscribeNeighbors_method.id, profiler_subscribeNeighbors_method],
+    [profiler_subscribeWakers_method.id, profiler_subscribeWakers_method],
   ]),
 };
 

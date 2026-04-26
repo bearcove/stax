@@ -36,5 +36,5 @@ pub mod unwinder_setup;
 pub use recorder::{record, record_with_task, record_with_task_and_tick_hook, RecordOptions};
 pub use sample_sink::{
     BinaryLoadedEvent, BinaryUnloadedEvent, JitdumpEvent, SampleEvent, SampleSink,
-    ThreadNameEvent,
+    ThreadNameEvent, WakeupEvent,
 };
