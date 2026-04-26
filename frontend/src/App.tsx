@@ -9,6 +9,8 @@ import {
   LuPause,
   LuSun,
   LuMoon,
+  LuChevronDown,
+  LuCheck,
 } from "react-icons/lu";
 import { SiRust, SiC, SiCplusplus } from "react-icons/si";
 import {
@@ -814,6 +816,14 @@ function heatBg(count: bigint, max: bigint): string {
   return `hsla(${hue}, 70%, 45%, ${alpha})`;
 }
 
+function threadLabel(t: ThreadInfo): string {
+  return t.name ? `${t.name} [${t.tid}]` : `[${t.tid}]`;
+}
+
+/// Custom dropdown for filtering by thread. Replaces a `<select>` so
+/// we can do live search (over name + tid), show per-row sample bars,
+/// and later sort by other metrics (off-CPU samples, allocations…).
+/// Threads arrive busiest-first from the server.
 function ThreadSwitcher({
   threads,
   selectedTid,
@@ -823,26 +833,154 @@ function ThreadSwitcher({
   selectedTid: number | null;
   onSelect: (tid: number | null) => void;
 }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  // Close on outside click / Escape.
+  useEffect(() => {
+    if (!open) return;
+    const onMouse = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("mousedown", onMouse);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onMouse);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  // Auto-focus the search input when opening.
+  useEffect(() => {
+    if (open) {
+      setQuery("");
+      requestAnimationFrame(() => inputRef.current?.focus());
+    }
+  }, [open]);
+
+  const total = threads.reduce((s, t) => s + t.sample_count, 0n);
+  const totalF = total === 0n ? 1 : Number(total);
+  const max = threads.reduce(
+    (m, t) => (t.sample_count > m ? t.sample_count : m),
+    0n,
+  );
+  const maxF = max === 0n ? 1 : Number(max);
+
+  const q = query.trim().toLowerCase();
+  const filtered = q
+    ? threads.filter((t) => {
+        if (String(t.tid).includes(q)) return true;
+        if (t.name && t.name.toLowerCase().includes(q)) return true;
+        return false;
+      })
+    : threads;
+
+  const triggerLabel = (() => {
+    if (selectedTid === null) return "all threads";
+    const t = threads.find((x) => x.tid === selectedTid);
+    return t ? threadLabel(t) : `[${selectedTid}]`;
+  })();
+
+  const pick = (tid: number | null) => {
+    onSelect(tid);
+    setOpen(false);
+  };
+
   return (
-    <select
-      className="thread-switcher"
-      value={selectedTid === null ? "all" : String(selectedTid)}
-      onChange={(e) => {
-        const v = e.target.value;
-        onSelect(v === "all" ? null : Number(v));
-      }}
-      title="filter by thread"
+    <div
+      ref={rootRef}
+      className={`thread-switcher${open ? " open" : ""}`}
     >
-      <option value="all">all threads</option>
-      {threads.map((t) => {
-        const label = t.name ? `[${t.tid}] ${t.name}` : `[${t.tid}]`;
-        return (
-          <option key={t.tid} value={String(t.tid)}>
-            {label} ({t.sample_count.toString()})
-          </option>
-        );
-      })}
-    </select>
+      <button
+        type="button"
+        className="thread-trigger"
+        onClick={() => setOpen((o) => !o)}
+        title="filter by thread"
+      >
+        <span className="thread-trigger-label">{triggerLabel}</span>
+        <LuChevronDown className="thread-trigger-chev" />
+      </button>
+      {open && (
+        <div className="thread-popover" role="listbox">
+          <input
+            ref={inputRef}
+            className="thread-search"
+            type="search"
+            placeholder="search threads…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && filtered.length === 1) {
+                pick(filtered[0].tid);
+              }
+            }}
+          />
+          <div className="thread-list">
+            <button
+              type="button"
+              className={`thread-row${selectedTid === null ? " selected" : ""}`}
+              onClick={() => pick(null)}
+            >
+              <span className="thread-check">
+                {selectedTid === null && <LuCheck />}
+              </span>
+              <span className="thread-name">all threads</span>
+              <span className="thread-count">
+                {total.toLocaleString()}
+              </span>
+            </button>
+            {filtered.length === 0 ? (
+              <div className="thread-empty">no matches</div>
+            ) : (
+              filtered.map((t) => {
+                const sel = selectedTid === t.tid;
+                const wPct =
+                  max === 0n ? 0 : (Number(t.sample_count) / maxF) * 100;
+                const rPct =
+                  total === 0n
+                    ? 0
+                    : Math.round((Number(t.sample_count) / totalF) * 1000) /
+                      10;
+                return (
+                  <button
+                    type="button"
+                    key={t.tid}
+                    className={`thread-row${sel ? " selected" : ""}`}
+                    onClick={() => pick(t.tid)}
+                    title={`${t.sample_count.toString()} samples (${rPct}%)`}
+                  >
+                    <span className="thread-check">{sel && <LuCheck />}</span>
+                    <span className="thread-name">
+                      {t.name ?? <em className="thread-name-anon">[{t.tid}]</em>}
+                      {t.name && (
+                        <span className="thread-tid"> [{t.tid}]</span>
+                      )}
+                    </span>
+                    <span className="thread-bar">
+                      <span
+                        className="thread-bar-fill"
+                        style={{ width: `${wPct}%` }}
+                      />
+                    </span>
+                    <span className="thread-count">
+                      {t.sample_count.toLocaleString()}
+                    </span>
+                  </button>
+                );
+              })
+            )}
+          </div>
+          <div className="thread-popover-footer">
+            {threads.length} threads · sorted by samples
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
