@@ -107,6 +107,30 @@ pub const KDBG_VALCHECK: u32 = 0x200000;
 // Event classes we care about
 // ---------------------------------------------------------------------------
 
+/// Mach (scheduler, IPC, VM, etc.). Includes context switches under
+/// subclass `DBG_MACH_SCHED`.
+pub const DBG_MACH: u8 = 1;
+pub const DBG_MACH_SCHED: u8 = 0x40;
+
+/// Specific scheduler codes within `DBG_MACH_SCHED`. From xnu
+/// `osfmk/kern/sched_prim.h` / `mach/sched_prim.h`.
+pub mod mach_sched {
+    /// Context switch. arg1 = new pthread_id (continuation if 0),
+    /// arg2 = new thread tid, arg3 = old thread runq priority,
+    /// arg4 = old thread sched flags.
+    pub const SCHED: u16 = 0x0;
+    /// Stack-handoff context switch (fast path, used for
+    /// thread_block_parameter on a target thread).
+    pub const STKHANDOFF: u16 = 0x8;
+    /// A blocked thread became runnable. arg1 = thread tid.
+    pub const MAKERUNNABLE: u16 = 0x4;
+    /// Thread is about to block. arg1 = wait_event,
+    /// arg2 = wait_result, arg3 = wait_timeout, arg4 = thread tid.
+    pub const BLOCK: u16 = 0x18;
+    /// Thread is waiting (cond/sem/lock).
+    pub const WAIT: u16 = 0x14;
+}
+
 pub const DBG_PERF: u8 = 37;
 
 /// kperf event encoding, mirroring xnu's `osfmk/kperf/buffer.h`.

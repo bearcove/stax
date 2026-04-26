@@ -18,6 +18,7 @@ use crate::image_scan::ImageScanner;
 use crate::kdebug::{self, kdbg_class, kdbg_code, kdbg_func, kdbg_subclass, KdBuf, KdRegtype, DBG_PERF};
 use crate::kernel_symbols::{KernelImage, SlideEstimator};
 use crate::libproc;
+use crate::offcpu::OffCpuTracker;
 use crate::parser::Parser;
 
 /// Configuration for a kperf-driven recording session.
@@ -253,11 +254,17 @@ impl<'a> Session<'a> {
         kdebug::set_buf_size(opts.kdebug_buf_records)?;
         kdebug::setup()?;
 
-        // Range-filter to the DBG_PERF class so we don't drown in
-        // unrelated kernel events.
+        // Range filter covers DBG_MACH (class 1, where MACH_SCHED
+        // context-switch events live) through DBG_PERF (class 37,
+        // where kperf samples live). The filter is single-range so
+        // we sweep up everything in between (DBG_NETWORK, DBG_BSD,
+        // ...); the drain loop drops anything that isn't DBG_PERF
+        // or DBG_MACH_SCHED before parsing. In practice the kdebug
+        // ring buffer (1M records) holds several seconds of traffic
+        // even on busy systems, and we drain every few ms.
         let mut filter = KdRegtype {
             ty: kdebug::KDBG_RANGETYPE,
-            value1: kdebug::kdbg_eventid(kdebug::DBG_PERF, 0, 0),
+            value1: kdebug::kdbg_eventid(kdebug::DBG_MACH, kdebug::DBG_MACH_SCHED, 0),
             value2: kdebug::kdbg_eventid(kdebug::DBG_PERF, 0xff, 0x3fff),
             value3: 0,
             value4: 0,
@@ -349,6 +356,7 @@ fn drain_loop<S: SampleSink>(
     // (subclass, code, func) -> count, for diagnostics.
     let mut histogram: BTreeMap<(u8, u16, u32), u64> = BTreeMap::new();
     let mut total_drained: u64 = 0;
+    let mut offcpu = OffCpuTracker::new();
 
     loop {
         if should_stop() {
@@ -389,13 +397,19 @@ fn drain_loop<S: SampleSink>(
         total_drained += n as u64;
 
         for rec in &buf[..n] {
-            if kdbg_class(rec.debugid) == DBG_PERF {
+            let class = kdbg_class(rec.debugid);
+            if class == DBG_PERF {
                 let key = (
                     kdbg_subclass(rec.debugid),
                     kdbg_code(rec.debugid),
                     kdbg_func(rec.debugid),
                 );
                 *histogram.entry(key).or_insert(0) += 1;
+            } else if class == kdebug::DBG_MACH
+                && kdbg_subclass(rec.debugid) == kdebug::DBG_MACH_SCHED
+            {
+                offcpu.feed(rec);
+                continue;
             }
             parser.feed(rec, |sample| {
                 if let Some(ref mut est) = slide_est {
@@ -417,7 +431,7 @@ fn drain_loop<S: SampleSink>(
         }
     }
 
-    log_session_summary(total_drained, &parser, &histogram);
+    log_session_summary(total_drained, &parser, &histogram, &offcpu);
     Ok(())
 }
 
@@ -425,6 +439,7 @@ fn log_session_summary(
     total: u64,
     parser: &Parser,
     histogram: &BTreeMap<(u8, u16, u32), u64>,
+    offcpu: &OffCpuTracker,
 ) {
     let s = &parser.stats;
     log::info!(
@@ -440,6 +455,7 @@ fn log_session_summary(
     for ((sc, code, func), count) in histogram {
         log::info!("  ({sc:>2}, {code:>3}, {func}) -> {count}");
     }
+    offcpu.log_summary();
 }
 
 fn kperf_call(rc: i32, op: &'static str) -> Result<(), Error> {
