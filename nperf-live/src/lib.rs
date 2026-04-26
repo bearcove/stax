@@ -15,8 +15,8 @@ use nperf_core::live_sink::{
     BinaryLoadedEvent, BinaryUnloadedEvent, LiveSink, SampleEvent, TargetAttached, ThreadName,
 };
 use nperf_live_proto::{
-    AnnotatedLine, AnnotatedView, FlameNode, FlamegraphUpdate, Profiler, ProfilerDispatcher,
-    ThreadInfo, ThreadsUpdate, TopEntry, TopSort, TopUpdate,
+    AnnotatedLine, AnnotatedView, FlameNode, FlamegraphUpdate, NeighborsUpdate, Profiler,
+    ProfilerDispatcher, ThreadInfo, ThreadsUpdate, TopEntry, TopSort, TopUpdate,
 };
 
 mod aggregator;
@@ -194,6 +194,36 @@ impl Profiler for LiveServer {
         });
     }
 
+    async fn subscribe_neighbors(
+        &self,
+        address: u64,
+        tid: Option<u32>,
+        output: vox::Tx<NeighborsUpdate>,
+    ) {
+        tracing::info!(
+            address = format!("{:#x}", address),
+            ?tid,
+            "subscribe_neighbors: starting stream"
+        );
+        let aggregator = self.aggregator.clone();
+        let binaries = self.binaries.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+            loop {
+                interval.tick().await;
+                let update = build_neighbors_update(&aggregator, &binaries, address, tid);
+                if let Err(e) = output.send(update).await {
+                    tracing::info!(
+                        address = format!("{:#x}", address),
+                        ?tid,
+                        "subscribe_neighbors: stream ended: {e:?}"
+                    );
+                    break;
+                }
+            }
+        });
+    }
+
     async fn subscribe_threads(&self, output: vox::Tx<ThreadsUpdate>) {
         tracing::info!("subscribe_threads: starting stream");
         let aggregator = self.aggregator.clone();
@@ -305,6 +335,198 @@ fn build_top_entries(
     });
     out.truncate(limit);
     out
+}
+
+/// Build the kcachegrind-style "family tree" view of a symbol.
+///
+/// We walk the call tree once and, for every node whose resolved
+/// symbol matches the target, do two things:
+///   1. Merge the entire ancestor chain (parent → grandparent → …)
+///      into `callers_tree`, growing outward toward `main`.
+///   2. Merge the entire descendant subtree into `callees_tree`,
+///      keyed by symbol (so recursion + multiple call sites collapse).
+fn build_neighbors_update(
+    aggregator: &Arc<RwLock<Aggregator>>,
+    binaries: &Arc<RwLock<BinaryRegistry>>,
+    target_address: u64,
+    tid: Option<u32>,
+) -> NeighborsUpdate {
+    use std::collections::HashMap;
+
+    type SymbolKey = (Option<String>, Option<String>);
+
+    #[derive(Default)]
+    struct SymbolNode {
+        count: u64,
+        rep_address: u64,
+        rep_self: u64,
+        is_main: bool,
+        children: HashMap<SymbolKey, SymbolNode>,
+    }
+
+    fn classify(
+        addr: u64,
+        bins: &BinaryRegistry,
+    ) -> (SymbolKey, bool) {
+        match bins.lookup_symbol(addr) {
+            Some(r) => ((Some(r.function_name), Some(r.binary)), r.is_main),
+            None => ((None, None), false),
+        }
+    }
+
+    /// Insert one (addr, count) sample into `node`, merging by
+    /// SymbolKey-keyed children. `delta` is added to this node's count;
+    /// `rep_self` is the largest single contribution we've seen so we
+    /// can pick the hottest address as the click-through representative.
+    fn accumulate(
+        node: &mut SymbolNode,
+        addr: u64,
+        delta: u64,
+        is_main: bool,
+    ) {
+        node.count += delta;
+        if delta > node.rep_self {
+            node.rep_address = addr;
+            node.rep_self = delta;
+            node.is_main = is_main;
+        }
+    }
+
+    fn merge_descendants(
+        dst: &mut SymbolNode,
+        src: &aggregator::StackNode,
+        bins: &BinaryRegistry,
+    ) {
+        for (caddr, child) in &src.children {
+            let (key, is_main) = classify(*caddr, bins);
+            let entry = dst.children.entry(key).or_default();
+            accumulate(entry, *caddr, child.count, is_main);
+            merge_descendants(entry, child, bins);
+        }
+    }
+
+    fn walk(
+        node: &aggregator::StackNode,
+        node_addr: u64,
+        ancestors: &mut Vec<u64>,
+        target_key: &SymbolKey,
+        bins: &BinaryRegistry,
+        callers: &mut SymbolNode,
+        callees: &mut SymbolNode,
+        own_count: &mut u64,
+    ) {
+        if node_addr != 0 {
+            let (key, _is_main) = classify(node_addr, bins);
+            if &key == target_key {
+                *own_count += node.count;
+                // Insert ancestor chain into callers_tree, innermost-first.
+                let mut cur = &mut *callers;
+                for &caller_addr in ancestors.iter().rev() {
+                    let (ckey, cmain) = classify(caller_addr, bins);
+                    let entry = cur.children.entry(ckey).or_default();
+                    accumulate(entry, caller_addr, node.count, cmain);
+                    cur = entry;
+                }
+                // Merge descendants into callees_tree.
+                merge_descendants(callees, node, bins);
+            }
+        }
+
+        let pushed = node_addr != 0;
+        if pushed {
+            ancestors.push(node_addr);
+        }
+        for (caddr, child) in &node.children {
+            walk(
+                child,
+                *caddr,
+                ancestors,
+                target_key,
+                bins,
+                callers,
+                callees,
+                own_count,
+            );
+        }
+        if pushed {
+            ancestors.pop();
+        }
+    }
+
+    fn to_flame_node(
+        sn: SymbolNode,
+        key: SymbolKey,
+        threshold: u64,
+    ) -> FlameNode {
+        let SymbolNode {
+            count,
+            rep_address,
+            is_main,
+            children,
+            ..
+        } = sn;
+        let mut child_nodes: Vec<FlameNode> = children
+            .into_iter()
+            .filter(|(_, c)| c.count >= threshold)
+            .map(|(k, c)| to_flame_node(c, k, threshold))
+            .collect();
+        child_nodes.sort_by(|a, b| b.count.cmp(&a.count));
+        FlameNode {
+            address: rep_address,
+            count,
+            function_name: key.0,
+            binary: key.1,
+            is_main,
+            children: child_nodes,
+        }
+    }
+
+    let bins = binaries.read();
+    let target_resolved = bins.lookup_symbol(target_address);
+    let target_key: SymbolKey = match &target_resolved {
+        Some(r) => (Some(r.function_name.clone()), Some(r.binary.clone())),
+        None => (None, None),
+    };
+
+    let mut callers = SymbolNode::default();
+    let mut callees = SymbolNode::default();
+    let mut own_count: u64 = 0;
+
+    let agg = aggregator.read();
+    let root = agg.flame_root(tid);
+    let mut ancestors: Vec<u64> = Vec::new();
+    walk(
+        &root,
+        0,
+        &mut ancestors,
+        &target_key,
+        &bins,
+        &mut callers,
+        &mut callees,
+        &mut own_count,
+    );
+
+    // Stamp the target's own count + representative onto each tree's
+    // root so the renderer has a useful "self" frame.
+    callers.count = own_count;
+    callers.rep_address = target_address;
+    callers.is_main = target_resolved.as_ref().map(|r| r.is_main).unwrap_or(false);
+    callees.count = own_count;
+    callees.rep_address = target_address;
+    callees.is_main = target_resolved.as_ref().map(|r| r.is_main).unwrap_or(false);
+
+    let threshold = (own_count / 200).max(1);
+    let callers_tree = to_flame_node(callers, target_key.clone(), threshold);
+    let callees_tree = to_flame_node(callees, target_key.clone(), threshold);
+
+    NeighborsUpdate {
+        function_name: target_key.0,
+        binary: target_key.1,
+        is_main: target_resolved.as_ref().map(|r| r.is_main).unwrap_or(false),
+        own_count,
+        callers_tree,
+        callees_tree,
+    }
 }
 
 fn build_flame_update(

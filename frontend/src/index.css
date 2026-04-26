@@ -566,6 +566,91 @@ table.top-table tr.main .fn-line .fn-name {
 
 /* ---------- annotation pane ---------- */
 
+.ann-stack {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.ann-stack > .neighbors {
+  flex: 0 0 auto;
+  border-bottom: 1px solid #232629;
+}
+
+.ann-stack > .annotation {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.neighbors {
+  background: #0a0b0d;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  display: flex;
+  flex-direction: column;
+}
+
+.neighbors.placeholder {
+  padding: 1rem;
+  color: #6c7480;
+  font-size: 12px;
+}
+
+.family-section {
+  display: flex;
+  flex-direction: column;
+}
+
+.family-label {
+  padding: 4px 12px 2px;
+  color: #6c7480;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.family-empty {
+  padding: 4px 12px 6px;
+  color: #6c7480;
+  font-size: 11px;
+}
+
+.family-chart {
+  position: relative;
+  width: 100%;
+  background: #0a0b0d;
+  overflow: hidden;
+  margin-bottom: 4px;
+}
+
+.family-target {
+  background: #1c1f24;
+  border-top: 1px solid #232629;
+  border-bottom: 1px solid #232629;
+  padding: 4px 12px;
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.family-target-label {
+  color: #d3b75f;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.family-target-meta {
+  color: #6c7480;
+  font-size: 11px;
+  flex: 0 0 auto;
+}
+
 .annotation {
   display: flex;
   flex-direction: column;

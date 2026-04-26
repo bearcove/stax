@@ -4,19 +4,26 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+overrides:
+  '@bearcove/vox-core': link:/Users/amos/bearcove/vox/typescript/packages/vox-core
+  '@bearcove/vox-postcard': link:/Users/amos/bearcove/vox/typescript/packages/vox-postcard
+  '@bearcove/vox-tcp': link:/Users/amos/bearcove/vox/typescript/packages/vox-tcp
+  '@bearcove/vox-wire': link:/Users/amos/bearcove/vox/typescript/packages/vox-wire
+  '@bearcove/vox-ws': link:/Users/amos/bearcove/vox/typescript/packages/vox-ws
+
 importers:
 
   .:
     dependencies:
       '@bearcove/vox-core':
-        specifier: ^0.4.0
-        version: 0.4.0
+        specifier: link:/Users/amos/bearcove/vox/typescript/packages/vox-core
+        version: link:../../../../../vox/typescript/packages/vox-core
       '@bearcove/vox-postcard':
-        specifier: ^0.4.0
-        version: 0.4.0
+        specifier: link:/Users/amos/bearcove/vox/typescript/packages/vox-postcard
+        version: link:../../../../../vox/typescript/packages/vox-postcard
       '@bearcove/vox-ws':
-        specifier: ^0.4.0
-        version: 0.4.0
+        specifier: link:/Users/amos/bearcove/vox/typescript/packages/vox-ws
+        version: link:../../../../../vox/typescript/packages/vox-ws
       react:
         specifier: ^18.3.1
         version: 18.3.1
@@ -127,21 +134,6 @@ packages:
   '@babel/types@7.29.0':
     resolution: {integrity: sha512-LwdZHpScM4Qz8Xw2iKSzS+cfglZzJGvofQICy7W7v4caru4EaAmyUuO6BGrbyQ2mYV11W0U8j5mBhd14dd3B0A==}
     engines: {node: '>=6.9.0'}
-
-  '@bearcove/vox-core@0.4.0':
-    resolution: {integrity: sha512-t0VC7FsRNeC8xnGqddknh1RLg8VskFEdhxTas+M55NjwwIHIU9P7r66lsVEDPgFwdQmN4Vdiuk3ptAthmoxz/g==}
-
-  '@bearcove/vox-postcard@0.4.0':
-    resolution: {integrity: sha512-JU8QM0uzFLdFoMTrv/Ad4MA4R2WL1MXVUl2JbPVl4CM/0qF4e8IUD++BWhshiZdbkOxGLUb9AB4NRSWCZCkT2g==}
-
-  '@bearcove/vox-tcp@0.4.0':
-    resolution: {integrity: sha512-+kAgUkFexVNJ0SaxuVV+9UaYie4Hd9ShXBtvILe/n8PAqNwBS/p1+tmmYfd/QaqxhqBbrQV3s1IpKsfas0czBA==}
-
-  '@bearcove/vox-wire@0.4.0':
-    resolution: {integrity: sha512-Z17vb8bBc2tWjK5oIW4NdUb3O6juKFbSV65RYFuj3k5vykxZWy6MFV3jcnyftRNk5itY2dmx0skN6MSCind6vA==}
-
-  '@bearcove/vox-ws@0.4.0':
-    resolution: {integrity: sha512-MLBo4qZOLlaFtJtacRATQBnMus99AQUU0q989M58/zvUpxPoWF37/AYJPxgEBbTr0kXlgIyKvfqkFPQdO8ccdw==}
 
   '@esbuild/aix-ppc64@0.21.5':
     resolution: {integrity: sha512-1SDgH6ZSPTlggy1yI6+Dbkiz8xzpHJEVAlF/AM1tHPLsf5STom9rwtjE4hKAF20FfXXNTFqEYXyJNWh1GiZedQ==}
@@ -480,8 +472,8 @@ packages:
     engines: {node: ^6 || ^7 || ^8 || ^9 || ^10 || ^11 || ^12 || >=13.7}
     hasBin: true
 
-  caniuse-lite@1.0.30001790:
-    resolution: {integrity: sha512-bOoxfJPyYo+ds6W0YfptaCWbFnJYjh2Y1Eow5lRv+vI2u8ganPZqNm1JwNh0t2ELQCqIWg4B3dWEusgAmsoyOw==}
+  caniuse-lite@1.0.30001791:
+    resolution: {integrity: sha512-yk0l/YSrOnFZk3UROpDLQD9+kC1l4meK/wed583AXrzoarMGJcbRi2Q4RaUYbKxYAsZ8sWmaSa/DsLmdBeI1vQ==}
 
   convert-source-map@2.0.0:
     resolution: {integrity: sha512-Kvp459HrV2FEJ1CAsi1Ku+MY3kasH19TFykTz2xWmMeq6bk2NU3XXvfJ+Q61m0xktWwt+1HSYf3JZsTms3aRJg==}
@@ -750,26 +742,6 @@ snapshots:
       '@babel/helper-string-parser': 7.27.1
       '@babel/helper-validator-identifier': 7.28.5
 
-  '@bearcove/vox-core@0.4.0':
-    dependencies:
-      '@bearcove/vox-postcard': 0.4.0
-      '@bearcove/vox-wire': 0.4.0
-
-  '@bearcove/vox-postcard@0.4.0': {}
-
-  '@bearcove/vox-tcp@0.4.0':
-    dependencies:
-      '@bearcove/vox-core': 0.4.0
-
-  '@bearcove/vox-wire@0.4.0':
-    dependencies:
-      '@bearcove/vox-postcard': 0.4.0
-
-  '@bearcove/vox-ws@0.4.0':
-    dependencies:
-      '@bearcove/vox-core': 0.4.0
-      '@bearcove/vox-tcp': 0.4.0
-
   '@esbuild/aix-ppc64@0.21.5':
     optional: true
 
@@ -986,12 +958,12 @@ snapshots:
   browserslist@4.28.2:
     dependencies:
       baseline-browser-mapping: 2.10.22
-      caniuse-lite: 1.0.30001790
+      caniuse-lite: 1.0.30001791
       electron-to-chromium: 1.5.344
       node-releases: 2.0.38
       update-browserslist-db: 1.2.3(browserslist@4.28.2)
 
-  caniuse-lite@1.0.30001790: {}
+  caniuse-lite@1.0.30001791: {}
 
   convert-source-map@2.0.0: {}
 

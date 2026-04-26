@@ -20,6 +20,7 @@ import {
   type TopUpdate,
 } from "./generated/profiler.generated.ts";
 import { Flamegraph } from "./Flamegraph.tsx";
+import { Neighbors } from "./Neighbors.tsx";
 
 type Status = "pending" | "ok" | "err";
 
@@ -255,12 +256,21 @@ export function App() {
         </section>
         <section className="pane ann-pane">
           {client && selected !== null ? (
-            <Annotation
-              client={client}
-              address={selected}
-              tid={selectedTid}
-              key={String(selected)}
-            />
+            <div className="ann-stack" key={String(selected)}>
+              <Neighbors
+                client={client}
+                address={selected}
+                tid={selectedTid}
+                matchText={matchText}
+                hiddenKinds={hiddenKinds}
+                onSelectAddress={setSelected}
+              />
+              <Annotation
+                client={client}
+                address={selected}
+                tid={selectedTid}
+              />
+            </div>
           ) : (
             <div className="placeholder">click a row to see disassembly</div>
           )}

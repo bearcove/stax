@@ -74,6 +74,35 @@ pub struct ThreadsUpdate {
     pub threads: Vec<ThreadInfo>,
 }
 
+/// kcachegrind-style "family tree" of a symbol's neighbors.
+///
+/// `callers_tree` is rooted at the target. Its children are direct
+/// callers (one level up the stack); their children are the callers'
+/// callers; and so on. So the deeper you go, the further from the
+/// target — i.e. the tree grows *outward toward main*.
+///
+/// `callees_tree` is also rooted at the target. Its children are
+/// direct callees; its grandchildren are their callees. So the deeper
+/// you go, the further into the call stack — i.e. the tree grows
+/// *outward toward leaf frames*.
+///
+/// Both trees are keyed by symbol (multiple addresses inside the same
+/// function merge), so recursion / multiple call sites all roll up.
+/// Counts are pruned at ~0.5% of `own_count` to bound the wire size.
+#[derive(Clone, Debug, Facet)]
+pub struct NeighborsUpdate {
+    /// Resolved name of the target symbol; `None` for unresolved
+    /// addresses (JIT, kernel frames, etc.).
+    pub function_name: Option<String>,
+    pub binary: Option<String>,
+    pub is_main: bool,
+    /// Total samples that passed through this symbol (sum across
+    /// every address resolving to it).
+    pub own_count: u64,
+    pub callers_tree: FlameNode,
+    pub callees_tree: FlameNode,
+}
+
 /// Source-line header attached to the first instruction generated from
 /// a given (file, line) pair. The frontend renders one of these as a
 /// banner row above the asm row whenever the source location changes
@@ -157,6 +186,17 @@ pub trait Profiler {
 
     /// Stream the live list of threads (tid, name, sample count).
     async fn subscribe_threads(&self, output: vox::Tx<ThreadsUpdate>);
+
+    /// Stream the callers and callees of the symbol containing
+    /// `address`. The walker aggregates across every tree node whose
+    /// resolved symbol matches the target, so multiple call sites all
+    /// roll up. `tid` filters the call tree to one thread.
+    async fn subscribe_neighbors(
+        &self,
+        address: u64,
+        tid: Option<u32>,
+        output: vox::Tx<NeighborsUpdate>,
+    );
 }
 
 /// All service descriptors exposed by nperf-live; the codegen iterates over
