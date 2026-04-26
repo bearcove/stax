@@ -798,6 +798,8 @@ impl ProfilingController {
                     kernel_backtrace: &event.kernel_backtrace,
                     user_backtrace: &user_backtrace,
                     is_offcpu: false,
+                    cycles: 0,
+                    instructions: 0,
                 });
             }
 

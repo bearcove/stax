@@ -733,6 +733,34 @@ function barPct(count: bigint, total: bigint): string {
   return `${Math.min(100, ratio)}%`;
 }
 
+/// Render the IPC (instructions / cycles) for one TopEntry. Uses
+/// the inclusive (total_*) counters because that's what the user
+/// cares about for a row that aggregates a function plus its
+/// callees. Returns null when the kperf backend didn't report PMU
+/// values (Linux samples, off-CPU samples, samply runs).
+function ipcLabel(e: TopEntry): React.ReactNode {
+  const cycles = e.total_cycles;
+  const insns = e.total_instructions;
+  if (cycles === 0n) return null;
+  // bigint -> number: typical sample totals are well within Number's
+  // safe integer range; even a cap'd 100k samples × ~10M cycles per
+  // sample is ~1e12, comfortable.
+  const ipc = Number(insns) / Number(cycles);
+  // Hue from red (poor) to green (excellent), pivoting around 1.0.
+  // Clamp to 0.0..3.0 so off-the-chart values still get a colour.
+  const t = Math.max(0, Math.min(1, (ipc - 0.5) / 2.0));
+  const hue = Math.round(t * 130); // 0 = red, 130 ≈ green
+  return (
+    <div
+      className="num-ipc"
+      title={`${insns.toString()} insns / ${cycles.toString()} cycles`}
+      style={{ color: `hsl(${hue} 75% 60%)` }}
+    >
+      {ipc.toFixed(2)} ipc
+    </div>
+  );
+}
+
 function objIcon(obj: ObjKind) {
   switch (obj) {
     case "main":
@@ -865,6 +893,7 @@ function TopTable({
                     }}
                   />
                 </div>
+                {ipcLabel(e)}
               </td>
             </tr>
           );

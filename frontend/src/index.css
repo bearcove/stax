@@ -971,6 +971,15 @@ table.top-table td.num .num-bar-fill {
   transition: width 250ms linear;
 }
 
+table.top-table td.num .num-ipc {
+  margin-top: 3px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  /* color is set inline (red->green hue ramp by IPC) */
+}
+
 td.entry {
   font-family: var(--font-mono);
   width: 100%;

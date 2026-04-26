@@ -39,6 +39,8 @@ pub(crate) enum LiveEvent {
         timestamp_ns: u64,
         user_addrs: Vec<u64>,
         is_offcpu: bool,
+        cycles: u64,
+        instructions: u64,
     },
     BinaryLoaded(binaries::LoadedBinary),
     BinaryUnloaded {
@@ -67,6 +69,8 @@ impl LiveSink for LiveSinkImpl {
             timestamp_ns: event.timestamp,
             user_addrs,
             is_offcpu: event.is_offcpu,
+            cycles: event.cycles,
+            instructions: event.instructions,
         });
     }
 
@@ -451,6 +455,10 @@ fn group_top_entries(
         representative_self: u64,
         self_total: u64,
         total_total: u64,
+        self_cycles: u64,
+        self_instructions: u64,
+        total_cycles: u64,
+        total_instructions: u64,
         function_name: Option<String>,
         binary: Option<String>,
         is_main: bool,
@@ -472,6 +480,14 @@ fn group_top_entries(
             .and_modify(|g| {
                 g.self_total += e.self_count;
                 g.total_total += e.total_count;
+                g.self_cycles = g.self_cycles.saturating_add(e.self_pmc.cycles);
+                g.self_instructions = g
+                    .self_instructions
+                    .saturating_add(e.self_pmc.instructions);
+                g.total_cycles = g.total_cycles.saturating_add(e.total_pmc.cycles);
+                g.total_instructions = g
+                    .total_instructions
+                    .saturating_add(e.total_pmc.instructions);
                 if e.self_count > g.representative_self {
                     g.address = e.address;
                     g.representative_self = e.self_count;
@@ -482,6 +498,10 @@ fn group_top_entries(
                 representative_self: e.self_count,
                 self_total: e.self_count,
                 total_total: e.total_count,
+                self_cycles: e.self_pmc.cycles,
+                self_instructions: e.self_pmc.instructions,
+                total_cycles: e.total_pmc.cycles,
+                total_instructions: e.total_pmc.instructions,
                 function_name: fn_name,
                 binary: bin,
                 is_main,
@@ -499,6 +519,10 @@ fn group_top_entries(
             binary: g.binary,
             is_main: g.is_main,
             language: g.language.as_str().to_owned(),
+            self_cycles: g.self_cycles,
+            self_instructions: g.self_instructions,
+            total_cycles: g.total_cycles,
+            total_instructions: g.total_instructions,
         })
         .collect();
     // Tie-break on function_name → binary → address so the row order
@@ -724,6 +748,11 @@ fn compute_neighbors_update(
             binary: key.1,
             is_main,
             language: language.as_str().to_owned(),
+            // PMC values aren't currently propagated through the
+            // SymbolNode-based callers/callees trees -- the neighbors
+            // view shows counts only.
+            cycles: 0,
+            instructions: 0,
             children: child_nodes,
         }
     }
@@ -797,6 +826,11 @@ fn compute_flame_update(
     }
     children.sort_by(|a, b| b.count.cmp(&a.count));
 
+    // Root sums counters across all children so the "(all)" row
+    // shows the recording's grand totals.
+    let total_cycles: u64 = children.iter().map(|c| c.cycles).sum();
+    let total_instructions: u64 = children.iter().map(|c| c.instructions).sum();
+
     let root = FlameNode {
         address: 0,
         count: total,
@@ -804,6 +838,8 @@ fn compute_flame_update(
         binary: None,
         is_main: false,
         language: nperf_demangle::Language::Unknown.as_str().to_owned(),
+        cycles: total_cycles,
+        instructions: total_instructions,
         children,
     };
     FlamegraphUpdate {
@@ -860,6 +896,8 @@ fn flame_node_to_proto(
         binary,
         is_main,
         language: language.as_str().to_owned(),
+        cycles: node.pmc.cycles,
+        instructions: node.pmc.instructions,
         children,
     }
 }
@@ -935,10 +973,17 @@ pub async fn start(addr: &str) -> Result<(LiveSinkImpl, tokio::task::JoinHandle<
                         timestamp_ns,
                         user_addrs,
                         is_offcpu,
+                        cycles,
+                        instructions,
                     } => {
-                        aggregator
-                            .write()
-                            .record(tid, timestamp_ns, &user_addrs, is_offcpu);
+                        aggregator.write().record(
+                            tid,
+                            timestamp_ns,
+                            &user_addrs,
+                            is_offcpu,
+                            cycles,
+                            instructions,
+                        );
                     }
                     LiveEvent::ThreadName { tid, name } => {
                         aggregator.write().set_thread_name(tid, name);

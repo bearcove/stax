@@ -13,6 +13,13 @@ pub struct SampleEvent< 'a > {
     /// off-CPU interval. Always `false` on the Linux backend (we
     /// don't synthesise off-CPU samples there yet).
     pub is_offcpu: bool,
+    /// CPU cycles consumed by the thread since the previous on-CPU
+    /// sample (Apple Silicon fixed PMU counter 0). 0 on Linux and on
+    /// off-CPU samples.
+    pub cycles: u64,
+    /// Instructions retired since the previous on-CPU sample (Apple
+    /// Silicon fixed PMU counter 1).
+    pub instructions: u64,
 }
 
 /// One symbol from a binary's symbol table (Mach-O `nlist_64` or ELF

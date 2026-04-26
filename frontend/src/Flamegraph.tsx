@@ -251,7 +251,7 @@ export function Flamegraph({
                   flameKey: b.key,
                 });
               }}
-              title={`${labelFor(b.node)} · ${b.node.count.toString()}/${total.toString()}`}
+              title={tooltipFor(b.node, total)}
             >
               {widthPct > 2 ? labelFor(b.node) : ""}
             </div>
@@ -274,6 +274,7 @@ export function Flamegraph({
             <span className="flame-status-meta">
               {hover.node.count.toString()} / {total.toString()} ·{" "}
               {pct(hover.node.count, total)}
+              {ipcFor(hover.node) ? ` · ${ipcFor(hover.node)} ipc` : ""}
               {hover.node.binary ? ` · ${hover.node.binary}` : ""}
             </span>
           </>
@@ -297,4 +298,20 @@ function pct(count: bigint, total: bigint): string {
   if (total === 0n) return "0%";
   const r = Number((count * 10000n) / total) / 100;
   return `${r.toFixed(1)}%`;
+}
+
+/// Inclusive IPC for a flame node, formatted to two decimals. `null`
+/// when the kperf backend didn't report PMU values for this run.
+function ipcFor(node: FlameNode): string | null {
+  if (node.cycles === 0n) return null;
+  const ipc = Number(node.instructions) / Number(node.cycles);
+  return ipc.toFixed(2);
+}
+
+function tooltipFor(node: FlameNode, total: bigint): string {
+  const base = `${labelFor(node)} · ${node.count.toString()}/${total.toString()}`;
+  const ipc = ipcFor(node);
+  return ipc
+    ? `${base} · ${ipc} ipc (${node.instructions.toString()} insns / ${node.cycles.toString()} cycles)`
+    : base;
 }

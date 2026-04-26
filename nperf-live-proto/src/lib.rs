@@ -29,6 +29,17 @@ pub struct TopEntry {
     /// `"swift"`, etc. The frontend uses this to pick a glyph;
     /// `"unknown"` when no demangler claimed the symbol.
     pub language: String,
+    /// CPU cycles attributed to this symbol's leaf samples, summed
+    /// from Apple Silicon's fixed PMU counter 0. 0 on Linux / when
+    /// PMC sampling is unavailable.
+    pub self_cycles: u64,
+    /// Same idea but for instructions retired (fixed counter 1).
+    pub self_instructions: u64,
+    /// Cycles attributed to every sample that traversed this symbol
+    /// (matches `total_count` semantics). Lets the frontend compute
+    /// inclusive IPC.
+    pub total_cycles: u64,
+    pub total_instructions: u64,
 }
 
 #[derive(Clone, Debug, Facet)]
@@ -58,6 +69,11 @@ pub struct FlameNode {
     pub binary: Option<String>,
     pub is_main: bool,
     pub language: String,
+    /// Cycles + instructions retired summed across every sample that
+    /// traversed this node. Lets the flamegraph colour-by-IPC mode
+    /// fall straight out of the existing tree.
+    pub cycles: u64,
+    pub instructions: u64,
     pub children: Vec<FlameNode>,
 }
 

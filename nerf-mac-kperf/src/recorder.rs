@@ -458,6 +458,8 @@ fn drain_loop<S: SampleSink>(
                     sample.user_backtrace,
                     sample.kernel_backtrace,
                 );
+                let cycles = sample.pmc.first().copied().unwrap_or(0);
+                let instructions = sample.pmc.get(1).copied().unwrap_or(0);
                 sink.on_sample(SampleEvent {
                     timestamp_ns: sample.timestamp_ns,
                     pid: opts.pid,
@@ -465,6 +467,8 @@ fn drain_loop<S: SampleSink>(
                     backtrace: sample.user_backtrace,
                     kernel_backtrace: sample.kernel_backtrace,
                     is_offcpu: false,
+                    cycles,
+                    instructions,
                 });
             });
         }
@@ -487,6 +491,8 @@ fn drain_loop<S: SampleSink>(
                     backtrace: &interval.user_stack,
                     kernel_backtrace: &interval.kernel_stack,
                     is_offcpu: true,
+                    cycles: 0,
+                    instructions: 0,
                 });
                 ts = ts.saturating_add(period_ns);
             }

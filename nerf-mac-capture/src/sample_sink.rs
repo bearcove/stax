@@ -51,6 +51,15 @@ pub struct SampleEvent<'a> {
     /// stack is borrowed from the last on-CPU sample, the timestamp
     /// is somewhere in the off-CPU interval. samply has no equivalent.
     pub is_offcpu: bool,
+    /// CPU cycles consumed since the previous PET sample on this
+    /// thread (Apple Silicon fixed counter 0). 0 when not available
+    /// (Linux backend, off-CPU samples, or kperf didn't emit a KPC
+    /// record for this sample).
+    pub cycles: u64,
+    /// Instructions retired since the previous PET sample (Apple
+    /// Silicon fixed counter 1). Same availability semantics as
+    /// `cycles`.
+    pub instructions: u64,
 }
 
 pub struct BinaryLoadedEvent<'a> {

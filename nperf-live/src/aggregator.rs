@@ -2,11 +2,26 @@ use std::collections::HashMap;
 
 use nperf_live_proto::TopEntry;
 
+#[derive(Clone, Copy, Default)]
+pub struct PmcAccum {
+    pub cycles: u64,
+    pub instructions: u64,
+}
+
+impl PmcAccum {
+    fn add(&mut self, cycles: u64, instructions: u64) {
+        self.cycles = self.cycles.saturating_add(cycles);
+        self.instructions = self.instructions.saturating_add(instructions);
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct RawTopEntry {
     pub address: u64,
     pub self_count: u64,
     pub total_count: u64,
+    pub self_pmc: PmcAccum,
+    pub total_pmc: PmcAccum,
 }
 
 /// Result of `Aggregator::aggregate_filtered`: same shape as the
@@ -16,6 +31,8 @@ pub struct RawTopEntry {
 pub struct FilteredAggregation {
     pub self_counts: HashMap<u64, u64>,
     pub total_counts: HashMap<u64, u64>,
+    pub self_pmc: HashMap<u64, PmcAccum>,
+    pub total_pmc: HashMap<u64, PmcAccum>,
     pub total_samples: u64,
     pub flame_root: StackNode,
 }
@@ -29,6 +46,8 @@ impl FilteredAggregation {
                 address,
                 self_count: self.self_counts.get(&address).copied().unwrap_or(0),
                 total_count,
+                self_pmc: self.self_pmc.get(&address).copied().unwrap_or_default(),
+                total_pmc: self.total_pmc.get(&address).copied().unwrap_or_default(),
             })
             .collect();
         entries.sort_by(|a, b| {
@@ -60,6 +79,12 @@ pub struct ThreadStats {
     offcpu_self_counts: HashMap<u64, u64>,
     offcpu_total_counts: HashMap<u64, u64>,
     offcpu_samples: u64,
+    /// PMU counter accumulators (cycles + instructions retired)
+    /// keyed by symbol address. `self_pmc` is attributed to the leaf
+    /// frame of each sample; `total_pmc` includes the sample at every
+    /// frame on its stack (matching `total_counts` semantics).
+    self_pmc: HashMap<u64, PmcAccum>,
+    total_pmc: HashMap<u64, PmcAccum>,
     pub(crate) flame_root: StackNode,
     /// FIFO ring of raw samples. Capped at MAX_SAMPLES_PER_THREAD so
     /// memory doesn't grow unbounded; when full, we drop the oldest
@@ -76,6 +101,8 @@ impl Default for ThreadStats {
             offcpu_self_counts: HashMap::new(),
             offcpu_total_counts: HashMap::new(),
             offcpu_samples: 0,
+            self_pmc: HashMap::new(),
+            total_pmc: HashMap::new(),
             flame_root: StackNode::default(),
             samples: std::collections::VecDeque::new(),
         }
@@ -92,6 +119,11 @@ pub struct RawSample {
     /// on-CPU sample). Lets the UI filter wall-clock vs strict
     /// on-CPU views.
     pub is_offcpu: bool,
+    /// Apple Silicon fixed PMU counter deltas at this PET tick. 0
+    /// for synthesised off-CPU samples (we have no real counter
+    /// reading there) and 0 on the Linux backend.
+    pub cycles: u64,
+    pub instructions: u64,
 }
 
 /// Per-thread cap on the raw sample log. ~100k * (avg ~30 frames * 8B
@@ -100,13 +132,24 @@ pub struct RawSample {
 const MAX_SAMPLES_PER_THREAD: usize = 100_000;
 
 impl ThreadStats {
-    pub fn record(&mut self, timestamp_ns: u64, user_addrs: &[u64], is_offcpu: bool) {
+    pub fn record(
+        &mut self,
+        timestamp_ns: u64,
+        user_addrs: &[u64],
+        is_offcpu: bool,
+        cycles: u64,
+        instructions: u64,
+    ) {
         self.total_samples += 1;
         if is_offcpu {
             self.offcpu_samples += 1;
         }
         if let Some(&leaf) = user_addrs.first() {
             *self.self_counts.entry(leaf).or_insert(0) += 1;
+            self.self_pmc
+                .entry(leaf)
+                .or_default()
+                .add(cycles, instructions);
             if is_offcpu {
                 *self.offcpu_self_counts.entry(leaf).or_insert(0) += 1;
             }
@@ -115,6 +158,10 @@ impl ThreadStats {
         for &addr in user_addrs {
             if seen.insert(addr) {
                 *self.total_counts.entry(addr).or_insert(0) += 1;
+                self.total_pmc
+                    .entry(addr)
+                    .or_default()
+                    .add(cycles, instructions);
                 if is_offcpu {
                     *self.offcpu_total_counts.entry(addr).or_insert(0) += 1;
                 }
@@ -126,6 +173,7 @@ impl ThreadStats {
         for &addr in user_addrs.iter().rev() {
             node = node.children.entry(addr).or_default();
             node.count += 1;
+            node.pmc.add(cycles, instructions);
             if is_offcpu {
                 node.offcpu_count += 1;
             }
@@ -139,6 +187,8 @@ impl ThreadStats {
             timestamp_ns,
             stack: user_addrs.to_vec().into_boxed_slice(),
             is_offcpu,
+            cycles,
+            instructions,
         });
     }
 
@@ -173,19 +223,34 @@ pub struct StackNode {
     /// to get on-CPU samples. Carried per-node so flame-graph views
     /// can pivot on it without rescanning the raw log.
     pub(crate) offcpu_count: u64,
+    /// Sum of cycle/instruction counter deltas across every sample
+    /// that traversed this node. Lets per-node IPC fall straight out
+    /// of the call tree.
+    pub(crate) pmc: PmcAccum,
     pub(crate) children: HashMap<u64, StackNode>,
 }
 
 impl Aggregator {
-    pub fn record(&mut self, tid: u32, timestamp_ns: u64, user_addrs: &[u64], is_offcpu: bool) {
+    pub fn record(
+        &mut self,
+        tid: u32,
+        timestamp_ns: u64,
+        user_addrs: &[u64],
+        is_offcpu: bool,
+        cycles: u64,
+        instructions: u64,
+    ) {
         if self.session_start_ns.is_none() {
             self.session_start_ns = Some(timestamp_ns);
         }
         self.last_sample_ns = Some(timestamp_ns);
-        self.threads
-            .entry(tid)
-            .or_default()
-            .record(timestamp_ns, user_addrs, is_offcpu);
+        self.threads.entry(tid).or_default().record(
+            timestamp_ns,
+            user_addrs,
+            is_offcpu,
+            cycles,
+            instructions,
+        );
     }
 
     pub fn session_start_ns(&self) -> Option<u64> {
@@ -212,6 +277,8 @@ impl Aggregator {
     {
         let mut self_counts: HashMap<u64, u64> = HashMap::new();
         let mut total_counts: HashMap<u64, u64> = HashMap::new();
+        let mut self_pmc: HashMap<u64, PmcAccum> = HashMap::new();
+        let mut total_pmc: HashMap<u64, PmcAccum> = HashMap::new();
         let mut total_samples: u64 = 0;
         let mut flame_root = StackNode::default();
 
@@ -222,11 +289,19 @@ impl Aggregator {
             total_samples += 1;
             if let Some(&leaf) = sample.stack.first() {
                 *self_counts.entry(leaf).or_insert(0) += 1;
+                self_pmc
+                    .entry(leaf)
+                    .or_default()
+                    .add(sample.cycles, sample.instructions);
             }
             let mut seen: smallset::SmallSet = Default::default();
             for &addr in sample.stack.iter() {
                 if seen.insert(addr) {
                     *total_counts.entry(addr).or_insert(0) += 1;
+                    total_pmc
+                        .entry(addr)
+                        .or_default()
+                        .add(sample.cycles, sample.instructions);
                 }
             }
             // Build the call tree rooted at the synthetic node, leaf-first
@@ -235,12 +310,15 @@ impl Aggregator {
             for &addr in sample.stack.iter().rev() {
                 node = node.children.entry(addr).or_default();
                 node.count += 1;
+                node.pmc.add(sample.cycles, sample.instructions);
             }
         }
 
         FilteredAggregation {
             self_counts,
             total_counts,
+            self_pmc,
+            total_pmc,
             total_samples,
             flame_root,
         }
@@ -314,6 +392,10 @@ impl Aggregator {
                 binary: None,
                 is_main: false,
                 language: "unknown".to_owned(),
+                self_cycles: e.self_pmc.cycles,
+                self_instructions: e.self_pmc.instructions,
+                total_cycles: e.total_pmc.cycles,
+                total_instructions: e.total_pmc.instructions,
             })
             .collect()
     }
@@ -323,13 +405,20 @@ impl Aggregator {
     pub fn top_raw(&self, limit: usize, tid: Option<u32>) -> Vec<RawTopEntry> {
         let mut entries: Vec<RawTopEntry> = match tid {
             Some(tid) => match self.threads.get(&tid) {
-                Some(t) => collect_top(&t.self_counts, &t.total_counts),
+                Some(t) => collect_top(
+                    &t.self_counts,
+                    &t.total_counts,
+                    &t.self_pmc,
+                    &t.total_pmc,
+                ),
                 None => Vec::new(),
             },
             None => {
                 // Merge across threads.
                 let mut self_counts: HashMap<u64, u64> = HashMap::new();
                 let mut total_counts: HashMap<u64, u64> = HashMap::new();
+                let mut self_pmc: HashMap<u64, PmcAccum> = HashMap::new();
+                let mut total_pmc: HashMap<u64, PmcAccum> = HashMap::new();
                 for t in self.threads.values() {
                     for (&a, &c) in &t.self_counts {
                         *self_counts.entry(a).or_insert(0) += c;
@@ -337,8 +426,14 @@ impl Aggregator {
                     for (&a, &c) in &t.total_counts {
                         *total_counts.entry(a).or_insert(0) += c;
                     }
+                    for (&a, &p) in &t.self_pmc {
+                        self_pmc.entry(a).or_default().add(p.cycles, p.instructions);
+                    }
+                    for (&a, &p) in &t.total_pmc {
+                        total_pmc.entry(a).or_default().add(p.cycles, p.instructions);
+                    }
                 }
-                collect_top(&self_counts, &total_counts)
+                collect_top(&self_counts, &total_counts, &self_pmc, &total_pmc)
             }
         };
         entries.sort_by(|a, b| {
@@ -373,6 +468,7 @@ impl StackNode {
     fn merge(&mut self, other: &StackNode) {
         self.count += other.count;
         self.offcpu_count += other.offcpu_count;
+        self.pmc.add(other.pmc.cycles, other.pmc.instructions);
         for (&addr, child) in &other.children {
             self.children.entry(addr).or_default().merge(child);
         }
@@ -384,6 +480,7 @@ impl Clone for StackNode {
         Self {
             count: self.count,
             offcpu_count: self.offcpu_count,
+            pmc: self.pmc,
             children: self.children.clone(),
         }
     }
@@ -392,6 +489,8 @@ impl Clone for StackNode {
 fn collect_top(
     self_counts: &HashMap<u64, u64>,
     total_counts: &HashMap<u64, u64>,
+    self_pmc: &HashMap<u64, PmcAccum>,
+    total_pmc: &HashMap<u64, PmcAccum>,
 ) -> Vec<RawTopEntry> {
     total_counts
         .iter()
@@ -399,6 +498,8 @@ fn collect_top(
             address,
             self_count: self_counts.get(&address).copied().unwrap_or(0),
             total_count,
+            self_pmc: self_pmc.get(&address).copied().unwrap_or_default(),
+            total_pmc: total_pmc.get(&address).copied().unwrap_or_default(),
         })
         .collect()
 }
