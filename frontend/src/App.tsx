@@ -292,28 +292,26 @@ export function App() {
   return (
     <div className="shell">
       <header className="topbar">
-        <h1>nperf live</h1>
         <div className="connection">
           <span className="status-slot">
             {frozen ? (
               <LuPause
                 className="status-paused"
-                title="updates paused (hover the list to release)"
+                title={`updates paused (hover the list to release)\nconnected to ${committedUrl}`}
               />
             ) : (
-              <span className={`dot ${status}`} />
+              <span
+                className={`dot ${status}`}
+                title={
+                  status === "ok"
+                    ? `connected to ${committedUrl} — double-click to change`
+                    : `${status} · ${committedUrl}`
+                }
+                onDoubleClick={() => setEditingUrl(true)}
+              />
             )}
           </span>
-          {status === "ok" && !editingUrl ? (
-            <button
-              type="button"
-              className="url-display"
-              onClick={() => setEditingUrl(true)}
-              title={`connected to ${committedUrl} — click to change`}
-            >
-              {committedUrl.replace(/^ws:\/\//, "")}
-            </button>
-          ) : (
+          {(status !== "ok" || editingUrl) && (
             <>
               <input
                 value={url}
