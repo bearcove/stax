@@ -26,6 +26,7 @@ use nerf_mac_capture::{
 use crate::bindings::{self, sampler, Frameworks};
 use crate::error::Error;
 use crate::kdebug::{self, kdbg_class, kdbg_code, kdbg_func, kdbg_subclass, KdBuf, KdRegtype, DBG_PERF};
+use crate::kernel_symbols::{KernelImage, SlideEstimator};
 use crate::parser::Parser;
 
 /// Configuration for a kperf-driven recording session.
@@ -100,6 +101,22 @@ pub fn record<S: SampleSink>(
     apply_dyld_changes(&mut dyld, opts.pid, sink);
     log::info!("initial dyld scan took {:?}", t0.elapsed());
 
+    // Load the on-disk kernel binary. We can't get the KASLR slide
+    // without an Apple-private entitlement, so we feed kernel frame
+    // addresses observed during sampling into a constraint-based
+    // estimator (see kernel_symbols::SlideEstimator) and emit
+    // `/proc/kallsyms` with the derived slide at the end.
+    let kernel_image = match KernelImage::load() {
+        Ok(img) => img,
+        Err(err) => {
+            log::warn!("kernel image load failed: {err:?}");
+            None
+        }
+    };
+    let mut slide_est = kernel_image
+        .as_ref()
+        .map(|img| SlideEstimator::new(img.exec_segments.clone()));
+
     scan_thread_names(task, opts.pid, sink, &mut thread_names);
 
     let t0 = Instant::now();
@@ -107,9 +124,37 @@ pub fn record<S: SampleSink>(
     session.enable_kdebug(&opts)?;
     log::info!("kperf+kdebug arming took {:?}", t0.elapsed());
 
-    drain_loop(&fw, &opts, sink, task, &mut dyld, &mut thread_names, &mut should_stop)?;
+    drain_loop(
+        &fw,
+        &opts,
+        sink,
+        task,
+        &mut dyld,
+        &mut thread_names,
+        slide_est.as_mut(),
+        &mut should_stop,
+    )?;
 
     drop(session);
+
+    // Recording is over; finalize the slide and emit kallsyms.
+    if let (Some(image), Some(est)) = (kernel_image, slide_est) {
+        match est.finalize() {
+            Some((slide, support)) => {
+                log::info!(
+                    "kernel slide derived: {slide:#x} (support {:.1}% \
+                     over {} sampled kernel addresses)",
+                    support * 100.0,
+                    est.observed_count(),
+                );
+                let kallsyms = image.format_kallsyms(slide);
+                sink.on_kallsyms(&kallsyms);
+            }
+            None => log::warn!(
+                "kernel slide estimator collected no votes; skipping kallsyms"
+            ),
+        }
+    }
     Ok(())
 }
 
@@ -328,6 +373,7 @@ impl Drop for Session<'_> {
 // Drain loop
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn drain_loop<S: SampleSink>(
     _fw: &Frameworks,
     opts: &RecordOptions,
@@ -335,6 +381,7 @@ fn drain_loop<S: SampleSink>(
     task: mach_port_t,
     dyld: &mut DyldInfoManager,
     thread_names: &mut ThreadNameCache,
+    mut slide_est: Option<&mut SlideEstimator>,
     should_stop: &mut impl FnMut() -> bool,
 ) -> Result<(), Error> {
     let start = Instant::now();
@@ -409,6 +456,14 @@ fn drain_loop<S: SampleSink>(
                 *histogram.entry(key).or_insert(0) += 1;
             }
             parser.feed(rec, |sample| {
+                if let Some(ref mut est) = slide_est {
+                    // The deepest kernel frame (last in callee-most-first
+                    // order) is the most stable point of entry, but any
+                    // kernel-text PC works as a constraint.
+                    for &avma in sample.kernel_backtrace {
+                        est.observe(avma);
+                    }
+                }
                 sink.on_sample(SampleEvent {
                     timestamp_ns: sample.timestamp_ns,
                     pid: opts.pid,

@@ -1807,6 +1807,7 @@ dependencies = [
  "log",
  "mach2 0.6.0",
  "nerf-mac-capture",
+ "object 0.39.1",
  "thiserror",
 ]
 

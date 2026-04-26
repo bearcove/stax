@@ -22,6 +22,14 @@ pub trait SampleSink {
     /// generates these events.
     #[allow(unused_variables)]
     fn on_jitdump(&mut self, ev: JitdumpEvent<'_>) {}
+
+    /// A `/proc/kallsyms`-style text blob of kernel symbols. The
+    /// kperf backend produces one at startup so the analysis side
+    /// can resolve `kernel_backtrace` addresses; sinks should embed
+    /// it as `Packet::FileBlob { path: "/proc/kallsyms", ... }` so
+    /// `data_reader` picks it up via its existing pre-scan.
+    #[allow(unused_variables)]
+    fn on_kallsyms(&mut self, data: &[u8]) {}
 }
 
 /// One sample. Backtraces are callee-most first; addresses are absolute

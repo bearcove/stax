@@ -625,6 +625,14 @@ impl SampleSink for MacSink {
             self.jitdump_paths.push(path);
         }
     }
+
+    fn on_kallsyms(&mut self, data: &[u8]) {
+        info!("Embedding /proc/kallsyms ({} bytes) into archive.", data.len());
+        let _ = self.write_packet(Packet::FileBlob {
+            path: Cow::Borrowed(b"/proc/kallsyms"),
+            data: Cow::Borrowed(data),
+        });
+    }
 }
 
 /// Look up the executable path for `pid` via `proc_pidpath(3)`.

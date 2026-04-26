@@ -19,6 +19,7 @@
 pub mod bindings;
 pub mod error;
 pub mod kdebug;
+pub mod kernel_symbols;
 pub mod parser;
 pub mod recorder;
 

@@ -545,6 +545,7 @@ pub(crate) fn read_data< F >( args: ReadDataArgs, mut on_event: F ) -> Result< S
     }
 
     let mut jitdump_events = VecDeque::new();
+    let explicit_jitdump = args.jitdump_path.is_some();
     if let Some( jitdump_path ) = args.jitdump_path {
         // Explicit --jitdump overrides any jitdump embedded in the archive --
         // pushing the same range twice into jitdump_names panics on overlap.
@@ -557,19 +558,27 @@ pub(crate) fn read_data< F >( args: ReadDataArgs, mut on_event: F ) -> Result< S
                 crate::jitdump::Record::Unknown { .. } => {}
             }
         }
-    } else {
-        // Pre-scan the archive for any embedded jitdump files (FileBlob
-        // packets whose basename matches `jit-*.dump`). nperf-mac-capture
-        // writes these when the preload-dylib detects the target opening a
-        // jitdump file -- makes JIT names resolve without the user having to
-        // find the path themselves and pass --jitdump.
+    }
+
+    // Pre-scan the archive for embedded files. Two payloads we care
+    // about:
+    //   * `jit-*.dump` -- jitdump bytes the preload-dylib detected
+    //     (saves the user having to pass --jitdump). Skipped when
+    //     --jitdump was passed explicitly to avoid double-pushing
+    //     overlapping ranges into jitdump_names.
+    //   * `/proc/kallsyms` -- macOS kperf writes this at the *end*
+    //     of the recording (slide isn't known until enough kernel
+    //     samples have been observed), so we have to find it via
+    //     pre-scan rather than position-in-stream.
+    let mut prescan_kallsyms: Option< Vec< u8 > > = None;
+    {
         let prescan_fp = fs::File::open( input_path )
-            .map_err( |err| format!( "cannot open {:?} for jitdump pre-scan: {}", input_path, err ) )?;
+            .map_err( |err| format!( "cannot open {:?} for pre-scan: {}", input_path, err ) )?;
         let prescan_reader = ArchiveReader::new( prescan_fp ).validate_header().unwrap().skip_unknown();
         for packet in prescan_reader {
             let packet = packet?;
             if let Packet::FileBlob { ref path, ref data } = packet {
-                if is_jitdump_path( path.as_ref() ) {
+                if !explicit_jitdump && is_jitdump_path( path.as_ref() ) {
                     match crate::jitdump::JitDump::load_from_bytes( data.as_ref() ) {
                         Ok( jitdump ) => {
                             debug!( "Loading embedded jitdump {:?} ({} bytes)", String::from_utf8_lossy( path.as_ref() ), data.len() );
@@ -583,6 +592,9 @@ pub(crate) fn read_data< F >( args: ReadDataArgs, mut on_event: F ) -> Result< S
                             warn!( "Failed to parse embedded jitdump {:?}: {:?}", String::from_utf8_lossy( path.as_ref() ), err );
                         }
                     }
+                } else if path.as_ref() == b"/proc/kallsyms" {
+                    debug!( "Pre-scan picked up /proc/kallsyms ({} bytes)", data.len() );
+                    prescan_kallsyms = Some( data.as_ref().to_vec() );
                 }
             }
         }
@@ -593,6 +605,10 @@ pub(crate) fn read_data< F >( args: ReadDataArgs, mut on_event: F ) -> Result< S
     let mut all: Vec< _ > = jitdump_events.drain(..).collect();
     all.sort_by_key( |&(ts, _, _)| ts );
     jitdump_events = all.into_iter().collect();
+
+    if let Some( bytes ) = prescan_kallsyms {
+        state.kallsyms = kallsyms::parse( &bytes );
+    }
 
     fn is_jitdump_path( path: &[u8] ) -> bool {
         let basename_start = path.iter().rposition( |&b| b == b'/' ).map( |i| i + 1 ).unwrap_or( 0 );
