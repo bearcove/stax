@@ -856,12 +856,15 @@ table.top-table tr.match {
   width: 100%;
   background: var(--bg-pane);
   overflow: auto;
-  /* Fixed height so the flame graph doesn't pop when stacks shrink
-     (e.g. on the on-cpu / off-cpu pivot). Tall enough for ~16
-     frames at 17px each plus the focus row. Use `height` rather
-     than `max-height` so empty rows below the deepest stack
-     stay visible as background instead of collapsing the pane. */
+  /* Fixed initial height so the pane doesn't pop when stacks
+     shrink (e.g. on-cpu / off-cpu pivot, focus into a leaf).
+     `resize: vertical` adds a native drag handle at the bottom
+     edge so users can grow the pane to fit deeper traces or
+     shrink it to give the table more room. min-height ensures
+     the status bar + a couple frames stay visible. */
   height: 30vh;
+  min-height: 80px;
+  resize: vertical;
 }
 
 .flame.placeholder {

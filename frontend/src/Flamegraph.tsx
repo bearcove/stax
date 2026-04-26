@@ -133,6 +133,38 @@ export function Flamegraph({
   const latestRef = useRef<FlamegraphUpdate | null>(null);
   const hoverRef = useRef<Box | null>(null);
 
+  // Persist the resize-handle height across reloads. Apply on mount,
+  // observe size changes (CSS `resize: vertical` doesn't fire any
+  // event by itself, but ResizeObserver picks up the dimensions),
+  // and write back to localStorage. Wrapped in try/catch because
+  // some embedding contexts throw on storage access.
+  const FLAME_H_KEY = "nperf-flame-height";
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    try {
+      const stored = localStorage.getItem(FLAME_H_KEY);
+      if (stored) {
+        const px = parseInt(stored, 10);
+        if (Number.isFinite(px) && px >= 80) {
+          el.style.height = `${px}px`;
+        }
+      }
+    } catch {}
+    const ro = new ResizeObserver((entries) => {
+      for (const e of entries) {
+        const h = Math.round(e.contentRect.height);
+        if (h >= 80) {
+          try {
+            localStorage.setItem(FLAME_H_KEY, String(h));
+          } catch {}
+        }
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     setUpdate(null);
