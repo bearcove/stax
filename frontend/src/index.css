@@ -154,6 +154,50 @@ button.regex-toggle.active {
   background: rgba(211, 183, 95, 0.1);
 }
 
+.kind-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.kind-pill {
+  background: #16181c;
+  border: 1px solid #232629;
+  border-radius: 999px;
+  padding: 2px 10px;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.kind-pill:hover {
+  background: #1c1f24;
+}
+
+.kind-pill.off {
+  opacity: 0.4;
+  text-decoration: line-through;
+}
+
+/* Active-pill colors mirror the inline icon palette. */
+.kind-pill.kind-main {
+  color: #98c379;
+  border-color: #98c37944;
+}
+.kind-pill.kind-dylib {
+  color: #61afef;
+  border-color: #61afef44;
+}
+.kind-pill.kind-system {
+  color: #8a909a;
+  border-color: #8a909a44;
+}
+.kind-pill.kind-unknown {
+  color: #6c7480;
+  border-color: #6c748044;
+}
+
 /* Search match highlight. Subtle gold border + bg tint, both in the
    top-N table and in flamegraph boxes. */
 table.top-table tr.match td {

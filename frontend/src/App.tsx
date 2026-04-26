@@ -46,6 +46,7 @@ export function App() {
   const [threads, setThreads] = useState<ThreadInfo[]>([]);
   const [search, setSearch] = useState("");
   const [regexMode, setRegexMode] = useState(false);
+  const [hiddenKinds, setHiddenKinds] = useState<Set<ObjKind>>(new Set());
 
   // Compile a matcher once per (search, regexMode) change. Returns
   // `null` when the input is empty or regex compilation failed —
@@ -214,6 +215,7 @@ export function App() {
               .*
             </button>
           </span>
+          <KindFilter hidden={hiddenKinds} onChange={setHiddenKinds} />
           <span className="spacer" />
           <span className="meta">
             {displayed
@@ -228,6 +230,7 @@ export function App() {
             client={client}
             tid={selectedTid}
             matchText={matchText}
+            hiddenKinds={hiddenKinds}
             onSelectAddress={setSelected}
             onFrozenChange={setFlameFrozen}
           />
@@ -247,6 +250,7 @@ export function App() {
             sort={sort}
             onSort={setSort}
             matchText={matchText}
+            hiddenKinds={hiddenKinds}
           />
         </section>
         <section className="pane ann-pane">
@@ -267,7 +271,7 @@ export function App() {
 }
 
 type LangKind = "rust" | "c" | "cpp" | "asm" | "unknown";
-type ObjKind = "main" | "system" | "dylib" | "unknown";
+export type ObjKind = "main" | "system" | "dylib" | "unknown";
 
 function langOf(fn: string | null | undefined): LangKind {
   if (!fn) return "unknown";
@@ -279,9 +283,14 @@ function langOf(fn: string | null | undefined): LangKind {
   return "c";
 }
 
-function objOf(e: TopEntry): ObjKind {
-  if (e.is_main) return "main";
-  const b = e.binary ?? "";
+/// Classify any object that has `is_main` + `binary` (TopEntry,
+/// FlameNode) into a coarse kind we can color and filter by.
+export function objKindOf(o: {
+  is_main: boolean;
+  binary: string | null;
+}): ObjKind {
+  if (o.is_main) return "main";
+  const b = o.binary ?? "";
   if (!b) return "unknown";
   if (
     b.startsWith("libsystem_") ||
@@ -293,6 +302,51 @@ function objOf(e: TopEntry): ObjKind {
     return "system";
   }
   return "dylib";
+}
+
+const KIND_LABEL: Record<ObjKind, string> = {
+  main: "main",
+  dylib: "dylib",
+  system: "system",
+  unknown: "other",
+};
+
+const KIND_ORDER: ObjKind[] = ["main", "dylib", "system", "unknown"];
+
+function KindFilter({
+  hidden,
+  onChange,
+}: {
+  hidden: Set<ObjKind>;
+  onChange: (next: Set<ObjKind>) => void;
+}) {
+  return (
+    <span className="kind-filter">
+      {KIND_ORDER.map((k) => {
+        const off = hidden.has(k);
+        return (
+          <button
+            key={k}
+            type="button"
+            className={`kind-pill kind-${k}${off ? " off" : ""}`}
+            onClick={() => {
+              const next = new Set(hidden);
+              if (off) next.delete(k);
+              else next.add(k);
+              onChange(next);
+            }}
+            title={
+              off
+                ? `${KIND_LABEL[k]} hidden — click to show`
+                : `${KIND_LABEL[k]} shown — click to hide`
+            }
+          >
+            {KIND_LABEL[k]}
+          </button>
+        );
+      })}
+    </span>
+  );
 }
 
 function langIcon(lang: LangKind) {
@@ -349,6 +403,7 @@ function TopTable({
   sort,
   onSort,
   matchText,
+  hiddenKinds,
 }: {
   entries: TopEntry[];
   totalSamples: bigint;
@@ -357,7 +412,9 @@ function TopTable({
   sort: SortKey;
   onSort: (s: SortKey) => void;
   matchText: ((t: string) => boolean) | null;
+  hiddenKinds: Set<ObjKind>;
 }) {
+  const visible = entries.filter((e) => !hiddenKinds.has(objKindOf(e)));
   return (
     <table className="top-table">
       <thead>
@@ -381,9 +438,9 @@ function TopTable({
         </tr>
       </thead>
       <tbody>
-        {entries.map((e) => {
+        {visible.map((e) => {
           const lang = langOf(e.function_name);
-          const obj = objOf(e);
+          const obj = objKindOf(e);
           const fnLabel = e.function_name ?? `0x${e.address.toString(16)}`;
           const binLabel = e.binary ?? "(no binary)";
           return (

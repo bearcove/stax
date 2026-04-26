@@ -5,6 +5,7 @@ import type {
   FlamegraphUpdate,
   ProfilerClient,
 } from "./generated/profiler.generated.ts";
+import { objKindOf, type ObjKind } from "./App.tsx";
 
 const ROW_H = 18;
 
@@ -58,8 +59,15 @@ function findByKey(node: FlameNode, target: string): FlameNode | null {
   return cur;
 }
 
-/// Layout the tree into [0,1] horizontal coordinate space.
-function layout(root: FlameNode): { boxes: Box[]; depth: number } {
+/// Layout the tree into [0,1] horizontal coordinate space. Subtrees
+/// rooted at a node whose kind is in `hiddenKinds` are pruned (their
+/// box is omitted *and* their descendants are skipped); the parent's
+/// box keeps its width and just gets fewer / no children stacked on
+/// top.
+function layout(
+  root: FlameNode,
+  hiddenKinds: Set<ObjKind>,
+): { boxes: Box[]; depth: number } {
   const boxes: Box[] = [];
   let maxDepth = 0;
   const walk = (
@@ -83,6 +91,11 @@ function layout(root: FlameNode): { boxes: Box[]; depth: number } {
     let cursor = x0;
     node.children.forEach((c, i) => {
       const cw = (Number(c.count) / denom) * span;
+      // Address 0 = synthetic root marker; never filter that out.
+      if (c.address !== 0n && hiddenKinds.has(objKindOf(c))) {
+        cursor += cw;
+        return;
+      }
       walk(c, depth + 1, cursor, cursor + cw, `${keyPrefix}/${i}`);
       cursor += cw;
     });
@@ -95,12 +108,14 @@ export function Flamegraph({
   client,
   tid,
   matchText,
+  hiddenKinds,
   onSelectAddress,
   onFrozenChange,
 }: {
   client: ProfilerClient;
   tid: number | null;
   matchText: ((t: string) => boolean) | null;
+  hiddenKinds: Set<ObjKind>;
   onSelectAddress: (a: bigint) => void;
   onFrozenChange?: (frozen: boolean) => void;
 }) {
@@ -167,7 +182,7 @@ export function Flamegraph({
   const renderRoot = focusKey
     ? findByKey(update.root, focusKey) ?? update.root
     : update.root;
-  const { boxes, depth } = layout(renderRoot);
+  const { boxes, depth } = layout(renderRoot, hiddenKinds);
   const height = (depth + 1) * ROW_H;
   const total = update.total_samples;
 
