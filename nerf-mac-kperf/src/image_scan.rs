@@ -59,17 +59,22 @@ impl ImageScanner {
                 regions.len(),
                 exec_count
             );
-            // Surface the distinct executable paths so we can tell at a
-            // glance whether shared-cache dylibs come through as their
-            // install names, as the cache file itself, or not at all.
-            let mut distinct: std::collections::BTreeSet<&str> = Default::default();
+            // Dump the distribution of paths libproc gave us. We split
+            // by exec/non-exec so we can see whether shared-cache
+            // regions come through under the cache file's path (and
+            // whether they're marked executable).
+            let mut by_path: std::collections::BTreeMap<&str, (u32, u32)> = Default::default();
             for r in &regions {
-                if r.is_executable && !r.path.is_empty() {
-                    distinct.insert(r.path.as_str());
+                let entry = by_path.entry(r.path.as_str()).or_default();
+                if r.is_executable {
+                    entry.0 += 1;
+                } else {
+                    entry.1 += 1;
                 }
             }
-            for path in &distinct {
-                log::info!("image_scan: exec path {path}");
+            for (path, (exec, non_exec)) in &by_path {
+                let label = if path.is_empty() { "<anonymous>" } else { path };
+                log::info!("image_scan: path {label}: {exec} exec / {non_exec} non-exec regions");
             }
         }
 
