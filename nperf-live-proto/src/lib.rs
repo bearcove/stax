@@ -35,11 +35,19 @@ pub struct TopEntry {
     pub self_cycles: u64,
     /// Same idea but for instructions retired (fixed counter 1).
     pub self_instructions: u64,
+    /// L1D cache misses on loads attributed to leaf samples (from a
+    /// configurable PMU counter). 0 when the event didn't resolve on
+    /// this chip.
+    pub self_l1d_misses: u64,
+    /// Branch mispredicts attributed to leaf samples.
+    pub self_branch_mispreds: u64,
     /// Cycles attributed to every sample that traversed this symbol
     /// (matches `total_count` semantics). Lets the frontend compute
     /// inclusive IPC.
     pub total_cycles: u64,
     pub total_instructions: u64,
+    pub total_l1d_misses: u64,
+    pub total_branch_mispreds: u64,
 }
 
 #[derive(Clone, Debug, Facet)]
@@ -69,11 +77,15 @@ pub struct FlameNode {
     pub binary: Option<String>,
     pub is_main: bool,
     pub language: String,
-    /// Cycles + instructions retired summed across every sample that
-    /// traversed this node. Lets the flamegraph colour-by-IPC mode
-    /// fall straight out of the existing tree.
+    /// PMU counter sums across every sample that traversed this
+    /// node. Lets the flamegraph colour-by-event mode fall straight
+    /// out of the existing tree (cycles for IPC, l1d_misses for
+    /// memory-stall heatmaps, branch_mispreds for control-flow
+    /// pressure).
     pub cycles: u64,
     pub instructions: u64,
+    pub l1d_misses: u64,
+    pub branch_mispreds: u64,
     pub children: Vec<FlameNode>,
 }
 

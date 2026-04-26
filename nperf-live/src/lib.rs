@@ -20,7 +20,7 @@ use nperf_live_proto::{
     TopEntry, TopSort, TopUpdate, ViewParams,
 };
 
-use crate::aggregator::{RawSample, RawTopEntry};
+use crate::aggregator::{PmuSample, RawSample, RawTopEntry};
 
 mod aggregator;
 mod binaries;
@@ -41,6 +41,8 @@ pub(crate) enum LiveEvent {
         is_offcpu: bool,
         cycles: u64,
         instructions: u64,
+        l1d_misses: u64,
+        branch_mispreds: u64,
     },
     BinaryLoaded(binaries::LoadedBinary),
     BinaryUnloaded {
@@ -71,6 +73,8 @@ impl LiveSink for LiveSinkImpl {
             is_offcpu: event.is_offcpu,
             cycles: event.cycles,
             instructions: event.instructions,
+            l1d_misses: event.l1d_misses,
+            branch_mispreds: event.branch_mispreds,
         });
     }
 
@@ -457,8 +461,12 @@ fn group_top_entries(
         total_total: u64,
         self_cycles: u64,
         self_instructions: u64,
+        self_l1d_misses: u64,
+        self_branch_mispreds: u64,
         total_cycles: u64,
         total_instructions: u64,
+        total_l1d_misses: u64,
+        total_branch_mispreds: u64,
         function_name: Option<String>,
         binary: Option<String>,
         is_main: bool,
@@ -484,10 +492,20 @@ fn group_top_entries(
                 g.self_instructions = g
                     .self_instructions
                     .saturating_add(e.self_pmc.instructions);
+                g.self_l1d_misses = g.self_l1d_misses.saturating_add(e.self_pmc.l1d_misses);
+                g.self_branch_mispreds = g
+                    .self_branch_mispreds
+                    .saturating_add(e.self_pmc.branch_mispreds);
                 g.total_cycles = g.total_cycles.saturating_add(e.total_pmc.cycles);
                 g.total_instructions = g
                     .total_instructions
                     .saturating_add(e.total_pmc.instructions);
+                g.total_l1d_misses = g
+                    .total_l1d_misses
+                    .saturating_add(e.total_pmc.l1d_misses);
+                g.total_branch_mispreds = g
+                    .total_branch_mispreds
+                    .saturating_add(e.total_pmc.branch_mispreds);
                 if e.self_count > g.representative_self {
                     g.address = e.address;
                     g.representative_self = e.self_count;
@@ -500,8 +518,12 @@ fn group_top_entries(
                 total_total: e.total_count,
                 self_cycles: e.self_pmc.cycles,
                 self_instructions: e.self_pmc.instructions,
+                self_l1d_misses: e.self_pmc.l1d_misses,
+                self_branch_mispreds: e.self_pmc.branch_mispreds,
                 total_cycles: e.total_pmc.cycles,
                 total_instructions: e.total_pmc.instructions,
+                total_l1d_misses: e.total_pmc.l1d_misses,
+                total_branch_mispreds: e.total_pmc.branch_mispreds,
                 function_name: fn_name,
                 binary: bin,
                 is_main,
@@ -521,8 +543,12 @@ fn group_top_entries(
             language: g.language.as_str().to_owned(),
             self_cycles: g.self_cycles,
             self_instructions: g.self_instructions,
+            self_l1d_misses: g.self_l1d_misses,
+            self_branch_mispreds: g.self_branch_mispreds,
             total_cycles: g.total_cycles,
             total_instructions: g.total_instructions,
+            total_l1d_misses: g.total_l1d_misses,
+            total_branch_mispreds: g.total_branch_mispreds,
         })
         .collect();
     // Tie-break on function_name → binary → address so the row order
@@ -753,6 +779,8 @@ fn compute_neighbors_update(
             // view shows counts only.
             cycles: 0,
             instructions: 0,
+            l1d_misses: 0,
+            branch_mispreds: 0,
             children: child_nodes,
         }
     }
@@ -830,6 +858,8 @@ fn compute_flame_update(
     // shows the recording's grand totals.
     let total_cycles: u64 = children.iter().map(|c| c.cycles).sum();
     let total_instructions: u64 = children.iter().map(|c| c.instructions).sum();
+    let total_l1d_misses: u64 = children.iter().map(|c| c.l1d_misses).sum();
+    let total_branch_mispreds: u64 = children.iter().map(|c| c.branch_mispreds).sum();
 
     let root = FlameNode {
         address: 0,
@@ -840,6 +870,8 @@ fn compute_flame_update(
         language: nperf_demangle::Language::Unknown.as_str().to_owned(),
         cycles: total_cycles,
         instructions: total_instructions,
+        l1d_misses: total_l1d_misses,
+        branch_mispreds: total_branch_mispreds,
         children,
     };
     FlamegraphUpdate {
@@ -898,6 +930,8 @@ fn flame_node_to_proto(
         language: language.as_str().to_owned(),
         cycles: node.pmc.cycles,
         instructions: node.pmc.instructions,
+        l1d_misses: node.pmc.l1d_misses,
+        branch_mispreds: node.pmc.branch_mispreds,
         children,
     }
 }
@@ -975,14 +1009,20 @@ pub async fn start(addr: &str) -> Result<(LiveSinkImpl, tokio::task::JoinHandle<
                         is_offcpu,
                         cycles,
                         instructions,
+                        l1d_misses,
+                        branch_mispreds,
                     } => {
                         aggregator.write().record(
                             tid,
                             timestamp_ns,
                             &user_addrs,
                             is_offcpu,
-                            cycles,
-                            instructions,
+                            PmuSample {
+                                cycles,
+                                instructions,
+                                l1d_misses,
+                                branch_mispreds,
+                            },
                         );
                     }
                     LiveEvent::ThreadName { tid, name } => {

@@ -24,6 +24,7 @@ pub mod kernel_symbols;
 pub mod libproc;
 pub mod offcpu;
 pub mod parser;
+pub mod pmu_events;
 pub mod recorder;
 pub mod shared_cache;
 

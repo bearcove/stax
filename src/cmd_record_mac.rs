@@ -518,6 +518,8 @@ impl SampleSink for MacSink {
                 is_offcpu: ev.is_offcpu,
                 cycles: ev.cycles,
                 instructions: ev.instructions,
+                l1d_misses: ev.l1d_misses,
+                branch_mispreds: ev.branch_mispreds,
             });
         }
         let packet = Packet::Sample {

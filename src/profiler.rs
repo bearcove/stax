@@ -800,6 +800,8 @@ impl ProfilingController {
                     is_offcpu: false,
                     cycles: 0,
                     instructions: 0,
+                    l1d_misses: 0,
+                    branch_mispreds: 0,
                 });
             }
 

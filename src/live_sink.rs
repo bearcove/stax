@@ -20,6 +20,12 @@ pub struct SampleEvent< 'a > {
     /// Instructions retired since the previous on-CPU sample (Apple
     /// Silicon fixed PMU counter 1).
     pub instructions: u64,
+    /// L1D cache misses on loads since the previous on-CPU sample,
+    /// from a configurable PMU counter. 0 when unavailable.
+    pub l1d_misses: u64,
+    /// Branch mispredicts since the previous on-CPU sample. Same
+    /// availability semantics as `l1d_misses`.
+    pub branch_mispreds: u64,
 }
 
 /// One symbol from a binary's symbol table (Mach-O `nlist_64` or ELF

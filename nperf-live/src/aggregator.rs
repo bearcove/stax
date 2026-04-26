@@ -6,13 +6,39 @@ use nperf_live_proto::TopEntry;
 pub struct PmcAccum {
     pub cycles: u64,
     pub instructions: u64,
+    pub l1d_misses: u64,
+    pub branch_mispreds: u64,
 }
 
 impl PmcAccum {
-    fn add(&mut self, cycles: u64, instructions: u64) {
-        self.cycles = self.cycles.saturating_add(cycles);
-        self.instructions = self.instructions.saturating_add(instructions);
+    fn add(&mut self, s: &PmuSample) {
+        self.cycles = self.cycles.saturating_add(s.cycles);
+        self.instructions = self.instructions.saturating_add(s.instructions);
+        self.l1d_misses = self.l1d_misses.saturating_add(s.l1d_misses);
+        self.branch_mispreds = self
+            .branch_mispreds
+            .saturating_add(s.branch_mispreds);
     }
+
+    fn add_other(&mut self, other: &PmcAccum) {
+        self.cycles = self.cycles.saturating_add(other.cycles);
+        self.instructions = self.instructions.saturating_add(other.instructions);
+        self.l1d_misses = self.l1d_misses.saturating_add(other.l1d_misses);
+        self.branch_mispreds = self
+            .branch_mispreds
+            .saturating_add(other.branch_mispreds);
+    }
+}
+
+/// Per-sample PMU values handed in via `Aggregator::record`. Shaped
+/// identically to `PmcAccum` but distinct so the API is "totals
+/// vs. one sample" at a glance.
+#[derive(Clone, Copy, Default)]
+pub struct PmuSample {
+    pub cycles: u64,
+    pub instructions: u64,
+    pub l1d_misses: u64,
+    pub branch_mispreds: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -119,11 +145,9 @@ pub struct RawSample {
     /// on-CPU sample). Lets the UI filter wall-clock vs strict
     /// on-CPU views.
     pub is_offcpu: bool,
-    /// Apple Silicon fixed PMU counter deltas at this PET tick. 0
-    /// for synthesised off-CPU samples (we have no real counter
-    /// reading there) and 0 on the Linux backend.
-    pub cycles: u64,
-    pub instructions: u64,
+    /// PMU counter deltas at this PET tick. All-zero for
+    /// synthesised off-CPU samples and on the Linux backend.
+    pub pmc: PmuSample,
 }
 
 /// Per-thread cap on the raw sample log. ~100k * (avg ~30 frames * 8B
@@ -137,8 +161,7 @@ impl ThreadStats {
         timestamp_ns: u64,
         user_addrs: &[u64],
         is_offcpu: bool,
-        cycles: u64,
-        instructions: u64,
+        pmc: PmuSample,
     ) {
         self.total_samples += 1;
         if is_offcpu {
@@ -146,10 +169,7 @@ impl ThreadStats {
         }
         if let Some(&leaf) = user_addrs.first() {
             *self.self_counts.entry(leaf).or_insert(0) += 1;
-            self.self_pmc
-                .entry(leaf)
-                .or_default()
-                .add(cycles, instructions);
+            self.self_pmc.entry(leaf).or_default().add(&pmc);
             if is_offcpu {
                 *self.offcpu_self_counts.entry(leaf).or_insert(0) += 1;
             }
@@ -158,10 +178,7 @@ impl ThreadStats {
         for &addr in user_addrs {
             if seen.insert(addr) {
                 *self.total_counts.entry(addr).or_insert(0) += 1;
-                self.total_pmc
-                    .entry(addr)
-                    .or_default()
-                    .add(cycles, instructions);
+                self.total_pmc.entry(addr).or_default().add(&pmc);
                 if is_offcpu {
                     *self.offcpu_total_counts.entry(addr).or_insert(0) += 1;
                 }
@@ -173,7 +190,7 @@ impl ThreadStats {
         for &addr in user_addrs.iter().rev() {
             node = node.children.entry(addr).or_default();
             node.count += 1;
-            node.pmc.add(cycles, instructions);
+            node.pmc.add(&pmc);
             if is_offcpu {
                 node.offcpu_count += 1;
             }
@@ -187,8 +204,7 @@ impl ThreadStats {
             timestamp_ns,
             stack: user_addrs.to_vec().into_boxed_slice(),
             is_offcpu,
-            cycles,
-            instructions,
+            pmc,
         });
     }
 
@@ -237,20 +253,16 @@ impl Aggregator {
         timestamp_ns: u64,
         user_addrs: &[u64],
         is_offcpu: bool,
-        cycles: u64,
-        instructions: u64,
+        pmc: PmuSample,
     ) {
         if self.session_start_ns.is_none() {
             self.session_start_ns = Some(timestamp_ns);
         }
         self.last_sample_ns = Some(timestamp_ns);
-        self.threads.entry(tid).or_default().record(
-            timestamp_ns,
-            user_addrs,
-            is_offcpu,
-            cycles,
-            instructions,
-        );
+        self.threads
+            .entry(tid)
+            .or_default()
+            .record(timestamp_ns, user_addrs, is_offcpu, pmc);
     }
 
     pub fn session_start_ns(&self) -> Option<u64> {
@@ -289,19 +301,13 @@ impl Aggregator {
             total_samples += 1;
             if let Some(&leaf) = sample.stack.first() {
                 *self_counts.entry(leaf).or_insert(0) += 1;
-                self_pmc
-                    .entry(leaf)
-                    .or_default()
-                    .add(sample.cycles, sample.instructions);
+                self_pmc.entry(leaf).or_default().add(&sample.pmc);
             }
             let mut seen: smallset::SmallSet = Default::default();
             for &addr in sample.stack.iter() {
                 if seen.insert(addr) {
                     *total_counts.entry(addr).or_insert(0) += 1;
-                    total_pmc
-                        .entry(addr)
-                        .or_default()
-                        .add(sample.cycles, sample.instructions);
+                    total_pmc.entry(addr).or_default().add(&sample.pmc);
                 }
             }
             // Build the call tree rooted at the synthetic node, leaf-first
@@ -310,7 +316,7 @@ impl Aggregator {
             for &addr in sample.stack.iter().rev() {
                 node = node.children.entry(addr).or_default();
                 node.count += 1;
-                node.pmc.add(sample.cycles, sample.instructions);
+                node.pmc.add(&sample.pmc);
             }
         }
 
@@ -394,8 +400,12 @@ impl Aggregator {
                 language: "unknown".to_owned(),
                 self_cycles: e.self_pmc.cycles,
                 self_instructions: e.self_pmc.instructions,
+                self_l1d_misses: e.self_pmc.l1d_misses,
+                self_branch_mispreds: e.self_pmc.branch_mispreds,
                 total_cycles: e.total_pmc.cycles,
                 total_instructions: e.total_pmc.instructions,
+                total_l1d_misses: e.total_pmc.l1d_misses,
+                total_branch_mispreds: e.total_pmc.branch_mispreds,
             })
             .collect()
     }
@@ -427,10 +437,10 @@ impl Aggregator {
                         *total_counts.entry(a).or_insert(0) += c;
                     }
                     for (&a, &p) in &t.self_pmc {
-                        self_pmc.entry(a).or_default().add(p.cycles, p.instructions);
+                        self_pmc.entry(a).or_default().add_other(&p);
                     }
                     for (&a, &p) in &t.total_pmc {
-                        total_pmc.entry(a).or_default().add(p.cycles, p.instructions);
+                        total_pmc.entry(a).or_default().add_other(&p);
                     }
                 }
                 collect_top(&self_counts, &total_counts, &self_pmc, &total_pmc)
@@ -468,7 +478,7 @@ impl StackNode {
     fn merge(&mut self, other: &StackNode) {
         self.count += other.count;
         self.offcpu_count += other.offcpu_count;
-        self.pmc.add(other.pmc.cycles, other.pmc.instructions);
+        self.pmc.add_other(&other.pmc);
         for (&addr, child) in &other.children {
             self.children.entry(addr).or_default().merge(child);
         }

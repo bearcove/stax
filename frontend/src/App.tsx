@@ -94,6 +94,7 @@ export function App() {
   const [flameFocusKey, setFlameFocusKey] = useState<string | null>(null);
   const [menu, setMenu] = useState<ContextMenuTarget | null>(null);
   const [filter, setFilter] = useState<LiveFilter>(EMPTY_FILTER);
+  const [pmuMetric, setPmuMetric] = useState<PmuMetric>("ipc");
   const [theme, setTheme] = useState<Theme>(initialTheme);
 
   // Reflect the theme onto the <html> element so the CSS tokens flip,
@@ -321,6 +322,7 @@ export function App() {
               setFilter((prev) => ({ ...prev, sample_mode: m }))
             }
           />
+          <PmuMetricFilter metric={pmuMetric} onChange={setPmuMetric} />
           <KindFilter hidden={hiddenKinds} onChange={setHiddenKinds} />
           <button
             type="button"
@@ -400,6 +402,7 @@ export function App() {
             onSort={setSort}
             matchText={matchText}
             hiddenKinds={hiddenKinds}
+            pmuMetric={pmuMetric}
             onContextMenu={openMenu}
           />
         </section>
@@ -629,6 +632,50 @@ const KIND_LABEL: Record<ObjKind, string> = {
 
 const KIND_ORDER: ObjKind[] = ["main", "dylib", "system", "unknown"];
 
+function PmuMetricFilter({
+  metric,
+  onChange,
+}: {
+  metric: PmuMetric;
+  onChange: (m: PmuMetric) => void;
+}) {
+  const options: { id: PmuMetric; label: string; title: string }[] = [
+    {
+      id: "ipc",
+      label: "ipc",
+      title: "instructions per cycle (fixed counters)",
+    },
+    {
+      id: "l1d-miss",
+      label: "l1d",
+      title: "L1D cache misses per 1000 instructions (configurable counter)",
+    },
+    {
+      id: "br-mispred",
+      label: "br-miss",
+      title: "branch mispredicts per 1000 instructions (configurable counter)",
+    },
+  ];
+  return (
+    <span className="kind-filter">
+      {options.map((o) => {
+        const active = metric === o.id;
+        return (
+          <button
+            key={o.id}
+            type="button"
+            className={`kind-pill pmu-${o.id}${active ? "" : " off"}`}
+            onClick={() => onChange(o.id)}
+            title={o.title}
+          >
+            {o.label}
+          </button>
+        );
+      })}
+    </span>
+  );
+}
+
 function SampleModeFilter({
   mode,
   onChange,
@@ -733,6 +780,37 @@ function barPct(count: bigint, total: bigint): string {
   return `${Math.min(100, ratio)}%`;
 }
 
+/// Format a per-thousand-instructions ratio. Used for cache-miss
+/// and branch-mispredict density: "this many cache misses per 1000
+/// retired instructions" is the standard metric. Returns null when
+/// the underlying counters didn't fire on this chip.
+function rateLabel(
+  events: bigint,
+  insns: bigint,
+  badAt: number,
+  goodAt: number,
+  unit: string,
+  tooltip: string,
+): React.ReactNode {
+  if (insns === 0n) return null;
+  if (events === 0n) return null;
+  // events per kilo-insn = events / insns * 1000
+  const rate = (Number(events) / Number(insns)) * 1000;
+  // Higher = worse for misses; ramp red→green inverted.
+  const t = Math.max(0, Math.min(1, (rate - goodAt) / (badAt - goodAt)));
+  // 130 = green, 0 = red.
+  const hue = Math.round(130 - t * 130);
+  return (
+    <div
+      className="num-ipc"
+      title={tooltip}
+      style={{ color: `hsl(${hue} 75% 60%)` }}
+    >
+      {rate.toFixed(2)} {unit}
+    </div>
+  );
+}
+
 /// Render the IPC (instructions / cycles) for one TopEntry. Uses
 /// the inclusive (total_*) counters because that's what the user
 /// cares about for a row that aggregates a function plus its
@@ -760,6 +838,36 @@ function ipcLabel(e: TopEntry): React.ReactNode {
     </div>
   );
 }
+
+/// Render the active PMU metric for one TopEntry. The user can
+/// switch between IPC (instructions per cycle), L1D miss rate, and
+/// branch-mispredict rate via the topbar pill.
+function pmuLabel(e: TopEntry, metric: PmuMetric): React.ReactNode {
+  switch (metric) {
+    case "ipc":
+      return ipcLabel(e);
+    case "l1d-miss":
+      return rateLabel(
+        e.total_l1d_misses,
+        e.total_instructions,
+        20,
+        2,
+        "miss/Kinsn",
+        `${e.total_l1d_misses.toString()} L1D misses / ${e.total_instructions.toString()} insns`,
+      );
+    case "br-mispred":
+      return rateLabel(
+        e.total_branch_mispreds,
+        e.total_instructions,
+        10,
+        0.5,
+        "miss/Kinsn",
+        `${e.total_branch_mispreds.toString()} branch mispreds / ${e.total_instructions.toString()} insns`,
+      );
+  }
+}
+
+type PmuMetric = "ipc" | "l1d-miss" | "br-mispred";
 
 function objIcon(obj: ObjKind) {
   switch (obj) {
@@ -794,6 +902,7 @@ function TopTable({
   onSort,
   matchText,
   hiddenKinds,
+  pmuMetric,
   onContextMenu,
 }: {
   entries: TopEntry[];
@@ -804,6 +913,7 @@ function TopTable({
   onSort: (s: SortKey) => void;
   matchText: ((t: string) => boolean) | null;
   hiddenKinds: Set<ObjKind>;
+  pmuMetric: PmuMetric;
   onContextMenu: (t: ContextMenuTarget) => void;
 }) {
   const visible = entries.filter((e) => !hiddenKinds.has(objKindOf(e)));
@@ -893,7 +1003,7 @@ function TopTable({
                     }}
                   />
                 </div>
-                {ipcLabel(e)}
+                {pmuLabel(e, pmuMetric)}
               </td>
             </tr>
           );

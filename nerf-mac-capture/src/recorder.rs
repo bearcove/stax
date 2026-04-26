@@ -281,6 +281,8 @@ fn sample_all_threads<S: SampleSink>(
             is_offcpu: false,
             cycles: 0,
             instructions: 0,
+            l1d_misses: 0,
+            branch_mispreds: 0,
         });
     }
     Ok(())

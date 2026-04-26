@@ -60,6 +60,13 @@ pub struct SampleEvent<'a> {
     /// Silicon fixed counter 1). Same availability semantics as
     /// `cycles`.
     pub instructions: u64,
+    /// L1 data cache misses on loads since the previous PET sample,
+    /// from a configurable counter programmed at session start. 0 if
+    /// PMU configuration didn't resolve this event for the host chip.
+    pub l1d_misses: u64,
+    /// Non-speculative branch mispredicts since the previous PET
+    /// sample. Same availability semantics as `l1d_misses`.
+    pub branch_mispreds: u64,
 }
 
 pub struct BinaryLoadedEvent<'a> {

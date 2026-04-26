@@ -20,6 +20,7 @@ use crate::kernel_symbols::{KernelImage, SlideEstimator};
 use crate::libproc;
 use crate::offcpu::OffCpuTracker;
 use crate::parser::Parser;
+use crate::pmu_events::{self, ConfiguredPmu, PmuSlot};
 
 /// Configuration for a kperf-driven recording session.
 pub struct RecordOptions {
@@ -113,8 +114,14 @@ pub fn record<S: SampleSink>(
 
     scan_thread_names(opts.pid, sink, &mut thread_names);
 
+    // Configure additional PMU events (cache misses, branch
+    // mispredicts) before session start so kpc_set_config sees the
+    // configurable counter requests. Falls back gracefully to the
+    // FIXED-only path if the lookups don't resolve on this chip.
+    let configured_pmu = pmu_events::configure(&fw);
+
     let t0 = Instant::now();
-    let mut session = Session::start(&fw, &opts)?;
+    let mut session = Session::start(&fw, &opts, configured_pmu.as_ref())?;
     session.enable_kdebug(&opts)?;
     log::info!("kperf+kdebug arming took {:?}", t0.elapsed());
 
@@ -125,6 +132,7 @@ pub fn record<S: SampleSink>(
         &mut images,
         &mut thread_names,
         slide_est.as_mut(),
+        configured_pmu.as_ref(),
         &mut should_stop,
     )?;
 
@@ -207,7 +215,11 @@ impl<'a> Session<'a> {
     /// In lightweight-PET mode kperf cooperates with the kdebug
     /// interface rather than taking exclusive ownership, so the
     /// subsequent `KERN_KDREMOVE` etc. are accepted.
-    fn start(fw: &'a Frameworks, opts: &RecordOptions) -> Result<Self, Error> {
+    fn start(
+        fw: &'a Frameworks,
+        opts: &RecordOptions,
+        configured_pmu: Option<&ConfiguredPmu>,
+    ) -> Result<Self, Error> {
         // Allocate one action + one timer.
         let actionid: u32 = 1;
         let timerid: u32 = 1;
@@ -243,19 +255,34 @@ impl<'a> Session<'a> {
         )?;
         kperf_call(unsafe { (fw.kperf_timer_pet_set)(timerid) }, "timer_pet_set")?;
 
-        // Enable Apple Silicon's fixed counters (cycles + instructions
-        // retired). FIXED counters are pre-determined by hardware so
-        // there are no event configs to push -- just turn the class
-        // on at the system + per-thread level. PMC_THREAD in the
-        // sampler bits then tells kperf to read these counters at
-        // every PET tick and emit them as DBG_PERF/PERF_KPC records.
+        // Enable PMU counter classes. Apple Silicon's FIXED class
+        // exposes cycles + instructions retired with no per-event
+        // config; the CONFIGURABLE class lets us program ~8 counters
+        // for events like L1D misses or branch mispredicts. We always
+        // turn FIXED on; if `configured_pmu` resolved a configurable
+        // event we extend the class mask + push the event encodings
+        // via kpc_set_config.
+        let class_mask = configured_pmu
+            .map(|c| c.class_mask)
+            .unwrap_or(bindings::KPC_CLASS_FIXED_MASK);
+        if let Some(c) = configured_pmu {
+            // `kpc_set_config` writes an array of u64 event
+            // configs into the kernel; the FIXED class needs zero
+            // entries (it's pre-determined), so the array length we
+            // pass is whatever the kpep_config built.
+            let mut configs = c.configs.clone();
+            kperf_call(
+                unsafe { (fw.kpc_set_config)(class_mask, configs.as_mut_ptr()) },
+                "kpc_set_config(FIXED+CONFIGURABLE)",
+            )?;
+        }
         kperf_call(
-            unsafe { (fw.kpc_set_counting)(bindings::KPC_CLASS_FIXED_MASK) },
-            "kpc_set_counting(FIXED)",
+            unsafe { (fw.kpc_set_counting)(class_mask) },
+            "kpc_set_counting",
         )?;
         kperf_call(
-            unsafe { (fw.kpc_set_thread_counting)(bindings::KPC_CLASS_FIXED_MASK) },
-            "kpc_set_thread_counting(FIXED)",
+            unsafe { (fw.kpc_set_thread_counting)(class_mask) },
+            "kpc_set_thread_counting",
         )?;
 
         // Lightweight PET + sample_set must precede kdebug setup so
@@ -324,8 +351,13 @@ fn drain_loop<S: SampleSink>(
     images: &mut ImageScanner,
     thread_names: &mut ThreadNameCache,
     mut slide_est: Option<&mut SlideEstimator>,
+    configured_pmu: Option<&ConfiguredPmu>,
     should_stop: &mut impl FnMut() -> bool,
 ) -> Result<(), Error> {
+    let pmc_idx_l1d = configured_pmu
+        .and_then(|c| c.slot_indices[PmuSlot::L1DCacheMissLoad as usize]);
+    let pmc_idx_brmiss = configured_pmu
+        .and_then(|c| c.slot_indices[PmuSlot::BranchMispredict as usize]);
     let start = Instant::now();
     let drain_period = Duration::from_micros(
         ((1_000_000 / opts.frequency_hz.max(1)) * 2).into(),
@@ -460,6 +492,12 @@ fn drain_loop<S: SampleSink>(
                 );
                 let cycles = sample.pmc.first().copied().unwrap_or(0);
                 let instructions = sample.pmc.get(1).copied().unwrap_or(0);
+                let l1d_misses = pmc_idx_l1d
+                    .and_then(|i| sample.pmc.get(i).copied())
+                    .unwrap_or(0);
+                let branch_mispreds = pmc_idx_brmiss
+                    .and_then(|i| sample.pmc.get(i).copied())
+                    .unwrap_or(0);
                 sink.on_sample(SampleEvent {
                     timestamp_ns: sample.timestamp_ns,
                     pid: opts.pid,
@@ -469,6 +507,8 @@ fn drain_loop<S: SampleSink>(
                     is_offcpu: false,
                     cycles,
                     instructions,
+                    l1d_misses,
+                    branch_mispreds,
                 });
             });
         }
@@ -493,6 +533,8 @@ fn drain_loop<S: SampleSink>(
                     is_offcpu: true,
                     cycles: 0,
                     instructions: 0,
+                    l1d_misses: 0,
+                    branch_mispreds: 0,
                 });
                 ts = ts.saturating_add(period_ns);
             }
