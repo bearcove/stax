@@ -945,16 +945,15 @@ fn compute_flame_update(
     binaries: &BinaryRegistry,
 ) -> FlamegraphUpdate {
     let threshold = (total / 200).max(1);
-    let mut children: Vec<FlameNode> = flame_root
-        .children
-        .iter()
-        .filter(|(_, c)| c.count >= threshold)
-        .map(|(a, c)| flame_node_to_proto(*a, c, threshold, binaries))
-        .collect();
+    let (mut children, residue) =
+        build_children_with_residue(&flame_root.children, threshold, binaries);
     for c in &mut children {
         fold_recursion(c);
     }
     children.sort_by(|a, b| b.count.cmp(&a.count));
+    if let Some(extra) = residue {
+        children.push(extra);
+    }
 
     // Root sums counters across all children so the "(all)" row
     // shows the recording's grand totals.
@@ -1016,13 +1015,12 @@ fn flame_node_to_proto(
         ),
         None => (None, None, false, nperf_demangle::Language::Unknown),
     };
-    let mut children: Vec<FlameNode> = node
-        .children
-        .iter()
-        .filter(|(_, c)| c.count >= threshold)
-        .map(|(a, c)| flame_node_to_proto(*a, c, threshold, binaries))
-        .collect();
+    let (mut children, residue) =
+        build_children_with_residue(&node.children, threshold, binaries);
     children.sort_by(|a, b| b.count.cmp(&a.count));
+    if let Some(extra) = residue {
+        children.push(extra);
+    }
     FlameNode {
         address,
         count: node.count,
@@ -1036,6 +1034,55 @@ fn flame_node_to_proto(
         branch_mispreds: node.pmc.branch_mispreds,
         children,
     }
+}
+
+/// Walk a `StackNode`'s children, recursing on every child with
+/// count >= threshold and folding the rest into a single greyed-out
+/// `(rest)` sibling so the renderer doesn't leave black space where
+/// the long tail used to live. Without this, a node with thousands
+/// of small contributors (think 1.5M samples spread across hundreds
+/// of stacks) renders as one or two visible boxes plus a giant
+/// empty area on the right that looks like idle but is actually
+/// "lots of small frames I dropped from the wire."
+fn build_children_with_residue(
+    children: &std::collections::HashMap<u64, aggregator::StackNode>,
+    threshold: u64,
+    binaries: &BinaryRegistry,
+) -> (Vec<FlameNode>, Option<FlameNode>) {
+    let mut visible: Vec<FlameNode> = Vec::new();
+    let mut residue_count: u64 = 0;
+    let mut residue_dropped: u64 = 0;
+    for (&a, c) in children {
+        if c.count >= threshold {
+            visible.push(flame_node_to_proto(a, c, threshold, binaries));
+        } else {
+            residue_count = residue_count.saturating_add(c.count);
+            residue_dropped += 1;
+        }
+    }
+    let residue = if residue_count > 0 && residue_dropped > 0 {
+        Some(FlameNode {
+            // Sentinel address: the frontend treats any node with
+            // address == 0 as the root "(all)" otherwise; we set
+            // function_name explicitly so the labelFor() takes that
+            // path first, but we also pick u64::MAX here as a defence
+            // in case future renderers fall back to address.
+            address: u64::MAX,
+            count: residue_count,
+            function_name: Some(format!("({} small frames)", residue_dropped)),
+            binary: None,
+            is_main: false,
+            language: nperf_demangle::Language::Unknown.as_str().to_owned(),
+            cycles: 0,
+            instructions: 0,
+            l1d_misses: 0,
+            branch_mispreds: 0,
+            children: Vec::new(),
+        })
+    } else {
+        None
+    };
+    (visible, residue)
 }
 
 fn compute_annotated_view(
