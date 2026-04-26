@@ -18,10 +18,13 @@
 
 pub mod bindings;
 pub mod error;
+pub mod image_scan;
 pub mod kdebug;
 pub mod kernel_symbols;
+pub mod libproc;
 pub mod parser;
 pub mod recorder;
+pub mod shared_cache;
 
 pub use error::Error;
 

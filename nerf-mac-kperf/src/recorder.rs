@@ -9,24 +9,15 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use mach2::kern_return::KERN_SUCCESS;
-use mach2::mach_types::thread_act_array_t;
-use mach2::message::mach_msg_type_number_t;
-use mach2::port::{mach_port_t, MACH_PORT_NULL};
-use mach2::task::task_threads;
-use mach2::traps::{mach_task_self, task_for_pid};
-use mach2::vm::mach_vm_deallocate;
-
-use nerf_mac_capture::proc_maps::{DyldInfo, DyldInfoManager, Modification};
-use nerf_mac_capture::recorder::{get_thread_id_and_name, ThreadNameCache};
-use nerf_mac_capture::{
-    BinaryLoadedEvent, BinaryUnloadedEvent, SampleEvent, SampleSink, ThreadNameEvent,
-};
+use nerf_mac_capture::recorder::ThreadNameCache;
+use nerf_mac_capture::{JitdumpEvent, SampleEvent, SampleSink, ThreadNameEvent};
 
 use crate::bindings::{self, sampler, Frameworks};
 use crate::error::Error;
+use crate::image_scan::ImageScanner;
 use crate::kdebug::{self, kdbg_class, kdbg_code, kdbg_func, kdbg_subclass, KdBuf, KdRegtype, DBG_PERF};
 use crate::kernel_symbols::{KernelImage, SlideEstimator};
+use crate::libproc;
 use crate::parser::Parser;
 
 /// Configuration for a kperf-driven recording session.
@@ -89,17 +80,17 @@ pub fn record<S: SampleSink>(
     let _ = kdebug::enable(false);
     let _ = kdebug::reset();
 
-    // Acquire a Mach task port so we can scan the target's loaded
-    // dyld images and emit BinaryLoadedEvents into the archive. The
-    // kernel walks user stacks for us; we still need to tell the
-    // analysis side which dylib each PC came from.
-    let task = task_for_pid_existing(opts.pid)?;
-    let mut dyld = DyldInfoManager::new(task);
+    // No `task_for_pid` here on purpose: AMFI denies it from root
+    // against a privilege-dropped child on Apple Silicon, and we
+    // don't actually need a Mach task port. libproc gives us the
+    // image regions and thread names by PID, with read-permission
+    // gating instead of task-port policy.
+    let mut images = ImageScanner::new();
     let mut thread_names = ThreadNameCache::new();
 
     let t0 = Instant::now();
-    apply_dyld_changes(&mut dyld, opts.pid, sink);
-    log::info!("initial dyld scan took {:?}", t0.elapsed());
+    images.rescan(opts.pid, sink);
+    log::info!("initial image scan took {:?}", t0.elapsed());
 
     // Load the on-disk kernel binary. We can't get the KASLR slide
     // without an Apple-private entitlement, so we feed kernel frame
@@ -117,7 +108,7 @@ pub fn record<S: SampleSink>(
         .as_ref()
         .map(|img| SlideEstimator::new(img.exec_segments.clone()));
 
-    scan_thread_names(task, opts.pid, sink, &mut thread_names);
+    scan_thread_names(opts.pid, sink, &mut thread_names);
 
     let t0 = Instant::now();
     let mut session = Session::start(&fw, &opts)?;
@@ -128,8 +119,7 @@ pub fn record<S: SampleSink>(
         &fw,
         &opts,
         sink,
-        task,
-        &mut dyld,
+        &mut images,
         &mut thread_names,
         slide_est.as_mut(),
         &mut should_stop,
@@ -158,112 +148,41 @@ pub fn record<S: SampleSink>(
     Ok(())
 }
 
-/// Enumerate the target task's threads and emit a `ThreadNameEvent`
-/// for every (tid, name) binding the cache hasn't seen yet.
+/// Enumerate threads via libproc and emit a `ThreadNameEvent` for
+/// each (tid, name) binding the cache hasn't seen yet. No
+/// task_for_pid -- `proc_pidinfo` works under read permission alone.
 fn scan_thread_names<S: SampleSink>(
-    task: mach_port_t,
     pid: u32,
     sink: &mut S,
     cache: &mut ThreadNameCache,
 ) {
-    let mut ptr: thread_act_array_t = std::ptr::null_mut();
-    let mut len: mach_msg_type_number_t = 0;
-    let kr = unsafe { task_threads(task, &mut ptr, &mut len) };
-    if kr != KERN_SUCCESS {
-        log::debug!("task_threads failed: kr={kr}");
-        return;
-    }
-    let threads = if ptr.is_null() || len == 0 {
-        &[][..]
-    } else {
-        unsafe { std::slice::from_raw_parts(ptr, len as usize) }
+    let tids = match libproc::list_thread_ids(pid) {
+        Ok(t) => t,
+        Err(err) => {
+            log::debug!("libproc::list_thread_ids(pid={pid}) failed: {err}");
+            return;
+        }
     };
     let mut named = 0u32;
     let mut nameless = 0u32;
-    for &thread_act in threads {
-        match get_thread_id_and_name(thread_act) {
-            Ok((tid, Some(name))) => {
+    for tid64 in tids {
+        // Truncating to u32: nerf's archive format keeps tids as u32
+        // and macOS thread ids practically never overflow that.
+        let tid = tid64 as u32;
+        match libproc::thread_name(tid64) {
+            Ok(Some(name)) => {
                 named += 1;
-                log::trace!("thread tid={tid} name={name}");
                 if cache.note_thread(tid, &name) {
                     sink.on_thread_name(ThreadNameEvent { pid, tid, name: &name });
                 }
             }
-            Ok((tid, None)) => {
-                nameless += 1;
-                log::trace!("thread tid={tid} (no name)");
-            }
-            Err(err) => {
-                log::trace!("get_thread_id_and_name failed: {err:?}");
-            }
+            Ok(None) => nameless += 1,
+            Err(err) => log::trace!("libproc::thread_name({tid64}) failed: {err}"),
         }
     }
     log::debug!(
-        "scan_thread_names: pid={pid} threads={} named={named} nameless={nameless}",
-        threads.len()
+        "scan_thread_names: pid={pid} named={named} nameless={nameless}"
     );
-    // Release per-thread port rights and the array allocation; otherwise
-    // we leak a port reference per scan.
-    unsafe {
-        for &port in threads {
-            let _ = mach2::mach_port::mach_port_deallocate(mach_task_self(), port);
-        }
-        if !ptr.is_null() && len > 0 {
-            let bytes =
-                len as u64 * std::mem::size_of::<mach_port_t>() as u64;
-            let _ = mach_vm_deallocate(mach_task_self(), ptr as u64, bytes);
-        }
-    }
-}
-
-fn task_for_pid_existing(pid: u32) -> Result<mach_port_t, Error> {
-    let mut task: mach_port_t = MACH_PORT_NULL;
-    let kr = unsafe { task_for_pid(mach_task_self(), pid as i32, &mut task) };
-    if kr != KERN_SUCCESS {
-        return Err(Error::Kperf {
-            op: "task_for_pid",
-            code: kr,
-        });
-    }
-    Ok(task)
-}
-
-fn apply_dyld_changes<S: SampleSink>(
-    dyld: &mut DyldInfoManager,
-    pid: u32,
-    sink: &mut S,
-) {
-    let changes = match dyld.check_for_changes() {
-        Ok(c) => c,
-        Err(err) => {
-            log::debug!("DyldInfoManager::check_for_changes failed: {err:?}");
-            return;
-        }
-    };
-    for change in changes {
-        match change {
-            Modification::Added(lib) => emit_binary_loaded(pid, &lib, sink),
-            Modification::Removed(lib) => sink.on_binary_unloaded(BinaryUnloadedEvent {
-                pid,
-                base_avma: lib.base_avma,
-                path: &lib.file,
-            }),
-        }
-    }
-}
-
-fn emit_binary_loaded<S: SampleSink>(pid: u32, lib: &DyldInfo, sink: &mut S) {
-    sink.on_binary_loaded(BinaryLoadedEvent {
-        pid,
-        base_avma: lib.base_avma,
-        vmsize: lib.vmsize,
-        text_svma: lib.module_info.base_svma,
-        path: &lib.file,
-        uuid: lib.uuid,
-        arch: lib.arch,
-        is_executable: lib.is_executable,
-        symbols: &lib.symbols,
-    });
 }
 
 // ---------------------------------------------------------------------------
@@ -378,8 +297,7 @@ fn drain_loop<S: SampleSink>(
     _fw: &Frameworks,
     opts: &RecordOptions,
     sink: &mut S,
-    task: mach_port_t,
-    dyld: &mut DyldInfoManager,
+    images: &mut ImageScanner,
     thread_names: &mut ThreadNameCache,
     mut slide_est: Option<&mut SlideEstimator>,
     should_stop: &mut impl FnMut() -> bool,
@@ -389,18 +307,28 @@ fn drain_loop<S: SampleSink>(
         ((1_000_000 / opts.frequency_hz.max(1)) * 2).into(),
     );
 
-    // Re-scan dyld at most a few times per second; the timestamp
-    // check inside DyldInfoManager already short-circuits when the
-    // image table hasn't moved.
-    let dyld_period = Duration::from_millis(250);
-    let mut next_dyld = Instant::now() + dyld_period;
-    // Thread-name scan is cheap (one task_threads + thread_info per
-    // thread); we run it often so short-lived TaskGroup-style worker
-    // threads get a name before they die. ~50ms is empirically a good
-    // balance: ~20 scans/s, ~2% CPU on a busy app, catches anything
-    // that lives at least one cadence.
+    // Re-scan loaded images a few times per second. libproc walks
+    // every region every time (no kernel-side change-counter to
+    // short-circuit on like dyld_all_image_infos has), so this is the
+    // dominant cost outside of sample drain.
+    let image_period = Duration::from_millis(250);
+    let mut next_image = Instant::now() + image_period;
+    // Thread-name scan is cheap (one PROC_PIDLISTTHREADS + one
+    // PROC_PIDTHREADINFO per thread); we run it often so short-lived
+    // TaskGroup-style worker threads get a name before they die.
+    // ~50ms is empirically a good balance.
     let thread_period = Duration::from_millis(50);
     let mut next_thread = Instant::now() + thread_period;
+
+    // Poll for the JIT-runtime convention: V8/Node, Cranelift's
+    // `--jitdump` output, perf-map-agent, and friends all drop a
+    // `jit-<pid>.dump` (or open one with that basename via $TMPDIR).
+    // We probe `/tmp` -- the most common location -- and stop once
+    // it shows up so we don't stat() forever in the steady state.
+    let jitdump_path = std::path::PathBuf::from(format!("/tmp/jit-{}.dump", opts.pid));
+    let jitdump_period = Duration::from_millis(500);
+    let mut next_jitdump = Instant::now() + jitdump_period;
+    let mut jitdump_emitted = false;
 
     let mut buf: Vec<KdBuf> = vec![
         KdBuf {
@@ -434,13 +362,24 @@ fn drain_loop<S: SampleSink>(
 
         std::thread::sleep(drain_period);
 
-        if Instant::now() >= next_dyld {
-            apply_dyld_changes(dyld, opts.pid, sink);
-            next_dyld = Instant::now() + dyld_period;
+        if Instant::now() >= next_image {
+            images.rescan(opts.pid, sink);
+            next_image = Instant::now() + image_period;
         }
         if Instant::now() >= next_thread {
-            scan_thread_names(task, opts.pid, sink, thread_names);
+            scan_thread_names(opts.pid, sink, thread_names);
             next_thread = Instant::now() + thread_period;
+        }
+        if !jitdump_emitted && Instant::now() >= next_jitdump {
+            if jitdump_path.exists() {
+                sink.on_jitdump(JitdumpEvent {
+                    pid: opts.pid,
+                    path: &jitdump_path,
+                });
+                jitdump_emitted = true;
+            } else {
+                next_jitdump = Instant::now() + jitdump_period;
+            }
         }
 
         let n = kdebug::read_trace(&mut buf)?;
