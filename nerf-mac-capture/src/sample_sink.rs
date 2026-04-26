@@ -95,6 +95,13 @@ pub struct BinaryLoadedEvent<'a> {
     pub is_executable: bool,
     /// Symbols read from the image's `LC_SYMTAB`, addresses as SVMAs.
     pub symbols: &'a [crate::proc_maps::MachOSymbol],
+    /// Raw `__TEXT` bytes for this image, when the recorder has them
+    /// in hand. Used by the live UI as a disassembly source for
+    /// images that aren't on disk (JIT'd code), so we don't need
+    /// `task_for_pid` / `mach_vm_read` against the target. `None`
+    /// for normal on-disk images -- they're loaded lazily by the
+    /// live registry from their on-disk path.
+    pub text_bytes: Option<&'a [u8]>,
 }
 
 pub struct BinaryUnloadedEvent<'a> {

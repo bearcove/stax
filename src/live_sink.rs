@@ -58,6 +58,12 @@ pub struct BinaryLoadedEvent< 'a > {
     /// visually distinguish target code from system dylibs.
     pub is_executable: bool,
     pub symbols: &'a [LiveSymbol< 'a >],
+    /// Raw `__TEXT` bytes for this image, when the recorder captured
+    /// them inline (currently: JIT'd code via the jitdump tailer).
+    /// Used by the binary registry as a disassembly source for
+    /// images that aren't on disk and that we can't `mach_vm_read`
+    /// against.
+    pub text_bytes: Option< &'a [u8] >,
 }
 
 pub struct BinaryUnloadedEvent< 'a > {

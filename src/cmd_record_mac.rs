@@ -557,6 +557,7 @@ impl SampleSink for MacSink {
                 arch: ev.arch,
                 is_executable: ev.is_executable,
                 symbols: &live_symbols,
+                text_bytes: ev.text_bytes,
             });
         }
 

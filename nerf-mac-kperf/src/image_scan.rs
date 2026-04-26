@@ -146,6 +146,7 @@ impl ImageScanner {
                 arch: img.arch,
                 is_executable: img.is_executable,
                 symbols: &img.symbols,
+                text_bytes: None,
             });
             self.known.insert((path, base_avma), img);
         }
@@ -188,6 +189,7 @@ impl ImageScanner {
                 arch: img.arch,
                 is_executable: img.is_executable,
                 symbols: &img.symbols,
+                text_bytes: None,
             });
             self.known.insert((img.path.clone(), img.base_avma), img);
         }

@@ -40,6 +40,11 @@ pub struct JitCodeLoad {
     /// UTF-8 demangled-ish (cranelift uses `function_<n>` or its
     /// IR symbol name; V8 uses the JS source name).
     pub name: String,
+    /// Raw machine-code bytes the runtime emitted for this
+    /// function. Same length as `code_size`. We carry these so the
+    /// live UI can disassemble JIT'd code without needing
+    /// `task_for_pid` / `mach_vm_read` against the target.
+    pub code: Vec<u8>,
 }
 
 pub struct JitdumpTailer {
@@ -133,9 +138,17 @@ fn parse_code_load(payload: &[u8]) -> Option<JitCodeLoad> {
     let name_bytes = &payload[40..];
     let nul = name_bytes.iter().position(|&b| b == 0)?;
     let name = String::from_utf8_lossy(&name_bytes[..nul]).into_owned();
+    let code_start = 40 + nul + 1;
+    let code_end = code_start + code_size as usize;
+    let code = if code_end <= payload.len() {
+        payload[code_start..code_end].to_vec()
+    } else {
+        Vec::new()
+    };
     Some(JitCodeLoad {
         avma,
         code_size,
         name,
+        code,
     })
 }

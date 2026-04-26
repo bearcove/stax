@@ -112,6 +112,7 @@ impl LiveSink for LiveSinkImpl {
             arch: event.arch.map(|s| s.to_owned()),
             is_executable: event.is_executable,
             symbols,
+            text_bytes: event.text_bytes.map(|b| b.to_vec()),
         };
         let _ = self.tx.send(LiveEvent::BinaryLoaded(loaded));
     }

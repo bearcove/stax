@@ -29,6 +29,11 @@ pub struct LoadedBinary {
     /// loaded image. Used by the UI to set the main executable apart.
     pub is_executable: bool,
     pub symbols: Vec<LiveSymbolOwned>,
+    /// Inline `__TEXT` bytes when the recorder shipped them with the
+    /// load event (currently: JIT'd code via the jitdump tailer).
+    /// Used by `resolve()` as a third disassembly fallback after
+    /// disk-loaded image and `mach_vm_read` against the target task.
+    pub text_bytes: Option<Vec<u8>>,
 }
 
 /// Cached on-disk image: bytes + segment table, mirroring
@@ -219,7 +224,7 @@ impl BinaryRegistry {
 
         // Snapshot the bits we need from the binary so we can drop the
         // borrow before touching `self.images` (which `&mut`s self).
-        let (path, arch, base_avma, text_svma, sym_idx) = {
+        let (path, arch, base_avma, text_svma, sym_idx, inline_bytes) = {
             let binary = &self.by_base[binary_idx];
             let svma = svma_for(binary, address);
             let sym_idx = binary
@@ -232,6 +237,7 @@ impl BinaryRegistry {
                 binary.base_avma,
                 binary.text_svma,
                 sym_idx,
+                binary.text_bytes.clone(),
             )
         };
 
@@ -268,21 +274,29 @@ impl BinaryRegistry {
         let end_address = avma_for_svma(base_avma, text_svma, fn_end_svma);
 
         // Prefer disk bytes when we have them (lets DWARF/source work);
-        // fall back to live target memory for binaries we couldn't load
-        // (typically when the dyld shared cache lookup failed).
+        // fall back to live target memory for binaries we couldn't
+        // load (typically when the dyld shared cache lookup failed);
+        // finally fall back to the inline `text_bytes` shipped with
+        // the load event -- the path JIT'd functions take, since
+        // they exist neither on disk nor at a stable target avma we
+        // can `mach_vm_read` without a task port.
         let bytes = match image
             .as_ref()
             .and_then(|img| img.fetch(fn_start_svma, len))
         {
             Some(b) => b.to_vec(),
-            None => {
-                tracing::debug!(
-                    "resolve: image_for {} unavailable, reading {} bytes from target",
-                    path,
-                    len
-                );
-                self.read_target_memory(base_address, len)?
-            }
+            None => match self.read_target_memory(base_address, len) {
+                Some(b) => b,
+                None => {
+                    let inline = inline_bytes.as_ref()?;
+                    let off = fn_start_svma.checked_sub(text_svma)? as usize;
+                    let end = off.checked_add(len)?;
+                    if end > inline.len() {
+                        return None;
+                    }
+                    inline[off..end].to_vec()
+                }
+            },
         };
 
         Some(ResolvedAddress {

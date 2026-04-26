@@ -490,9 +490,14 @@ fn drain_loop<S: SampleSink>(
                             text_svma: r.avma,
                             path: &path,
                             uuid: None,
-                            arch: None,
+                            arch: host_arch_str(),
                             is_executable: false,
                             symbols: &symbols,
+                            // Bytes from the jitdump CodeLoad
+                            // record. Lets the live UI disassemble
+                            // JIT'd functions without needing
+                            // task_for_pid + mach_vm_read.
+                            text_bytes: Some(&r.code),
                         });
                     }
                 }
@@ -660,4 +665,16 @@ fn kperf_call(rc: i32, op: &'static str) -> Result<(), Error> {
         return Err(Error::Kperf { op, code: rc });
     }
     Ok(())
+}
+
+/// Architecture string for synthetic JIT images. Matches what
+/// nwind expects for selecting the disassembler.
+fn host_arch_str() -> Option<&'static str> {
+    if cfg!(target_arch = "aarch64") {
+        Some("aarch64")
+    } else if cfg!(target_arch = "x86_64") {
+        Some("x86_64")
+    } else {
+        None
+    }
 }

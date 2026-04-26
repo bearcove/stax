@@ -216,6 +216,7 @@ fn emit_binary_loaded<S: SampleSink>(pid: u32, lib: &DyldInfo, sink: &mut S) {
         arch: lib.arch,
         is_executable: lib.is_executable,
         symbols: &lib.symbols,
+        text_bytes: None,
     });
 }
 
