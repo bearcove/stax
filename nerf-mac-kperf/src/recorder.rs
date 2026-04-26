@@ -395,8 +395,11 @@ fn drain_loop<S: SampleSink>(
     let dyld_period = Duration::from_millis(250);
     let mut next_dyld = Instant::now() + dyld_period;
     // Thread-name scan is cheap (one task_threads + thread_info per
-    // thread) but we still don't need it every drain tick.
-    let thread_period = Duration::from_millis(500);
+    // thread); we run it often so short-lived TaskGroup-style worker
+    // threads get a name before they die. ~50ms is empirically a good
+    // balance: ~20 scans/s, ~2% CPU on a busy app, catches anything
+    // that lives at least one cadence.
+    let thread_period = Duration::from_millis(50);
     let mut next_thread = Instant::now() + thread_period;
 
     let mut buf: Vec<KdBuf> = vec![
