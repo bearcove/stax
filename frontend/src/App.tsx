@@ -12,7 +12,7 @@ import {
   LuChevronDown,
   LuCheck,
 } from "react-icons/lu";
-import { SiRust, SiC, SiCplusplus } from "react-icons/si";
+import { SiRust, SiC, SiCplusplus, SiSwift } from "react-icons/si";
 import {
   connectProfiler,
   type AnnotatedView,
@@ -555,13 +555,19 @@ function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-type LangKind = "rust" | "c" | "cpp" | "asm" | "unknown";
+type LangKind = "rust" | "c" | "cpp" | "swift" | "asm" | "unknown";
 export type ObjKind = "main" | "system" | "dylib" | "unknown";
 type PaneTab = "asm" | "neighbors";
 
 function langOf(fn: string | null | undefined): LangKind {
   if (!fn) return "unknown";
   if (fn.startsWith("0x")) return "asm";
+  // Swift v5 mangling: `$s…` (or `_$s…` with the C-ABI underscore).
+  // Swift v3/4 (legacy): `_T…`. Catch all three before the generic
+  // demangled-name heuristics, since Swift mangled symbols still
+  // contain `_` and digits that could otherwise look like C.
+  if (fn.startsWith("$s") || fn.startsWith("_$s") || fn.startsWith("_T"))
+    return "swift";
   if (fn.includes("::")) return "rust";
   // C++ template in symbol name (e.g. `std::__1::vector<…>`) is caught
   // above by `::`. What remains and contains <> is rare but mostly C++.
@@ -643,6 +649,8 @@ function langIcon(lang: LangKind) {
       return <SiC title="C" />;
     case "cpp":
       return <SiCplusplus title="C++" />;
+    case "swift":
+      return <SiSwift title="Swift" />;
     case "asm":
       return <LuBinary title="machine code" />;
     case "unknown":

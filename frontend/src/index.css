@@ -90,6 +90,7 @@
   --lang-rust: #ce9178;
   --lang-c: #61afef;
   --lang-cpp: #c678dd;
+  --lang-swift: #f05138;
   --lang-asm: #8a909a;
 
   font-family: var(--font-ui);
@@ -143,6 +144,7 @@
   --lang-rust: #b56236;
   --lang-c: #2f6fb8;
   --lang-cpp: #8a3aa8;
+  --lang-swift: #d4441f;
   --lang-asm: #5a626c;
 
   color-scheme: light;
@@ -1021,6 +1023,7 @@ td.entry {
 .glyph.lang-rust { color: var(--lang-rust); }
 .glyph.lang-c { color: var(--lang-c); }
 .glyph.lang-cpp { color: var(--lang-cpp); }
+.glyph.lang-swift { color: var(--lang-swift); }
 .glyph.lang-asm { color: var(--lang-asm); }
 .glyph.lang-unknown { color: var(--text-muted); }
 
