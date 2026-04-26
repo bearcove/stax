@@ -7,6 +7,8 @@ import {
   LuBinary,
   LuSettings,
   LuPause,
+  LuSun,
+  LuMoon,
 } from "react-icons/lu";
 import { SiRust, SiC, SiCplusplus } from "react-icons/si";
 import {
@@ -26,6 +28,24 @@ import { Neighbors } from "./Neighbors.tsx";
 import { Timeline } from "./Timeline.tsx";
 
 type Status = "pending" | "ok" | "err";
+type Theme = "dark" | "light";
+
+/// Read the stored theme on first paint, falling back to the OS
+/// preference. Wrapped in try/catch because some embedding contexts
+/// throw on `localStorage` access.
+function initialTheme(): Theme {
+  try {
+    const stored = localStorage.getItem("nperf-theme");
+    if (stored === "light" || stored === "dark") return stored;
+  } catch {}
+  if (
+    typeof window !== "undefined" &&
+    window.matchMedia?.("(prefers-color-scheme: light)").matches
+  ) {
+    return "light";
+  }
+  return "dark";
+}
 
 export const EMPTY_FILTER: LiveFilter = {
   time_range: null,
@@ -70,6 +90,16 @@ export function App() {
   const [flameFocusKey, setFlameFocusKey] = useState<string | null>(null);
   const [menu, setMenu] = useState<ContextMenuTarget | null>(null);
   const [filter, setFilter] = useState<LiveFilter>(EMPTY_FILTER);
+  const [theme, setTheme] = useState<Theme>(initialTheme);
+
+  // Reflect the theme onto the <html> element so the CSS tokens flip,
+  // and persist the user's choice across reloads.
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    try {
+      localStorage.setItem("nperf-theme", theme);
+    } catch {}
+  }, [theme]);
 
   const dropSymbol = (s: { function_name: string | null; binary: string | null }) => {
     setFilter((prev) => {
@@ -282,6 +312,15 @@ export function App() {
             </button>
           </span>
           <KindFilter hidden={hiddenKinds} onChange={setHiddenKinds} />
+          <button
+            type="button"
+            className="theme-toggle"
+            onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+            title={`switch to ${theme === "dark" ? "light" : "dark"} mode`}
+            aria-label="toggle color theme"
+          >
+            {theme === "dark" ? <LuSun /> : <LuMoon />}
+          </button>
           <span className="spacer" />
           <span className="meta">
             {displayed
