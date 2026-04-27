@@ -27,6 +27,7 @@ use crate::aggregator::{PmcAccum, PmuSample, RawSample, RawTopEntry};
 
 mod aggregator;
 mod binaries;
+mod classify;
 mod disassemble;
 mod highlight;
 mod source;
@@ -491,15 +492,15 @@ fn build_wakers_update(
 }
 
 fn is_filter_empty(filter: &LiveFilter) -> bool {
-    filter.time_range.is_none()
-        && filter.exclude_symbols.is_empty()
-        && matches!(filter.sample_mode, nperf_live_proto::SampleMode::Both)
+    filter.time_range.is_none() && filter.exclude_symbols.is_empty()
 }
 
 /// Build the predicate that `aggregate_filtered` calls for each raw
 /// sample. Captures `filter` + `binaries` + the recording origin so
-/// time-range, sample-mode, and exclude-symbol filters can all be
-/// applied in one pass.
+/// time-range and exclude-symbol filters can be applied in one pass.
+/// On/off-CPU split is no longer a filter -- every aggregated node
+/// carries both kinds in separate fields and the UI picks which one
+/// to render.
 fn make_predicate<'a>(
     filter: &'a LiveFilter,
     session_start_ns: u64,
@@ -512,19 +513,6 @@ fn make_predicate<'a>(
         .map(|s| (s.function_name.clone(), s.binary.clone()))
         .collect();
     move |sample: &RawSample| {
-        match filter.sample_mode {
-            nperf_live_proto::SampleMode::Both => {}
-            nperf_live_proto::SampleMode::OnCpu => {
-                if sample.is_offcpu {
-                    return false;
-                }
-            }
-            nperf_live_proto::SampleMode::OffCpu => {
-                if !sample.is_offcpu {
-                    return false;
-                }
-            }
-        }
         if let Some(ref tr) = filter.time_range {
             let rel = sample.timestamp_ns.saturating_sub(session_start_ns);
             if rel < tr.start_ns || rel >= tr.end_ns {

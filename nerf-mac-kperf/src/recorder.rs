@@ -349,7 +349,22 @@ impl<'a> Session<'a> {
     /// subsystem, after which `kdebug::reset` and friends would EBUSY.
     /// The exclusive lock doesn't block reads (`KERN_KDREADTR`), so the
     /// drain loop keeps working.
+    ///
+    /// `lightweight_pet=1` is essential: in that mode PET samples only
+    /// threads that are *actually running on a CPU at the moment of
+    /// the tick*. Without it (lightweight_pet=0, the "heavy PET"
+    /// path), kperf walks every thread in the target -- including
+    /// parked ones -- and emits a sample with the thread's frozen
+    /// last user PC. Those parked-thread samples sit in the syscall
+    /// stub of whatever made the thread block (`__psynch_cvwait`,
+    /// `mach_msg2_trap`, ...). When we then weight every sample by
+    /// the sampling period, the on-CPU view shows 27s of "cvwait
+    /// time" for a thread that never actually ran cvwait for 27s --
+    /// it just got caught parked there 27,000 times. Off-CPU has its
+    /// own real-interval channel (MACH_SCHED records); we don't need
+    /// PET to also fake it.
     fn arm(&mut self) -> Result<(), Error> {
+        kdebug::set_lightweight_pet(1)?;
         kperf_call(unsafe { (self.fw.kperf_sample_set)(1) }, "sample_set")?;
         Ok(())
     }
