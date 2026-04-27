@@ -221,10 +221,11 @@ pub struct RecordArgs {
     pub mac_backend: String,
 
     /// macOS-only: when `--mac-backend daemon` is selected, the local
-    /// socket path to connect to. Defaults to /tmp/nperfd.sock for
-    /// hand-running the daemon; production deployments via launchd put
-    /// it under /var/run/nperfd.sock.
-    #[structopt(long, default_value = "/tmp/nperfd.sock")]
+    /// socket path to connect to. Default matches the LaunchDaemon
+    /// plist installed by `sudo nperf setup`. Override with `--socket`
+    /// when hand-running `nperfd` on a different path (e.g.
+    /// /tmp/nperfd.sock for dev).
+    #[structopt(long, default_value = "/var/run/nperfd.sock")]
     pub daemon_socket: String,
 
     /// Arguments to pass to the launched child process. Use `--` to
