@@ -1994,6 +1994,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "nperfd-client"
+version = "0.1.0"
+dependencies = [
+ "nerf-mac-capture",
+ "nerf-mac-kperf-parse",
+ "nerf-mac-kperf-sys",
+ "nperf-mac-shared-cache",
+ "nperfd-proto",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "vox",
+]
+
+[[package]]
 name = "nperfd-proto"
 version = "0.1.0"
 dependencies = [

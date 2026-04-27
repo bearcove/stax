@@ -1,0 +1,18 @@
+[package]
+name = "nperfd-client"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "MIT OR Apache-2.0"
+description = "Client-side driver for the nperfd RPC. Connects to the root daemon over a vox local socket, asks it to record a target pid, receives the streaming kdebug records, and runs them through the existing nerf-mac-kperf-parse parser + libproc-based image / thread enumeration. Output goes to whatever `SampleSink` the caller provides — same trait the in-process recorder hands events to, so live UI / archive sinks plug in unchanged."
+
+[target.'cfg(target_os = "macos")'.dependencies]
+nperfd-proto = { path = "../nperfd-proto" }
+nerf-mac-kperf-sys = { version = "0.1", path = "../nerf-mac-kperf-sys" }
+nerf-mac-kperf-parse = { version = "0.1", path = "../nerf-mac-kperf-parse" }
+nerf-mac-capture = { version = "0.1", path = "../nerf-mac-capture" }
+nperf-mac-shared-cache = { version = "0.1", path = "../nperf-mac-shared-cache" }
+vox = { git = "https://github.com/bearcove/vox", rev = "1bdc0aa4911765af726a4142ceb67812b0f6963d", features = ["transport-local"] }
+tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
+tracing = "0.1"
+thiserror = "2"
