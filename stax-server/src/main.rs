@@ -26,6 +26,7 @@ use stax_live_proto::{
 };
 
 const DEFAULT_SOCK_NAME: &str = "stax-server.sock";
+const DEFAULT_WS_BIND: &str = "127.0.0.1:8080";
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
@@ -43,7 +44,7 @@ async fn main() -> eyre::Result<()> {
 
     let server = ServerState::new();
 
-    let listener = vox::transport::local::LocalLinkAcceptor::bind(
+    let local_listener = vox::transport::local::LocalLinkAcceptor::bind(
         socket.to_string_lossy().into_owned(),
     )?;
     log::info!("stax-server listening on local://{}", socket.display());
@@ -51,52 +52,88 @@ async fn main() -> eyre::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600));
 
-    loop {
-        let link = match listener.accept().await {
-            Ok(l) => l,
-            Err(e) => {
-                log::warn!("stax-server: accept failed: {e}");
-                continue;
-            }
-        };
+    let ws_addr = std::env::var("STAX_SERVER_WS_BIND")
+        .unwrap_or_else(|_| DEFAULT_WS_BIND.to_owned());
+    let ws_listener = vox::WsListener::bind(&ws_addr).await?;
+    let ws_local = ws_listener.local_addr()?;
+    log::info!("stax-server listening on ws://{ws_local}");
+
+    let local_loop = tokio::spawn({
         let server = server.clone();
-        tokio::spawn(async move {
-            let factory = vox::acceptor_fn({
-                let server = server.clone();
-                move |request: &vox::ConnectionRequest,
-                      connection: vox::PendingConnection|
-                      -> Result<(), vox::Metadata<'static>> {
-                    match request.service() {
-                        "RunControl" => {
-                            connection.handle_with(RunControlDispatcher::new(server.clone()));
-                            Ok(())
-                        }
-                        "RunIngest" => {
-                            connection.handle_with(RunIngestDispatcher::new(server.clone()));
-                            Ok(())
-                        }
-                        "Profiler" => {
-                            connection.handle_with(ProfilerDispatcher::new(server.profiler()));
-                            Ok(())
-                        }
-                        other => {
-                            log::warn!("stax-server: rejecting unknown service {other:?}");
-                            Err(vec![])
-                        }
+        async move {
+            loop {
+                let link = match local_listener.accept().await {
+                    Ok(l) => l,
+                    Err(e) => {
+                        log::warn!("stax-server: local accept failed: {e}");
+                        continue;
                     }
-                }
-            });
-            let result = vox::acceptor_on(link)
-                .non_resumable()
-                .on_connection(factory)
-                .establish::<vox::NoopClient>()
-                .await;
-            match result {
-                Ok(client) => client.caller.closed().await,
-                Err(e) => log::warn!("stax-server: session establish failed: {e:?}"),
+                };
+                spawn_session_local(server.clone(), link);
             }
-        });
+        }
+    });
+    let ws_loop = tokio::spawn({
+        let server = server.clone();
+        async move {
+            if let Err(e) = vox::serve_listener(ws_listener, factory(server)).await {
+                log::error!("stax-server: ws serve exited: {e}");
+            }
+        }
+    });
+
+    tokio::select! {
+        _ = local_loop => {},
+        _ = ws_loop => {},
+        _ = tokio::signal::ctrl_c() => {
+            log::info!("stax-server: SIGINT, shutting down");
+        }
     }
+    Ok(())
+}
+
+/// Build the multi-service routing factory shared by both transports.
+fn factory(server: ServerState) -> impl vox::ConnectionAcceptor + 'static {
+    vox::acceptor_fn(move |request: &vox::ConnectionRequest,
+                            connection: vox::PendingConnection|
+                            -> Result<(), vox::Metadata<'static>> {
+        match request.service() {
+            "RunControl" => {
+                connection.handle_with(RunControlDispatcher::new(server.clone()));
+                Ok(())
+            }
+            "RunIngest" => {
+                connection.handle_with(RunIngestDispatcher::new(server.clone()));
+                Ok(())
+            }
+            "Profiler" => {
+                connection.handle_with(ProfilerDispatcher::new(server.profiler()));
+                Ok(())
+            }
+            other => {
+                log::warn!("stax-server: rejecting unknown service {other:?}");
+                Err(vec![])
+            }
+        }
+    })
+}
+
+/// Local-socket accept path uses non_resumable so the daemon notices
+/// when the recorder process disappears (resumable would keep the
+/// session in recovery mode and the per-channel send would silently
+/// succeed into a void).
+fn spawn_session_local(server: ServerState, link: vox::transport::local::LocalLink) {
+    tokio::spawn(async move {
+        let result = vox::acceptor_on(link)
+            .non_resumable()
+            .on_connection(factory(server))
+            .establish::<vox::NoopClient>()
+            .await;
+        match result {
+            Ok(client) => client.caller.closed().await,
+            Err(e) => log::warn!("stax-server: local session establish failed: {e:?}"),
+        }
+    });
 }
 
 fn resolve_socket_path() -> PathBuf {
