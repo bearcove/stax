@@ -123,14 +123,15 @@ async fn connect_to_server(
     stax_core::ingest_sink::IngestSink,
     tokio::task::JoinHandle<()>,
 )> {
+    // For child-launches the basename of the program is the
+    // useful label. For --pid attaches the target_pid field on
+    // RunSummary already carries the pid, so "(attached)" is
+    // enough — no need to repeat the pid in two columns.
     let label = args
         .command
         .first()
         .cloned()
-        .unwrap_or_else(|| match args.pid {
-            Some(p) => format!("pid {p}"),
-            None => "(unnamed)".to_owned(),
-        });
+        .unwrap_or_else(|| "(attached)".to_owned());
     let config = stax_live_proto::RunConfig {
         label,
         frequency_hz: args.frequency,

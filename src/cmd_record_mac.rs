@@ -16,8 +16,8 @@ use nwind::UserFrame;
 use crate::args::{self, TargetProcess};
 use crate::live_sink::{
     BinaryLoadedEvent as LiveBinaryLoadedEvent, BinaryUnloadedEvent as LiveBinaryUnloadedEvent,
-    LiveSink, LiveSymbol, SampleEvent as LiveSampleEvent, ThreadName as LiveThreadName,
-    WakeupEvent as LiveWakeupEvent,
+    LiveSink, LiveSymbol, SampleEvent as LiveSampleEvent, TargetAttached,
+    ThreadName as LiveThreadName, WakeupEvent as LiveWakeupEvent,
 };
 use crate::utils::SigintHandler;
 
@@ -44,6 +44,7 @@ fn record_existing_pid(
 ) -> Result<(), Box<dyn Error>> {
     info!("Recording PID {pid}");
     let mut sink = LiveOnlySink { live_sink };
+    notify_target_attached(&sink, pid);
 
     let sigint = SigintHandler::new();
     let time_limit = args.time_limit.map(Duration::from_secs);
@@ -88,6 +89,7 @@ fn record_child_launch(
     info!("Child started: PID {pid}");
 
     let mut sink = LiveOnlySink { live_sink };
+    notify_target_attached(&sink, pid);
 
     let sigint = SigintHandler::new();
     let time_limit = args.time_limit.map(Duration::from_secs);
@@ -129,6 +131,17 @@ fn record_child_launch(
 /// path.
 struct LiveOnlySink {
     live_sink: Option<Box<dyn LiveSink>>,
+}
+
+/// The daemon path doesn't surface a `task_for_pid` handle on its
+/// own (broker is a follow-up), but stax-server still wants a PID on
+/// every `RunSummary` so `stax list` / `stax status` can show
+/// something useful. Synthesise one with task_port=0 the moment we
+/// know the pid.
+fn notify_target_attached(sink: &LiveOnlySink, pid: u32) {
+    if let Some(live) = sink.live_sink.as_ref() {
+        live.on_target_attached(&TargetAttached { pid, task_port: 0 });
+    }
 }
 
 impl SampleSink for LiveOnlySink {
