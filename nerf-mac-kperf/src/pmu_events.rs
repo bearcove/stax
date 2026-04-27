@@ -174,14 +174,18 @@ pub fn configure(fw: &Frameworks) -> Option<ConfiguredPmu> {
         return None;
     }
     let mut configs: Vec<KpcConfig> = vec![0u64; KPC_MAX_COUNTERS];
+    // kpep_config_kpc's third argument is the buffer size in BYTES,
+    // not the number of entries. Passing the entry count makes kpep
+    // think the buffer is too small and bail with rc=4.
+    let buf_bytes = configs.len() * std::mem::size_of::<KpcConfig>();
     let rc = unsafe {
-        (fw.kpep_config_kpc)(config, configs.as_mut_ptr(), KPC_MAX_COUNTERS)
+        (fw.kpep_config_kpc)(config, configs.as_mut_ptr(), buf_bytes)
     };
     if rc != 0 {
         log::warn!("kpep_config_kpc failed (rc={rc})");
         return None;
     }
-    configs.truncate(count.max(KPC_MAX_COUNTERS));
+    configs.truncate(count.min(KPC_MAX_COUNTERS));
 
     let mut class_mask = KPC_CLASS_FIXED_MASK;
     let mut config_classes: u32 = 0;
