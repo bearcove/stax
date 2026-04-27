@@ -21,12 +21,13 @@ use std::time::{Duration, Instant};
 
 use nerf_mac_capture::proc_maps::MachOSymbol;
 use nerf_mac_capture::recorder::ThreadNameCache;
+use nerf_mac_capture::sample_sink::{CpuIntervalEvent, CpuIntervalKind};
 use nerf_mac_capture::{
     BinaryLoadedEvent, JitdumpEvent, SampleEvent, SampleSink, ThreadNameEvent, WakeupEvent,
 };
 use nerf_mac_kperf_parse::image_scan::ImageScanner;
 use nerf_mac_kperf_parse::libproc;
-use nerf_mac_kperf_parse::offcpu::CpuIntervalTracker;
+use nerf_mac_kperf_parse::offcpu::{CpuIntervalTracker, PendingKind};
 use nerf_mac_kperf_parse::parser::Parser;
 use nerf_mac_kperf_sys::bindings::sampler;
 use nerf_mac_kperf_sys::kdebug::{
@@ -328,6 +329,25 @@ fn process_batch<S: SampleSink>(
             continue;
         }
         parser.feed(&rec, |sample| {
+            // Cache the on-CPU stack on the offcpu tracker. This is
+            // what the next off-CPU interval gets attributed to —
+            // without it, every off-CPU interval surfaces with an
+            // empty user stack and shows up under "(no stack)" in
+            // the UI.
+            offcpu.note_sample(
+                sample.tid,
+                sample.user_backtrace,
+                sample.kernel_backtrace,
+            );
+            // Drop empty-user-stack samples for the same reason
+            // the in-process recorder does (recorder.rs:615): with
+            // lightweight_pet=0 the kernel emits a sample bracket
+            // for every thread on every tick, including blocked
+            // ones with no live user PC. Forwarding those just
+            // inflates the in-kernel residue.
+            if sample.user_backtrace.is_empty() {
+                return;
+            }
             sink.on_sample(SampleEvent {
                 timestamp_ns: sample.timestamp_ns,
                 pid,
@@ -342,8 +362,12 @@ fn process_batch<S: SampleSink>(
         });
     }
 
-    // Wakeups + closed off-CPU intervals fall out of the tracker as
-    // batches; same shape the in-process driver emits.
+    // Wakeups + closed CPU intervals (on/off) fall out of the tracker
+    // per batch, same shape the in-process driver emits. Without the
+    // interval forwarding, the aggregator never gets time accounting
+    // and the UI's on-CPU/off-CPU totals stay at 0 even though PET
+    // samples are accumulating. recorder.rs:647-693 is the canonical
+    // version of this; we mirror it here.
     for w in offcpu.drain_wakeups() {
         sink.on_wakeup(WakeupEvent {
             timestamp_ns: w.timestamp_ns,
@@ -353,6 +377,37 @@ fn process_batch<S: SampleSink>(
             waker_user_stack: &w.waker_user_stack,
             waker_kernel_stack: &w.waker_kernel_stack,
         });
+    }
+    for interval in offcpu.drain_pending() {
+        match interval.kind {
+            PendingKind::OnCpu => {
+                sink.on_cpu_interval(CpuIntervalEvent {
+                    pid,
+                    tid: interval.tid,
+                    start_ns: interval.start_ns,
+                    end_ns: interval.end_ns,
+                    kind: CpuIntervalKind::OnCpu,
+                });
+            }
+            PendingKind::OffCpu {
+                user_stack,
+                kernel_stack: _,
+                waker_tid,
+                waker_user_stack,
+            } => {
+                sink.on_cpu_interval(CpuIntervalEvent {
+                    pid,
+                    tid: interval.tid,
+                    start_ns: interval.start_ns,
+                    end_ns: interval.end_ns,
+                    kind: CpuIntervalKind::OffCpu {
+                        stack: &user_stack,
+                        waker_tid,
+                        waker_user_stack: waker_user_stack.as_deref(),
+                    },
+                });
+            }
+        }
     }
 }
 
