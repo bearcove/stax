@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!--
+    LaunchAgent for nperf-task-broker. Per-user (so the broker runs
+    as the user owning the inferior, satisfying AMFI's same-uid +
+    same-team-id check on task_for_pid).
+
+    Install via `cargo xtask install-broker`, which also handles
+    codesigning with com.apple.security.cs.debugger before copying.
+    Or by hand (after codesigning the binary yourself):
+
+      cp nperf-task-broker/launchd/eu.bearcove.nperf.task-broker.plist \
+         ~/Library/LaunchAgents/
+      launchctl load ~/Library/LaunchAgents/eu.bearcove.nperf.task-broker.plist
+
+    The MachServices key tells launchd to allocate a receive port for
+    us; the broker's bootstrap_check_in() picks it up at startup.
+    HideUntilCheckIn keeps the service invisible to other processes
+    until we've claimed the port — clean handoff with no race.
+-->
+<dict>
+    <key>Label</key>
+    <string>eu.bearcove.nperf.task-broker</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/nperf-task-broker</string>
+    </array>
+
+    <key>MachServices</key>
+    <dict>
+        <key>eu.bearcove.nperf.task-broker</key>
+        <dict>
+            <key>HideUntilCheckIn</key>
+            <true/>
+        </dict>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/nperf-task-broker.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/nperf-task-broker.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RUST_LOG</key>
+        <string>nperf_task_broker=info</string>
+    </dict>
+</dict>
+</plist>
