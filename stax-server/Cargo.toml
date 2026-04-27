@@ -18,7 +18,7 @@ parking_lot = "0.12"
 eyre = "0.6"
 libc = "0.2"
 
-vox = { git = "https://github.com/bearcove/vox", rev = "1bdc0aa4911765af726a4142ceb67812b0f6963d", features = ["transport-local", "transport-websocket"] }
+vox = { path = "/Users/amos/bearcove/vox/rust/vox", features = ["transport-websocket"] }
 
 [[bin]]
 name = "stax-server"

@@ -13,7 +13,7 @@ path = "src/main.rs"
 [target.'cfg(target_os = "macos")'.dependencies]
 staxd-proto = { path = "../staxd-proto" }
 stax-mac-kperf-sys = { version = "0.1", path = "../stax-mac-kperf-sys" }
-vox = { git = "https://github.com/bearcove/vox", rev = "1bdc0aa4911765af726a4142ceb67812b0f6963d", features = ["transport-local"] }
+vox = { path = "/Users/amos/bearcove/vox/rust/vox" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

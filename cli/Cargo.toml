@@ -12,7 +12,7 @@ facet = { version = "0.46" }
 figue = { version = "2.0" }
 stax-core = { path = "..", default-features = false }
 stax-live-proto = { path = "../stax-live-proto" }
-vox = { git = "https://github.com/bearcove/vox", rev = "1bdc0aa4911765af726a4142ceb67812b0f6963d", features = ["transport-local"] }
+vox = { path = "/Users/amos/bearcove/vox/rust/vox" }
 
 [dependencies.stax-live]
 path = "../stax-live"

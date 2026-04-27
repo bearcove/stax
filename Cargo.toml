@@ -10,7 +10,7 @@ facet = { version = "0.46" }
 figue = { version = "2.0" }
 eyre = "0.6"
 stax-live-proto = { path = "stax-live-proto" }
-vox = { git = "https://github.com/bearcove/vox", rev = "1bdc0aa4911765af726a4142ceb67812b0f6963d", features = ["transport-local"] }
+vox = { path = "/Users/amos/bearcove/vox/rust/vox" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 stax-mac-capture = { version = "0.1", path = "stax-mac-capture" }
@@ -34,37 +34,22 @@ debug-logs = ["nwind/debug-logs"]
 
 [workspace]
 members = [
-    ".",
-    "cli",
-    "nwind",
-    "proc-maps",
-    "thread-local-reentrant",
-    "stax-mac-capture",
-    "stax-mac-kperf-sys",
-    "stax-mac-kperf-parse",
-    "stax-mac-shared-cache",
-    "xtask",
-    "stax-live",
-    "stax-live-proto",
-    "stax-server",
-    "stax-demangle",
-    "staxd-proto",
-    "staxd",
-    "staxd-client",
+  ".",
+  "cli",
+  "nwind",
+  "proc-maps",
+  "thread-local-reentrant",
+  "stax-mac-capture",
+  "stax-mac-kperf-sys",
+  "stax-mac-kperf-parse",
+  "stax-mac-shared-cache",
+  "xtask",
+  "stax-live",
+  "stax-live-proto",
+  "stax-server",
+  "stax-demangle",
+  "staxd-proto",
+  "staxd",
+  "staxd-client",
 ]
 
-[patch."https://github.com/bearcove/vox"]
-vox = { path = "/Users/amos/bearcove/vox/rust/vox" }
-vox-core = { path = "/Users/amos/bearcove/vox/rust/vox-core" }
-vox-types = { path = "/Users/amos/bearcove/vox/rust/vox-types" }
-vox-stream = { path = "/Users/amos/bearcove/vox/rust/vox-stream" }
-vox-websocket = { path = "/Users/amos/bearcove/vox/rust/vox-websocket" }
-vox-postcard = { path = "/Users/amos/bearcove/vox/rust/vox-postcard" }
-vox-jit = { path = "/Users/amos/bearcove/vox/rust/vox-jit" }
-vox-jit-abi = { path = "/Users/amos/bearcove/vox/rust/vox-jit-abi" }
-vox-jit-cal = { path = "/Users/amos/bearcove/vox/rust/vox-jit-cal" }
-vox-macros-core = { path = "/Users/amos/bearcove/vox/rust/vox-macros-core" }
-vox-macros-parse = { path = "/Users/amos/bearcove/vox/rust/vox-macros-parse" }
-vox-schema = { path = "/Users/amos/bearcove/vox/rust/vox-schema" }
-vox-service-macros = { path = "/Users/amos/bearcove/vox/rust/vox-macros" }
-vox-codegen = { path = "/Users/amos/bearcove/vox/rust/vox-codegen" }
