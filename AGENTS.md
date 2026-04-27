@@ -231,6 +231,35 @@ $ stax top -n 5
     …
 ```
 
+### `stax flame [-d MAX_DEPTH] [--threshold-pct PCT] [--tid TID]`
+
+Print the on-CPU flamegraph as an indented Markdown tree, sorted by
+`on_cpu_ns` descending at each level. Same data the web UI renders;
+this is the agent-friendly view of "where is the time going."
+
+- `-d / --max-depth N` — cut off the tree at depth N (default 12).
+  Children below the cut-off are summarised as `…N more frames`.
+- `--threshold-pct PCT` — hide subtrees whose share of total
+  on-CPU falls below `PCT` (default 1%; pass `0` for the whole tree).
+- `--tid` — filter to one thread.
+
+Operates on the current run's aggregator (same rules as `stax top`).
+
+```
+$ stax flame -d 4 --threshold-pct 2
+# stax flame · total on-CPU 2.503s · off-CPU 4.122s
+
+`​``
+   2503ms 100.0%  (root)
+   1201ms  48.0%    └─ vox_jit::translate  (libvox.dylib)
+    901ms  36.0%      └─ cranelift::lower  (libcranelift.dylib)
+    402ms  16.0%        └─ cranelift::regalloc  (libcranelift.dylib)
+    200ms   8.0%      └─ vox_postcard::deserialize  (libvox.dylib)
+    802ms  32.1%    └─ tokio::runtime::poll_task  (libtokio.dylib)
+        …18 more frames
+`​``
+```
+
 ### `stax annotate <TARGET> [--tid TID]`
 
 Disassemble + annotate one function from the current run.

@@ -5,12 +5,12 @@ use std::process::exit;
 
 use figue as args;
 use stax_core::{
-    args::{AnnotateArgs, Cli, Command, RecordArgs, TopArgs, WaitArgs},
+    args::{AnnotateArgs, Cli, Command, FlameArgs, RecordArgs, TopArgs, WaitArgs},
     cmd_record_mac, cmd_setup_mac,
 };
 use stax_live_proto::{
-    LiveFilter, ProfilerClient, RunControlClient, RunSummary, ServerStatus, TopSort, ViewParams,
-    WaitCondition, WaitOutcome,
+    FlameNode, FlamegraphUpdate, LiveFilter, ProfilerClient, RunControlClient, RunSummary,
+    ServerStatus, TopSort, ViewParams, WaitCondition, WaitOutcome,
 };
 
 fn main_impl() -> Result<(), Box<dyn Error>> {
@@ -46,6 +46,7 @@ fn main_impl() -> Result<(), Box<dyn Error>> {
         Command::Stop => block_on_async(async { run_stop().await })?,
         Command::Top(args) => block_on_async(async { run_top(args).await })?,
         Command::Annotate(args) => block_on_async(async { run_annotate(args).await })?,
+        Command::Flame(args) => block_on_async(async { run_flame(args).await })?,
     }
     Ok(())
 }
@@ -317,6 +318,124 @@ async fn run_annotate(args: AnnotateArgs) -> Result<(), Box<dyn Error>> {
         }
     });
     Ok(())
+}
+
+async fn run_flame(args: FlameArgs) -> Result<(), Box<dyn Error>> {
+    let url = require_server_socket()?;
+    let client: ProfilerClient = vox::connect(&url).await?;
+    // subscribe_flamegraph streams updates every ~500ms; take the
+    // first snapshot and drop the channel.
+    let (tx, mut rx) = vox::channel();
+    client
+        .subscribe_flamegraph(
+            ViewParams {
+                tid: args.tid,
+                filter: LiveFilter {
+                    time_range: None,
+                    exclude_symbols: Vec::new(),
+                },
+            },
+            tx,
+        )
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+    let view_sref = rx
+        .recv()
+        .await
+        .map_err(|e| format!("{e:?}"))?
+        .ok_or("flamegraph stream closed before sending an update")?;
+    view_sref.map(|update| {
+        print_flame(&update, args.max_depth, args.threshold_pct);
+    });
+    Ok(())
+}
+
+fn print_flame(update: &FlamegraphUpdate, max_depth: usize, threshold_pct: f64) {
+    let total = update.total_on_cpu_ns.max(1) as f64;
+    println!(
+        "# stax flame · total on-CPU {:.3}s · off-CPU {:.3}s",
+        update.total_on_cpu_ns as f64 / 1e9,
+        off_cpu_total_ns(&update.total_off_cpu) as f64 / 1e9,
+    );
+    if let Some(tid) = update.root.children.first().map(|_| None::<u32>).flatten() {
+        // placeholder — root has no tid annotation; left as a hook
+        // for future per-thread renders.
+        let _ = tid;
+    }
+    println!();
+    println!("```");
+    print_flame_node(&update.root, &update.strings, total, threshold_pct, 0, max_depth);
+    println!("```");
+}
+
+fn off_cpu_total_ns(b: &stax_live_proto::OffCpuBreakdown) -> u64 {
+    b.idle_ns
+        + b.lock_ns
+        + b.semaphore_ns
+        + b.ipc_ns
+        + b.io_read_ns
+        + b.io_write_ns
+        + b.readiness_ns
+        + b.sleep_ns
+        + b.connect_ns
+        + b.other_ns
+}
+
+fn print_flame_node(
+    node: &FlameNode,
+    strings: &[String],
+    total_ns: f64,
+    threshold_pct: f64,
+    depth: usize,
+    max_depth: usize,
+) {
+    let pct = node.on_cpu_ns as f64 / total_ns * 100.0;
+    if depth > 0 && pct < threshold_pct {
+        return;
+    }
+
+    let label = if depth == 0 {
+        "(root)".to_owned()
+    } else {
+        let name = node
+            .function_name
+            .and_then(|i| strings.get(i as usize).map(String::as_str))
+            .unwrap_or("<unresolved>");
+        let bin = node
+            .binary
+            .and_then(|i| strings.get(i as usize).map(String::as_str))
+            .unwrap_or("?");
+        format!("{name}  ({bin})")
+    };
+    let indent = "  ".repeat(depth);
+    println!(
+        "{:>8.2}ms {:>5.1}%  {indent}{prefix}{label}",
+        node.on_cpu_ns as f64 / 1e6,
+        pct,
+        indent = indent,
+        prefix = if depth == 0 { "" } else { "└─ " },
+        label = label,
+    );
+
+    if depth + 1 > max_depth {
+        if !node.children.is_empty() {
+            let truncated = node.children.len();
+            println!(
+                "{indent}   …{truncated} more frame{plural}",
+                indent = "  ".repeat(depth + 1),
+                truncated = truncated,
+                plural = if truncated == 1 { "" } else { "s" }
+            );
+        }
+        return;
+    }
+
+    // Sort children by on_cpu_ns descending for a focused view.
+    let mut children: Vec<&FlameNode> = node.children.iter().collect();
+    children.sort_by(|a, b| b.on_cpu_ns.cmp(&a.on_cpu_ns));
+    for child in children {
+        print_flame_node(child, strings, total_ns, threshold_pct, depth + 1, max_depth);
+    }
 }
 
 fn parse_address(raw: &str) -> Option<u64> {

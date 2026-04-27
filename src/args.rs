@@ -47,6 +47,9 @@ pub enum Command {
 
     /// Disassemble + annotate a function from the active run.
     Annotate(AnnotateArgs),
+
+    /// Print the on-CPU flamegraph as an indented tree.
+    Flame(FlameArgs),
 }
 
 #[derive(Facet, Debug)]
@@ -82,6 +85,25 @@ pub struct TopArgs {
     /// Sort by `self` (leaf) or `total` (any frame). Default: `self`.
     #[facet(args::named, default = "self")]
     pub sort: String,
+
+    /// Filter to one thread by tid. Default: all threads.
+    #[facet(args::named, default)]
+    pub tid: Option<u32>,
+}
+
+#[derive(Facet, Debug)]
+pub struct FlameArgs {
+    /// Maximum tree depth to print. The flamegraph the server
+    /// returns is unbounded; this just controls how deep the CLI
+    /// prints (children below the cut-off are summarised as
+    /// `…<N more frames>`).
+    #[facet(args::named, args::short = 'd', default = 12)]
+    pub max_depth: usize,
+
+    /// Hide nodes whose share of the total on-CPU time falls
+    /// below this percent. `0` to print everything.
+    #[facet(args::named, default = 1.0)]
+    pub threshold_pct: f64,
 
     /// Filter to one thread by tid. Default: all threads.
     #[facet(args::named, default)]
