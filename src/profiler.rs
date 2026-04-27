@@ -797,6 +797,12 @@ impl ProfilingController {
                     cpu: event.cpu,
                     kernel_backtrace: &event.kernel_backtrace,
                     user_backtrace: &user_backtrace,
+                    // Linux backend doesn't surface its sampling
+                    // period here; assume the perf default 1kHz so
+                    // each sample stands in for 1ms of wall-clock
+                    // time. Wire this through if/when the Linux
+                    // recorder grows a configurable rate.
+                    duration_ns: 1_000_000,
                     is_offcpu: false,
                     cycles: 0,
                     instructions: 0,

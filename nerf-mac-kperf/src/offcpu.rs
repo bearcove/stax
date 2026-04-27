@@ -88,7 +88,17 @@ impl OffCpuTracker {
     /// Cache the most recent on-CPU stack for a thread. Called on
     /// every kperf PET sample. The cached stack is what we attribute
     /// any subsequent off-CPU interval to.
+    ///
+    /// Samples taken while the thread was in-kernel typically have
+    /// `kernel` populated and `user` empty. If we wrote those over
+    /// the cache, every later off-CPU expansion would emit synthetic
+    /// samples with empty user stacks — even though a perfectly good
+    /// user stack was sampled moments before. Skip the update when
+    /// there's no user side to record.
     pub fn note_sample(&mut self, tid: u32, user: &[u64], kernel: &[u64]) {
+        if user.is_empty() {
+            return;
+        }
         let st = self.threads.entry(tid as u64).or_default();
         st.last_user_stack.clear();
         st.last_user_stack.extend_from_slice(user);
@@ -131,10 +141,13 @@ impl OffCpuTracker {
                         let interval_ns = ts.saturating_sub(off_ns);
                         st.total_off_ns = st.total_off_ns.saturating_add(interval_ns);
                         // Only emit synthetic samples if we have a
-                        // stack to attribute them to. Without a prior
-                        // on-CPU sample for this thread we'd just be
-                        // emitting empty stacks.
-                        if !st.last_user_stack.is_empty() || !st.last_kernel_stack.is_empty() {
+                        // user stack to attribute them to. Without
+                        // one, the synthetic samples would just
+                        // inflate `total_samples` without adding
+                        // anything to the user-side flame graph
+                        // (where they'd land in the "in-kernel / no
+                        // user stack" residue).
+                        if !st.last_user_stack.is_empty() {
                             self.pending.push(OffCpuInterval {
                                 tid: new_tid as u32,
                                 off_ns,

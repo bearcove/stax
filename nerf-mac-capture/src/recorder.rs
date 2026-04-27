@@ -103,6 +103,7 @@ pub fn record_with_task_and_tick_hook<S: SampleSink>(
     apply_dyld_changes(&mut dyld_manager, &mut unwinder, task, opts.pid, sink)?;
 
     let interval = Duration::from_micros((1_000_000 / opts.frequency_hz.max(1)) as u64);
+    let sample_period_ns: u64 = (1_000_000_000u64 / opts.frequency_hz.max(1) as u64).max(1);
     let start = std::time::Instant::now();
     let mut next_tick = std::time::Instant::now();
     let mut known_threads: ThreadNameCache = ThreadNameCache::new();
@@ -139,6 +140,7 @@ pub fn record_with_task_and_tick_hook<S: SampleSink>(
             opts.pid,
             sink,
             &mut known_threads,
+            sample_period_ns,
         ) {
             Ok(()) => {}
             Err(err) => {
@@ -231,6 +233,7 @@ fn sample_all_threads<S: SampleSink>(
     pid: u32,
     sink: &mut S,
     known_threads: &mut ThreadNameCache,
+    sample_period_ns: u64,
 ) -> Result<(), SamplingError> {
     let timestamp_ns = get_monotonic_timestamp();
     let threads = ThreadList::for_task(task)?;
@@ -279,6 +282,7 @@ fn sample_all_threads<S: SampleSink>(
             tid,
             backtrace: &backtrace,
             kernel_backtrace: &[],
+            duration_ns: sample_period_ns,
             is_offcpu: false,
             cycles: 0,
             instructions: 0,

@@ -16,7 +16,7 @@ use crate::highlight::AsmHighlighter;
 pub fn disassemble(
     resolved: &ResolvedAddress,
     hl: &mut AsmHighlighter,
-    mut self_count: impl FnMut(u64) -> u64,
+    mut self_duration_ns: impl FnMut(u64) -> u64,
 ) -> Vec<AnnotatedLine> {
     let arch = resolved
         .arch
@@ -24,9 +24,9 @@ pub fn disassemble(
         .unwrap_or(host_arch());
     match arch {
         "aarch64" | "arm64" | "arm64e" => {
-            disassemble_aarch64(resolved, hl, &mut self_count)
+            disassemble_aarch64(resolved, hl, &mut self_duration_ns)
         }
-        "amd64" | "x86_64" | "x86_64h" => disassemble_amd64(resolved, hl, &mut self_count),
+        "amd64" | "x86_64" | "x86_64h" => disassemble_amd64(resolved, hl, &mut self_duration_ns),
         _ => Vec::new(),
     }
 }
@@ -44,7 +44,7 @@ fn host_arch() -> &'static str {
 fn disassemble_aarch64(
     resolved: &ResolvedAddress,
     hl: &mut AsmHighlighter,
-    self_count: &mut dyn FnMut(u64) -> u64,
+    self_duration_ns: &mut dyn FnMut(u64) -> u64,
 ) -> Vec<AnnotatedLine> {
     let decoder = Aarch64Decoder::default();
     let bytes = &resolved.bytes;
@@ -62,7 +62,7 @@ fn disassemble_aarch64(
         out.push(AnnotatedLine {
             address,
             html: hl.highlight_line(&asm),
-            self_count: self_count(address),
+            self_duration_ns: self_duration_ns(address),
             source_header: None,
         });
         offset += 4;
@@ -73,7 +73,7 @@ fn disassemble_aarch64(
 fn disassemble_amd64(
     resolved: &ResolvedAddress,
     hl: &mut AsmHighlighter,
-    self_count: &mut dyn FnMut(u64) -> u64,
+    self_duration_ns: &mut dyn FnMut(u64) -> u64,
 ) -> Vec<AnnotatedLine> {
     let decoder = Amd64Decoder::default();
     let bytes = &resolved.bytes;
@@ -89,7 +89,7 @@ fn disassemble_amd64(
                 out.push(AnnotatedLine {
                     address,
                     html: hl.highlight_line(&asm),
-                    self_count: self_count(address),
+                    self_duration_ns: self_duration_ns(address),
                     source_header: None,
                 });
                 offset += len.max(1);
@@ -98,7 +98,7 @@ fn disassemble_amd64(
                 out.push(AnnotatedLine {
                     address,
                     html: hl.highlight_line(&format!("<decode error: {}>", err)),
-                    self_count: self_count(address),
+                    self_duration_ns: self_duration_ns(address),
                     source_header: None,
                 });
                 offset += 1;

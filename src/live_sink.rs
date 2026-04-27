@@ -12,11 +12,18 @@ pub struct SampleEvent< 'a > {
     pub cpu: u32,
     pub kernel_backtrace: &'a [u64],
     pub user_backtrace: &'a [UserFrame],
-    /// Synthesised "off-CPU" sample standing in for time the thread
-    /// spent blocked between two PET ticks. Stack is borrowed from
-    /// the last on-CPU sample, the timestamp is somewhere in the
-    /// off-CPU interval. Always `false` on the Linux backend (we
-    /// don't synthesise off-CPU samples there yet).
+    /// How much wall-clock time this sample accounts for, in
+    /// nanoseconds. For an on-CPU PET sample this is the sampling
+    /// period (1ms at 1kHz). For an off-CPU sample this is the
+    /// duration the thread spent blocked at this stack. The
+    /// aggregator sums `duration_ns` per stack node so flame widths
+    /// represent wall-clock time directly, not arbitrary sample
+    /// counts.
+    pub duration_ns: u64,
+    /// `true` when this sample is synthesised for an off-CPU interval
+    /// (the thread was blocked at `user_backtrace` for `duration_ns`).
+    /// `false` for real on-CPU PET samples. Always `false` on the Linux
+    /// backend (we don't synthesise off-CPU samples there yet).
     pub is_offcpu: bool,
     /// CPU cycles consumed by the thread since the previous on-CPU
     /// sample (Apple Silicon fixed PMU counter 0). 0 on Linux and on

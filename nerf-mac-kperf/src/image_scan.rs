@@ -137,6 +137,18 @@ impl ImageScanner {
                 with_symbols += 1;
                 total_symbols += img.symbols.len();
             }
+            if img.is_executable {
+                log::warn!(
+                    "image_scan: registering executable {:?} base_avma={:#x} \
+                     end={:#x} vmsize={:#x} (region_size={:#x}) symbols={}",
+                    img.path,
+                    img.base_avma,
+                    img.base_avma + img.vmsize,
+                    img.vmsize,
+                    region_size,
+                    img.symbols.len(),
+                );
+            }
             sink.on_binary_loaded(BinaryLoadedEvent {
                 pid,
                 base_avma: img.base_avma,

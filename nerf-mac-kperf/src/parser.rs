@@ -122,11 +122,31 @@ impl Parser {
                         .rposition(|&v| v != 0)
                         .map(|i| i + 1)
                         .unwrap_or(0);
+                    // Truncate the user stack at the first NULL frame.
+                    // kperf's frame-pointer walker pushes 0 as a
+                    // "no more frames" sentinel when it reaches the
+                    // bottom of the call chain (typically just past
+                    // _pthread_start), but it also doesn't always
+                    // stop there — JIT'd code with malformed frame
+                    // pointers can send the walker into a loop, so
+                    // we sometimes see [..., real_root, 0, garbage,
+                    // garbage_loop_back_to_leaf]. Everything from the
+                    // NULL onward is unreliable; drop it.
+                    let user_len = self
+                        .user_frames
+                        .iter()
+                        .position(|&a| a == 0)
+                        .unwrap_or(self.user_frames.len());
+                    let kernel_len = self
+                        .kernel_frames
+                        .iter()
+                        .position(|&a| a == 0)
+                        .unwrap_or(self.kernel_frames.len());
                     emit(Sample {
                         timestamp_ns,
                         tid,
-                        user_backtrace: &self.user_frames,
-                        kernel_backtrace: &self.kernel_frames,
+                        user_backtrace: &self.user_frames[..user_len],
+                        kernel_backtrace: &self.kernel_frames[..kernel_len],
                         pmc: &self.pmc[..pmc_len],
                     });
                     self.stats.samples_emitted += 1;

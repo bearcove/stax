@@ -12,8 +12,12 @@ use facet::Facet;
 #[derive(Clone, Debug, Facet)]
 pub struct TopEntry {
     pub address: u64,
-    pub self_count: u64,
-    pub total_count: u64,
+    /// Wall-clock time attributed to this address as a leaf frame
+    /// (sum across samples whose stack ended here), in nanoseconds.
+    pub self_duration_ns: u64,
+    /// Wall-clock time attributed to this address as any frame on
+    /// the stack, in nanoseconds.
+    pub total_duration_ns: u64,
     /// Demangled symbol name when the live binary registry has the
     /// containing image loaded. `None` for JIT'd code, kernel frames,
     /// or images that haven't been observed yet.
@@ -42,8 +46,8 @@ pub struct TopEntry {
     /// Branch mispredicts attributed to leaf samples.
     pub self_branch_mispreds: u64,
     /// Cycles attributed to every sample that traversed this symbol
-    /// (matches `total_count` semantics). Lets the frontend compute
-    /// inclusive IPC.
+    /// (matches `total_duration_ns` semantics). Lets the frontend
+    /// compute inclusive IPC.
     pub total_cycles: u64,
     pub total_instructions: u64,
     pub total_l1d_misses: u64,
@@ -52,7 +56,10 @@ pub struct TopEntry {
 
 #[derive(Clone, Debug, Facet)]
 pub struct TopUpdate {
-    pub total_samples: u64,
+    /// Total wall-clock time covered by the underlying samples (sum
+    /// of every sample's `duration_ns`), in nanoseconds. Use as the
+    /// denominator for "X% of wall time" displays.
+    pub total_duration_ns: u64,
     pub entries: Vec<TopEntry>,
 }
 
@@ -68,7 +75,7 @@ pub enum TopSort {
 
 /// One node in the call-tree flamegraph. Address 0 is reserved for the
 /// synthetic root that aggregates all stacks. Children sum to (or are
-/// less than, after pruning) the parent's `count`.
+/// less than, after pruning) the parent's `duration_ns`.
 ///
 /// `function_name`, `binary`, and `language` are indices into the
 /// containing `FlamegraphUpdate.strings` / `NeighborsUpdate.strings`
@@ -77,7 +84,10 @@ pub enum TopSort {
 #[derive(Clone, Debug, Facet)]
 pub struct FlameNode {
     pub address: u64,
-    pub count: u64,
+    /// Wall-clock time spent at (or under) this node, in nanoseconds.
+    /// Sum of `duration_ns` across every sample whose stack passed
+    /// through this node. Flame width is proportional to this.
+    pub duration_ns: u64,
     pub function_name: Option<u32>,
     pub binary: Option<u32>,
     pub is_main: bool,
@@ -96,7 +106,10 @@ pub struct FlameNode {
 
 #[derive(Clone, Debug, Facet)]
 pub struct FlamegraphUpdate {
-    pub total_samples: u64,
+    /// Total wall-clock time covered by samples in this snapshot, in
+    /// nanoseconds. Equals `root.duration_ns` and acts as the
+    /// denominator for percentage labels.
+    pub total_duration_ns: u64,
     /// Deduplicated string table: `FlameNode.function_name`,
     /// `binary`, and `language` are indices into this. A typical
     /// session has on the order of ~50 unique (function, binary)
@@ -131,7 +144,9 @@ pub struct WakersUpdate {
 pub struct ThreadInfo {
     pub tid: u32,
     pub name: Option<String>,
-    pub sample_count: u64,
+    /// Wall-clock time covered by this thread's samples, in
+    /// nanoseconds. Used by the thread switcher to rank threads.
+    pub duration_ns: u64,
 }
 
 #[derive(Clone, Debug, Facet)]
@@ -145,8 +160,12 @@ pub struct TimelineBucket {
     /// Bucket start, in nanoseconds since the recording started (i.e.
     /// since the first sample).
     pub start_ns: u64,
-    /// Total samples whose timestamp fell into this bucket.
-    pub count: u64,
+    /// Wall-clock time attributed to this bucket, in nanoseconds.
+    /// Sum of `duration_ns` across samples whose timestamp fell into
+    /// this bucket. With samples weighted by their duration, this
+    /// directly represents activity per bucket — high bars = busy
+    /// intervals.
+    pub duration_ns: u64,
 }
 
 /// A pair of (start, end) timestamps in ns, both relative to the
@@ -207,11 +226,12 @@ pub struct TimelineUpdate {
     pub bucket_size_ns: u64,
     /// Recording duration so the UI can show "Xs elapsed" without
     /// computing it client-side.
-    pub duration_ns: u64,
-    /// Total samples observed (sum of `count` across `buckets`).
-    pub total_samples: u64,
-    /// Buckets in chronological order, dense (zero-count buckets in
-    /// the middle are emitted so the UI can map x-position → time
+    pub recording_duration_ns: u64,
+    /// Total wall-clock time covered by samples on the timeline
+    /// (sum of `duration_ns` across `buckets`).
+    pub total_duration_ns: u64,
+    /// Buckets in chronological order, dense (zero buckets in the
+    /// middle are emitted so the UI can map x-position → time
     /// directly).
     pub buckets: Vec<TimelineBucket>,
 }
@@ -242,9 +262,9 @@ pub struct NeighborsUpdate {
     pub binary: Option<u32>,
     pub is_main: bool,
     pub language: u32,
-    /// Total samples that passed through this symbol (sum across
-    /// every address resolving to it).
-    pub own_count: u64,
+    /// Total wall-clock time attributed to this symbol, in
+    /// nanoseconds (sum across every address resolving to it).
+    pub own_duration_ns: u64,
     pub callers_tree: FlameNode,
     pub callees_tree: FlameNode,
 }
@@ -272,7 +292,9 @@ pub struct AnnotatedLine {
     /// styles those tags via the generated theme.css. Render with
     /// `dangerouslySetInnerHTML`.
     pub html: String,
-    pub self_count: u64,
+    /// Wall-clock time attributed to this instruction as a leaf, in
+    /// nanoseconds.
+    pub self_duration_ns: u64,
     /// Set on the first instruction emitted for a new source location.
     /// `None` for instructions that share their source line with the
     /// previous instruction, and for binaries without DWARF.
@@ -310,7 +332,10 @@ pub trait Profiler {
         output: vox::Tx<TopUpdate>,
     );
 
-    async fn total_samples(&self) -> u64;
+    /// Total wall-clock time covered by samples, across every
+    /// thread, in nanoseconds. The recorder's `T s elapsed` reading
+    /// is `total_duration_ns / 1e9`.
+    async fn total_duration_ns(&self) -> u64;
 
     async fn subscribe_annotated(
         &self,

@@ -138,6 +138,7 @@ pub fn record<S: SampleSink>(
     let t0 = Instant::now();
     let mut session = Session::start(&fw, &opts, configured_pmu.as_ref())?;
     session.enable_kdebug(&opts)?;
+    session.arm()?;
     log::info!("kperf+kdebug arming took {:?}", t0.elapsed());
 
     drain_loop(
@@ -185,12 +186,13 @@ fn scan_thread_names<S: SampleSink>(
     let tids = match libproc::list_thread_ids(pid) {
         Ok(t) => t,
         Err(err) => {
-            log::debug!("libproc::list_thread_ids(pid={pid}) failed: {err}");
+            log::warn!("libproc::list_thread_ids(pid={pid}) failed: {err}");
             return;
         }
     };
     let mut named = 0u32;
     let mut nameless = 0u32;
+    let mut errored = 0u32;
     for tid64 in tids {
         // Truncating to u32: nerf's archive format keeps tids as u32
         // and macOS thread ids practically never overflow that.
@@ -203,12 +205,23 @@ fn scan_thread_names<S: SampleSink>(
                 }
             }
             Ok(None) => nameless += 1,
-            Err(err) => log::trace!("libproc::thread_name({tid64}) failed: {err}"),
+            Err(err) => {
+                errored += 1;
+                log::debug!("libproc::thread_name({tid64}) failed: {err}");
+            }
         }
     }
-    log::debug!(
-        "scan_thread_names: pid={pid} named={named} nameless={nameless}"
-    );
+    if errored > 0 {
+        log::warn!(
+            "scan_thread_names: pid={pid} named={named} nameless={nameless} errored={errored} \
+             -- non-zero errored count usually means proc_pidinfo(PROC_PIDTHREADINFO) is being \
+             denied; the thread switcher will only show [tid] labels for those threads"
+        );
+    } else {
+        log::debug!(
+            "scan_thread_names: pid={pid} named={named} nameless={nameless}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -224,12 +237,15 @@ struct Session<'a> {
 }
 
 impl<'a> Session<'a> {
-    /// Configure kperf actions / timers / filter, then arm sampling.
-    /// Order matches mperf's `run_with_pet` exactly: lightweight_pet
-    /// is set, then `kperf_sample_set(1)`, *before* any kdebug op.
-    /// In lightweight-PET mode kperf cooperates with the kdebug
-    /// interface rather than taking exclusive ownership, so the
-    /// subsequent `KERN_KDREMOVE` etc. are accepted.
+    /// Configure kperf actions / timers / filter. Does NOT call
+    /// `kperf_sample_set(1)` -- that's deferred to `arm()` so we can
+    /// finish kdebug setup first. Once `kperf_sample_set(1)` runs,
+    /// kperf takes exclusive ownership of ktrace and reset/set_buf_size
+    /// would fail; doing kdebug init first sidesteps that. We also
+    /// leave `kperf.lightweight_pet=0` (the post-cleanup default), so
+    /// PET walks user/kernel callstacks on every tick instead of just
+    /// when its rate-limiter happens to fire (lightweight=1 is for
+    /// counter-stat tools like mperf, not profilers).
     fn start(
         fw: &'a Frameworks,
         opts: &RecordOptions,
@@ -300,11 +316,6 @@ impl<'a> Session<'a> {
             "kpc_set_thread_counting",
         )?;
 
-        // Lightweight PET + sample_set must precede kdebug setup so
-        // kdebug ops aren't blocked by an exclusive KTRACE_KPERF.
-        kdebug::set_lightweight_pet(1)?;
-        kperf_call(unsafe { (fw.kperf_sample_set)(1) }, "sample_set")?;
-
         Ok(Self { fw, actionid, timerid })
     }
 
@@ -330,6 +341,16 @@ impl<'a> Session<'a> {
         };
         kdebug::set_filter(&mut filter)?;
         kdebug::enable(true)?;
+        Ok(())
+    }
+
+    /// Arm kperf sampling. Must be called *after* `enable_kdebug` --
+    /// `kperf_sample_set(1)` takes exclusive ownership of the ktrace
+    /// subsystem, after which `kdebug::reset` and friends would EBUSY.
+    /// The exclusive lock doesn't block reads (`KERN_KDREADTR`), so the
+    /// drain loop keeps working.
+    fn arm(&mut self) -> Result<(), Error> {
+        kperf_call(unsafe { (self.fw.kperf_sample_set)(1) }, "sample_set")?;
         Ok(())
     }
 }
@@ -400,10 +421,10 @@ fn drain_loop<S: SampleSink>(
     let jitdump_period = Duration::from_millis(500);
     let mut next_jitdump = Instant::now() + jitdump_period;
     let mut jitdump_emitted = false;
-    /// Once the jitdump file appears we tail it incrementally and
-    /// emit a synthetic BinaryLoadedEvent per `CodeLoad` record so
-    /// JIT'd functions show up in the live UI by name. The tailer
-    /// gets re-ticked alongside the existence-check polling.
+    // Once the jitdump file appears we tail it incrementally and
+    // emit a synthetic BinaryLoadedEvent per `CodeLoad` record so
+    // JIT'd functions show up in the live UI by name. The tailer
+    // gets re-ticked alongside the existence-check polling.
     let mut jitdump_tailer: Option<JitdumpTailer> = None;
 
     let mut buf: Vec<KdBuf> = vec![
@@ -426,6 +447,12 @@ fn drain_loop<S: SampleSink>(
     let mut histogram: BTreeMap<(u8, u16, u32), u64> = BTreeMap::new();
     let mut total_drained: u64 = 0;
     let mut offcpu = OffCpuTracker::new();
+    // Wall-clock duration represented by one PET tick. Samples and
+    // off-CPU intervals are weighted by ns of wall-clock time, so
+    // the aggregator works in "duration of activity" rather than
+    // "count of samples".
+    let pet_period_ns: u64 =
+        (1_000_000_000u64 / opts.frequency_hz.max(1) as u64).max(1);
     // Sums of per-thread fixed counter deltas across every sample.
     // Apple Silicon: pmc[0] = cycles, pmc[1] = instructions retired.
     // Empty-slice samples (no PMC_THREAD record arrived) contribute
@@ -512,7 +539,7 @@ fn drain_loop<S: SampleSink>(
                         });
                     }
                 }
-                Err(err) => log::trace!("jitdump_tail tick: {err}"),
+                Err(err) => log::warn!("jitdump_tail tick: {err}"),
             }
         }
 
@@ -560,6 +587,19 @@ fn drain_loop<S: SampleSink>(
                     sample.user_backtrace,
                     sample.kernel_backtrace,
                 );
+                // With full PET (lightweight_pet=0), kperf emits a
+                // sample bracket for every thread it considers on
+                // every tick — including ones that are blocked or
+                // sleeping. Those have an empty user backtrace
+                // because there's no live user PC to start from.
+                // Forwarding them to the aggregator just inflates
+                // `total_samples` and grows the "(in-kernel / no user
+                // stack)" residue until it dominates the flame. Drop
+                // them at the source: anything we keep should have a
+                // user frame to attribute time to.
+                if sample.user_backtrace.is_empty() {
+                    return;
+                }
                 let cycles = sample.pmc.first().copied().unwrap_or(0);
                 let instructions = sample.pmc.get(1).copied().unwrap_or(0);
                 let l1d_misses = pmc_idx_l1d
@@ -574,6 +614,12 @@ fn drain_loop<S: SampleSink>(
                     tid: sample.tid,
                     backtrace: sample.user_backtrace,
                     kernel_backtrace: sample.kernel_backtrace,
+                    // One PET sample stands in for one sampling
+                    // period of wall-clock time. With samples
+                    // weighted by their period, on-CPU stack widths
+                    // map directly to time -- no need for the UI to
+                    // multiply count by 1/Hz.
+                    duration_ns: pet_period_ns,
                     is_offcpu: false,
                     cycles,
                     instructions,
@@ -598,31 +644,40 @@ fn drain_loop<S: SampleSink>(
             });
         }
 
-        // Expand any off-CPU intervals that closed in this batch
-        // into synthetic wall-clock samples spaced at the PET sample
-        // period. The stack is frozen from the last on-CPU sample
-        // for the thread, so a thread blocked deep inside
-        // `mach_msg_overwrite_trap` lights up that frame for the
-        // entire blocked interval rather than disappearing from the
-        // flame graph the way it would in a CPU-only profiler.
-        let period_ns = (1_000_000_000u64 / opts.frequency_hz.max(1) as u64).max(1);
+        // Emit one off-CPU sample per closed interval, with
+        // `duration_ns` set to the actual blocked time. The stack is
+        // frozen from the last on-CPU sample for the thread, so a
+        // thread blocked deep inside `mach_msg_overwrite_trap` lights
+        // up that frame for the entire blocked interval rather than
+        // disappearing the way it would in a CPU-only profiler.
+        //
+        // Earlier this expanded each interval into N synthetic
+        // samples spaced at the sampling period, but that conflated
+        // "samples observed" with "wall time blocked" -- a thread
+        // parked for 100ms looked 100x more interesting than a busy
+        // thread sampled at 1kHz. Aggregator now works in time, so
+        // one sample per interval (carrying the actual duration)
+        // attributes the right amount of wall time to the cached
+        // stack and stops drowning the flame in identical synthetic
+        // samples.
         for interval in offcpu.drain_pending() {
-            let mut ts = interval.off_ns;
-            while ts < interval.on_ns {
-                sink.on_sample(SampleEvent {
-                    timestamp_ns: ts,
-                    pid: opts.pid,
-                    tid: interval.tid,
-                    backtrace: &interval.user_stack,
-                    kernel_backtrace: &interval.kernel_stack,
-                    is_offcpu: true,
-                    cycles: 0,
-                    instructions: 0,
-                    l1d_misses: 0,
-                    branch_mispreds: 0,
-                });
-                ts = ts.saturating_add(period_ns);
+            let interval_ns = interval.on_ns.saturating_sub(interval.off_ns);
+            if interval_ns == 0 {
+                continue;
             }
+            sink.on_sample(SampleEvent {
+                timestamp_ns: interval.off_ns,
+                pid: opts.pid,
+                tid: interval.tid,
+                backtrace: &interval.user_stack,
+                kernel_backtrace: &interval.kernel_stack,
+                duration_ns: interval_ns,
+                is_offcpu: true,
+                cycles: 0,
+                instructions: 0,
+                l1d_misses: 0,
+                branch_mispreds: 0,
+            });
         }
     }
 

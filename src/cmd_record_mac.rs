@@ -515,6 +515,7 @@ impl SampleSink for MacSink {
                 cpu: u32::MAX,
                 kernel_backtrace: &kernel_backtrace,
                 user_backtrace: &user_backtrace,
+                duration_ns: ev.duration_ns,
                 is_offcpu: ev.is_offcpu,
                 cycles: ev.cycles,
                 instructions: ev.instructions,

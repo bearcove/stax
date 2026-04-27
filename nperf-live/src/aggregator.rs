@@ -43,6 +43,7 @@ pub struct PmuSample {
 
 /// One row in `Aggregator::top_wakers`: how many times waker_tid
 /// (with leaf frame at `waker_leaf_address`) woke the queried thread.
+/// Wakeups are counts, not durations -- they're discrete events.
 #[derive(Clone, Copy)]
 pub struct RawWakerEntry {
     pub waker_tid: u32,
@@ -53,8 +54,13 @@ pub struct RawWakerEntry {
 #[derive(Clone, Copy)]
 pub struct RawTopEntry {
     pub address: u64,
-    pub self_count: u64,
-    pub total_count: u64,
+    /// Wall-clock time attributed to this address as the leaf frame,
+    /// in nanoseconds (sum across every sample whose stack ended in
+    /// this address).
+    pub self_duration_ns: u64,
+    /// Wall-clock time attributed to this address anywhere on the
+    /// stack, in nanoseconds.
+    pub total_duration_ns: u64,
     pub self_pmc: PmcAccum,
     pub total_pmc: PmcAccum,
 }
@@ -64,63 +70,73 @@ pub struct RawTopEntry {
 /// predicate. The flame root is owned (no Cow) since it's freshly
 /// constructed.
 pub struct FilteredAggregation {
-    pub self_counts: HashMap<u64, u64>,
-    pub total_counts: HashMap<u64, u64>,
+    /// `address -> ns of wall-clock attributed to that address as a
+    /// leaf frame` (sum of `RawSample::duration_ns` across samples
+    /// whose stack ended in that address).
+    pub self_durations: HashMap<u64, u64>,
+    /// Same idea but attribution is "any frame on the stack",
+    /// matching `total_pmc` semantics.
+    pub total_durations: HashMap<u64, u64>,
     pub self_pmc: HashMap<u64, PmcAccum>,
     pub total_pmc: HashMap<u64, PmcAccum>,
-    pub total_samples: u64,
+    /// Total wall-clock time covered by samples that passed the
+    /// predicate, in nanoseconds.
+    pub total_duration_ns: u64,
     pub flame_root: StackNode,
 }
 
 impl FilteredAggregation {
     pub fn top_raw(&self, limit: usize) -> Vec<RawTopEntry> {
         let mut entries: Vec<RawTopEntry> = self
-            .total_counts
+            .total_durations
             .iter()
-            .map(|(&address, &total_count)| RawTopEntry {
+            .map(|(&address, &total_duration_ns)| RawTopEntry {
                 address,
-                self_count: self.self_counts.get(&address).copied().unwrap_or(0),
-                total_count,
+                self_duration_ns: self.self_durations.get(&address).copied().unwrap_or(0),
+                total_duration_ns,
                 self_pmc: self.self_pmc.get(&address).copied().unwrap_or_default(),
                 total_pmc: self.total_pmc.get(&address).copied().unwrap_or_default(),
             })
             .collect();
         entries.sort_by(|a, b| {
-            b.self_count
-                .cmp(&a.self_count)
-                .then_with(|| b.total_count.cmp(&a.total_count))
+            b.self_duration_ns
+                .cmp(&a.self_duration_ns)
+                .then_with(|| b.total_duration_ns.cmp(&a.total_duration_ns))
         });
         entries.truncate(limit);
         entries
     }
 
-    pub fn self_count(&self, address: u64) -> u64 {
-        self.self_counts.get(&address).copied().unwrap_or(0)
+    pub fn self_duration_ns(&self, address: u64) -> u64 {
+        self.self_durations.get(&address).copied().unwrap_or(0)
     }
 }
 
 /// Aggregated state for one specific thread, plus a capped log of raw
-/// samples (timestamp + stack). The pre-aggregated maps + tree make
-/// no-filter queries cheap; the raw log lets us re-aggregate over a
-/// time slice or, eventually, exclude/focus on stacks containing a
-/// given symbol.
+/// samples. The pre-aggregated maps + tree make no-filter queries
+/// cheap; the raw log lets us re-aggregate over a time slice or
+/// exclude/focus on stacks containing a given symbol.
+///
+/// Every accumulated value is in nanoseconds of wall-clock time --
+/// the aggregator's unit is duration, not sample count.
 pub struct ThreadStats {
-    self_counts: HashMap<u64, u64>,
-    total_counts: HashMap<u64, u64>,
-    total_samples: u64,
+    self_durations: HashMap<u64, u64>,
+    total_durations: HashMap<u64, u64>,
+    /// Wall-clock time covered by samples for this thread, in ns.
+    total_duration_ns: u64,
     /// Wakeups received by this thread, capped FIFO so memory is
     /// bounded the same way `samples` is.
     pub(crate) wakeups: std::collections::VecDeque<RawWakeup>,
     /// Same maps, but counting only off-CPU samples. Lets queries
     /// pick "wall clock" / "on-CPU only" / "off-CPU only" views by
     /// subtracting one from the other (no extra raw-log scan).
-    offcpu_self_counts: HashMap<u64, u64>,
-    offcpu_total_counts: HashMap<u64, u64>,
-    offcpu_samples: u64,
+    offcpu_self_durations: HashMap<u64, u64>,
+    offcpu_total_durations: HashMap<u64, u64>,
+    offcpu_duration_ns: u64,
     /// PMU counter accumulators (cycles + instructions retired)
     /// keyed by symbol address. `self_pmc` is attributed to the leaf
     /// frame of each sample; `total_pmc` includes the sample at every
-    /// frame on its stack (matching `total_counts` semantics).
+    /// frame on its stack (matching `total_durations` semantics).
     self_pmc: HashMap<u64, PmcAccum>,
     total_pmc: HashMap<u64, PmcAccum>,
     pub(crate) flame_root: StackNode,
@@ -133,13 +149,13 @@ pub struct ThreadStats {
 impl Default for ThreadStats {
     fn default() -> Self {
         Self {
-            self_counts: HashMap::new(),
-            total_counts: HashMap::new(),
-            total_samples: 0,
+            self_durations: HashMap::new(),
+            total_durations: HashMap::new(),
+            total_duration_ns: 0,
             wakeups: std::collections::VecDeque::new(),
-            offcpu_self_counts: HashMap::new(),
-            offcpu_total_counts: HashMap::new(),
-            offcpu_samples: 0,
+            offcpu_self_durations: HashMap::new(),
+            offcpu_total_durations: HashMap::new(),
+            offcpu_duration_ns: 0,
             self_pmc: HashMap::new(),
             total_pmc: HashMap::new(),
             flame_root: StackNode::default(),
@@ -152,14 +168,17 @@ impl Default for ThreadStats {
 /// feeds in). Kept boxed so the VecDeque stores fixed-size handles.
 pub struct RawSample {
     pub timestamp_ns: u64,
+    /// How much wall-clock time this sample accounts for. Sampling
+    /// period for on-CPU PET ticks (1ms at 1kHz); interval length
+    /// for off-CPU intervals.
+    pub duration_ns: u64,
     pub stack: Box<[u64]>,
-    /// `true` if this sample was synthesised to fill an off-CPU
-    /// interval (the thread was blocked, stack frozen from the last
-    /// on-CPU sample). Lets the UI filter wall-clock vs strict
-    /// on-CPU views.
+    /// `true` if this sample stands in for an off-CPU interval (the
+    /// thread was blocked at this stack for `duration_ns`). Lets the
+    /// UI filter wall-clock vs strict on-CPU views.
     pub is_offcpu: bool,
-    /// PMU counter deltas at this PET tick. All-zero for
-    /// synthesised off-CPU samples and on the Linux backend.
+    /// PMU counter deltas at this PET tick. All-zero for synthesised
+    /// off-CPU samples and on the Linux backend.
     pub pmc: PmuSample,
 }
 
@@ -182,28 +201,30 @@ impl ThreadStats {
     pub fn record(
         &mut self,
         timestamp_ns: u64,
+        duration_ns: u64,
         user_addrs: &[u64],
         is_offcpu: bool,
         pmc: PmuSample,
     ) {
-        self.total_samples += 1;
+        self.total_duration_ns = self.total_duration_ns.saturating_add(duration_ns);
         if is_offcpu {
-            self.offcpu_samples += 1;
+            self.offcpu_duration_ns =
+                self.offcpu_duration_ns.saturating_add(duration_ns);
         }
         if let Some(&leaf) = user_addrs.first() {
-            *self.self_counts.entry(leaf).or_insert(0) += 1;
+            *self.self_durations.entry(leaf).or_insert(0) += duration_ns;
             self.self_pmc.entry(leaf).or_default().add(&pmc);
             if is_offcpu {
-                *self.offcpu_self_counts.entry(leaf).or_insert(0) += 1;
+                *self.offcpu_self_durations.entry(leaf).or_insert(0) += duration_ns;
             }
         }
         let mut seen: smallset::SmallSet = Default::default();
         for &addr in user_addrs {
             if seen.insert(addr) {
-                *self.total_counts.entry(addr).or_insert(0) += 1;
+                *self.total_durations.entry(addr).or_insert(0) += duration_ns;
                 self.total_pmc.entry(addr).or_default().add(&pmc);
                 if is_offcpu {
-                    *self.offcpu_total_counts.entry(addr).or_insert(0) += 1;
+                    *self.offcpu_total_durations.entry(addr).or_insert(0) += duration_ns;
                 }
             }
         }
@@ -212,10 +233,11 @@ impl ThreadStats {
         let mut node = &mut self.flame_root;
         for &addr in user_addrs.iter().rev() {
             node = node.children.entry(addr).or_default();
-            node.count += 1;
+            node.duration_ns = node.duration_ns.saturating_add(duration_ns);
             node.pmc.add(&pmc);
             if is_offcpu {
-                node.offcpu_count += 1;
+                node.offcpu_duration_ns =
+                    node.offcpu_duration_ns.saturating_add(duration_ns);
             }
         }
 
@@ -225,18 +247,19 @@ impl ThreadStats {
         }
         self.samples.push_back(RawSample {
             timestamp_ns,
+            duration_ns,
             stack: user_addrs.to_vec().into_boxed_slice(),
             is_offcpu,
             pmc,
         });
     }
 
-    pub fn total_samples(&self) -> u64 {
-        self.total_samples
+    pub fn total_duration_ns(&self) -> u64 {
+        self.total_duration_ns
     }
 
-    pub fn self_count(&self, address: u64) -> u64 {
-        self.self_counts.get(&address).copied().unwrap_or(0)
+    pub fn self_duration_ns(&self, address: u64) -> u64 {
+        self.self_durations.get(&address).copied().unwrap_or(0)
     }
 }
 
@@ -257,11 +280,15 @@ pub struct Aggregator {
 
 #[derive(Default)]
 pub struct StackNode {
-    pub(crate) count: u64,
-    /// Subset of `count` from off-CPU samples; subtract from `count`
-    /// to get on-CPU samples. Carried per-node so flame-graph views
-    /// can pivot on it without rescanning the raw log.
-    pub(crate) offcpu_count: u64,
+    /// Wall-clock time attributed to this node, in nanoseconds. Sum
+    /// of `RawSample::duration_ns` across every sample whose stack
+    /// passed through this node.
+    pub(crate) duration_ns: u64,
+    /// Subset of `duration_ns` from off-CPU samples; subtract from
+    /// `duration_ns` to get on-CPU duration. Carried per-node so
+    /// flame-graph views can pivot on it without rescanning the raw
+    /// log.
+    pub(crate) offcpu_duration_ns: u64,
     /// Sum of cycle/instruction counter deltas across every sample
     /// that traversed this node. Lets per-node IPC fall straight out
     /// of the call tree.
@@ -274,6 +301,7 @@ impl Aggregator {
         &mut self,
         tid: u32,
         timestamp_ns: u64,
+        duration_ns: u64,
         user_addrs: &[u64],
         is_offcpu: bool,
         pmc: PmuSample,
@@ -285,7 +313,7 @@ impl Aggregator {
         self.threads
             .entry(tid)
             .or_default()
-            .record(timestamp_ns, user_addrs, is_offcpu, pmc);
+            .record(timestamp_ns, duration_ns, user_addrs, is_offcpu, pmc);
     }
 
     /// Append one wakeup edge into the wakee's per-thread ledger.
@@ -366,26 +394,26 @@ impl Aggregator {
     where
         P: FnMut(&RawSample) -> bool,
     {
-        let mut self_counts: HashMap<u64, u64> = HashMap::new();
-        let mut total_counts: HashMap<u64, u64> = HashMap::new();
+        let mut self_durations: HashMap<u64, u64> = HashMap::new();
+        let mut total_durations: HashMap<u64, u64> = HashMap::new();
         let mut self_pmc: HashMap<u64, PmcAccum> = HashMap::new();
         let mut total_pmc: HashMap<u64, PmcAccum> = HashMap::new();
-        let mut total_samples: u64 = 0;
+        let mut total_duration_ns: u64 = 0;
         let mut flame_root = StackNode::default();
 
         for (_tid, sample) in self.iter_samples(tid) {
             if !predicate(sample) {
                 continue;
             }
-            total_samples += 1;
+            total_duration_ns = total_duration_ns.saturating_add(sample.duration_ns);
             if let Some(&leaf) = sample.stack.first() {
-                *self_counts.entry(leaf).or_insert(0) += 1;
+                *self_durations.entry(leaf).or_insert(0) += sample.duration_ns;
                 self_pmc.entry(leaf).or_default().add(&sample.pmc);
             }
             let mut seen: smallset::SmallSet = Default::default();
             for &addr in sample.stack.iter() {
                 if seen.insert(addr) {
-                    *total_counts.entry(addr).or_insert(0) += 1;
+                    *total_durations.entry(addr).or_insert(0) += sample.duration_ns;
                     total_pmc.entry(addr).or_default().add(&sample.pmc);
                 }
             }
@@ -394,17 +422,22 @@ impl Aggregator {
             let mut node = &mut flame_root;
             for &addr in sample.stack.iter().rev() {
                 node = node.children.entry(addr).or_default();
-                node.count += 1;
+                node.duration_ns = node.duration_ns.saturating_add(sample.duration_ns);
                 node.pmc.add(&sample.pmc);
+                if sample.is_offcpu {
+                    node.offcpu_duration_ns = node
+                        .offcpu_duration_ns
+                        .saturating_add(sample.duration_ns);
+                }
             }
         }
 
         FilteredAggregation {
-            self_counts,
-            total_counts,
+            self_durations,
+            total_durations,
             self_pmc,
             total_pmc,
-            total_samples,
+            total_duration_ns,
             flame_root,
         }
     }
@@ -437,32 +470,38 @@ impl Aggregator {
         self.thread_names.get(&tid).map(|s| s.as_str())
     }
 
-    /// Iterate (tid, sample_count) pairs for the live thread list.
+    /// Iterate (tid, total_duration_ns) pairs for the live thread list.
     pub fn iter_threads(&self) -> impl Iterator<Item = (u32, u64)> + '_ {
-        self.threads.iter().map(|(&tid, t)| (tid, t.total_samples))
+        self.threads.iter().map(|(&tid, t)| (tid, t.total_duration_ns))
     }
 
-    /// Total samples across all threads (or just one when filtered).
-    pub fn total_samples(&self, tid: Option<u32>) -> u64 {
+    /// Total wall-clock duration across all threads (or just one when
+    /// filtered), in nanoseconds.
+    pub fn total_duration_ns(&self, tid: Option<u32>) -> u64 {
         match tid {
             Some(tid) => self
                 .threads
                 .get(&tid)
-                .map(|t| t.total_samples)
+                .map(|t| t.total_duration_ns)
                 .unwrap_or(0),
-            None => self.threads.values().map(|t| t.total_samples).sum(),
+            None => self.threads.values().map(|t| t.total_duration_ns).sum(),
         }
     }
 
-    /// Self-count for `address`, optionally restricted to one thread.
-    pub fn self_count(&self, address: u64, tid: Option<u32>) -> u64 {
+    /// Self-duration for `address`, optionally restricted to one
+    /// thread. In nanoseconds.
+    pub fn self_duration_ns(&self, address: u64, tid: Option<u32>) -> u64 {
         match tid {
             Some(tid) => self
                 .threads
                 .get(&tid)
-                .map(|t| t.self_count(address))
+                .map(|t| t.self_duration_ns(address))
                 .unwrap_or(0),
-            None => self.threads.values().map(|t| t.self_count(address)).sum(),
+            None => self
+                .threads
+                .values()
+                .map(|t| t.self_duration_ns(address))
+                .sum(),
         }
     }
 
@@ -471,8 +510,8 @@ impl Aggregator {
             .into_iter()
             .map(|e| TopEntry {
                 address: e.address,
-                self_count: e.self_count,
-                total_count: e.total_count,
+                self_duration_ns: e.self_duration_ns,
+                total_duration_ns: e.total_duration_ns,
                 function_name: None,
                 binary: None,
                 is_main: false,
@@ -489,14 +528,14 @@ impl Aggregator {
             .collect()
     }
 
-    /// Top-N as raw addresses + counts, optionally filtered to one
-    /// thread. When `tid` is `None` we union all threads' counts.
+    /// Top-N as raw addresses + durations, optionally filtered to one
+    /// thread. When `tid` is `None` we union all threads' durations.
     pub fn top_raw(&self, limit: usize, tid: Option<u32>) -> Vec<RawTopEntry> {
         let mut entries: Vec<RawTopEntry> = match tid {
             Some(tid) => match self.threads.get(&tid) {
                 Some(t) => collect_top(
-                    &t.self_counts,
-                    &t.total_counts,
+                    &t.self_durations,
+                    &t.total_durations,
                     &t.self_pmc,
                     &t.total_pmc,
                 ),
@@ -504,16 +543,16 @@ impl Aggregator {
             },
             None => {
                 // Merge across threads.
-                let mut self_counts: HashMap<u64, u64> = HashMap::new();
-                let mut total_counts: HashMap<u64, u64> = HashMap::new();
+                let mut self_durations: HashMap<u64, u64> = HashMap::new();
+                let mut total_durations: HashMap<u64, u64> = HashMap::new();
                 let mut self_pmc: HashMap<u64, PmcAccum> = HashMap::new();
                 let mut total_pmc: HashMap<u64, PmcAccum> = HashMap::new();
                 for t in self.threads.values() {
-                    for (&a, &c) in &t.self_counts {
-                        *self_counts.entry(a).or_insert(0) += c;
+                    for (&a, &d) in &t.self_durations {
+                        *self_durations.entry(a).or_insert(0) += d;
                     }
-                    for (&a, &c) in &t.total_counts {
-                        *total_counts.entry(a).or_insert(0) += c;
+                    for (&a, &d) in &t.total_durations {
+                        *total_durations.entry(a).or_insert(0) += d;
                     }
                     for (&a, &p) in &t.self_pmc {
                         self_pmc.entry(a).or_default().add_other(&p);
@@ -522,13 +561,13 @@ impl Aggregator {
                         total_pmc.entry(a).or_default().add_other(&p);
                     }
                 }
-                collect_top(&self_counts, &total_counts, &self_pmc, &total_pmc)
+                collect_top(&self_durations, &total_durations, &self_pmc, &total_pmc)
             }
         };
         entries.sort_by(|a, b| {
-            b.self_count
-                .cmp(&a.self_count)
-                .then_with(|| b.total_count.cmp(&a.total_count))
+            b.self_duration_ns
+                .cmp(&a.self_duration_ns)
+                .then_with(|| b.total_duration_ns.cmp(&a.total_duration_ns))
         });
         entries.truncate(limit);
         entries
@@ -555,8 +594,10 @@ impl Aggregator {
 
 impl StackNode {
     fn merge(&mut self, other: &StackNode) {
-        self.count += other.count;
-        self.offcpu_count += other.offcpu_count;
+        self.duration_ns = self.duration_ns.saturating_add(other.duration_ns);
+        self.offcpu_duration_ns = self
+            .offcpu_duration_ns
+            .saturating_add(other.offcpu_duration_ns);
         self.pmc.add_other(&other.pmc);
         for (&addr, child) in &other.children {
             self.children.entry(addr).or_default().merge(child);
@@ -567,8 +608,8 @@ impl StackNode {
 impl Clone for StackNode {
     fn clone(&self) -> Self {
         Self {
-            count: self.count,
-            offcpu_count: self.offcpu_count,
+            duration_ns: self.duration_ns,
+            offcpu_duration_ns: self.offcpu_duration_ns,
             pmc: self.pmc,
             children: self.children.clone(),
         }
@@ -576,17 +617,17 @@ impl Clone for StackNode {
 }
 
 fn collect_top(
-    self_counts: &HashMap<u64, u64>,
-    total_counts: &HashMap<u64, u64>,
+    self_durations: &HashMap<u64, u64>,
+    total_durations: &HashMap<u64, u64>,
     self_pmc: &HashMap<u64, PmcAccum>,
     total_pmc: &HashMap<u64, PmcAccum>,
 ) -> Vec<RawTopEntry> {
-    total_counts
+    total_durations
         .iter()
-        .map(|(&address, &total_count)| RawTopEntry {
+        .map(|(&address, &total_duration_ns)| RawTopEntry {
             address,
-            self_count: self_counts.get(&address).copied().unwrap_or(0),
-            total_count,
+            self_duration_ns: self_durations.get(&address).copied().unwrap_or(0),
+            total_duration_ns,
             self_pmc: self_pmc.get(&address).copied().unwrap_or_default(),
             total_pmc: total_pmc.get(&address).copied().unwrap_or_default(),
         })

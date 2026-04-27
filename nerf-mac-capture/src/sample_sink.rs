@@ -60,10 +60,15 @@ pub struct SampleEvent<'a> {
     /// suspend-and-walk path) always emits empty here; nerf-mac-kperf
     /// fills it when kperf walked the kernel side.
     pub kernel_backtrace: &'a [u64],
+    /// Wall-clock time this sample accounts for, in nanoseconds.
+    /// Sampling period for on-CPU PET samples (1ms at 1kHz);
+    /// interval duration for off-CPU samples.
+    pub duration_ns: u64,
     /// `true` if this is a synthesised "off-CPU" sample standing in
-    /// for time the thread spent blocked between two PET ticks. The
-    /// stack is borrowed from the last on-CPU sample, the timestamp
-    /// is somewhere in the off-CPU interval. samply has no equivalent.
+    /// for time the thread spent blocked. The stack is borrowed from
+    /// the last on-CPU sample; one sample is emitted per closed
+    /// off-CPU interval, with `duration_ns` set to the interval
+    /// length. samply has no equivalent.
     pub is_offcpu: bool,
     /// CPU cycles consumed since the previous PET sample on this
     /// thread (Apple Silicon fixed counter 0). 0 when not available

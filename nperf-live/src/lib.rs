@@ -40,6 +40,8 @@ pub(crate) enum LiveEvent {
     Sample {
         tid: u32,
         timestamp_ns: u64,
+        /// Wall-clock time this sample accounts for.
+        duration_ns: u64,
         user_addrs: Vec<u64>,
         is_offcpu: bool,
         cycles: u64,
@@ -89,6 +91,7 @@ impl LiveSink for LiveSinkImpl {
         let _ = self.tx.send(LiveEvent::Sample {
             tid: event.tid,
             timestamp_ns: event.timestamp,
+            duration_ns: event.duration_ns,
             user_addrs,
             is_offcpu: event.is_offcpu,
             cycles: event.cycles,
@@ -204,7 +207,7 @@ impl Profiler for LiveServer {
                         let raw = agg.top_raw(usize::MAX, tid);
                         let entries = group_top_entries(raw, &bins, sort, limit as usize);
                         TopUpdate {
-                            total_samples: agg.total_samples(tid),
+                            total_duration_ns: agg.total_duration_ns(tid),
                             entries,
                         }
                     } else {
@@ -217,7 +220,7 @@ impl Profiler for LiveServer {
                         let entries =
                             group_top_entries(f.top_raw(usize::MAX), &bins, sort, limit as usize);
                         TopUpdate {
-                            total_samples: f.total_samples,
+                            total_duration_ns: f.total_duration_ns,
                             entries,
                         }
                     }
@@ -230,8 +233,8 @@ impl Profiler for LiveServer {
         });
     }
 
-    async fn total_samples(&self) -> u64 {
-        self.aggregator.read().total_samples(None)
+    async fn total_duration_ns(&self) -> u64 {
+        self.aggregator.read().total_duration_ns(None)
     }
 
     async fn subscribe_annotated(
@@ -257,11 +260,11 @@ impl Profiler for LiveServer {
                     if is_filter_empty(&filter) {
                         let agg = aggregator.read();
                         compute_annotated_view(&binaries, &source, address, |a| {
-                            agg.self_count(a, tid)
+                            agg.self_duration_ns(a, tid)
                         })
                     } else {
-                        // Snapshot self_counts under the lock, drop, then build.
-                        let self_counts = {
+                        // Snapshot self_durations under the lock, drop, then build.
+                        let self_durations = {
                             let agg = aggregator.read();
                             let bins = binaries.read();
                             let pred = make_predicate(
@@ -269,10 +272,10 @@ impl Profiler for LiveServer {
                                 agg.session_start_ns().unwrap_or(0),
                                 &bins,
                             );
-                            agg.aggregate_filtered(tid, pred).self_counts
+                            agg.aggregate_filtered(tid, pred).self_durations
                         };
                         compute_annotated_view(&binaries, &source, address, |a| {
-                            self_counts.get(&a).copied().unwrap_or(0)
+                            self_durations.get(&a).copied().unwrap_or(0)
                         })
                     }
                 };
@@ -301,7 +304,11 @@ impl Profiler for LiveServer {
                     let agg = aggregator.read();
                     let bins = binaries.read();
                     if is_filter_empty(&filter) {
-                        compute_flame_update(agg.total_samples(tid), &agg.flame_root(tid), &bins)
+                        compute_flame_update(
+                            agg.total_duration_ns(tid),
+                            &agg.flame_root(tid),
+                            &bins,
+                        )
                     } else {
                         let pred = make_predicate(
                             &filter,
@@ -309,7 +316,7 @@ impl Profiler for LiveServer {
                             &bins,
                         );
                         let f = agg.aggregate_filtered(tid, pred);
-                        compute_flame_update(f.total_samples, &f.flame_root, &bins)
+                        compute_flame_update(f.total_duration_ns, &f.flame_root, &bins)
                     }
                 };
                 if let Err(e) = output.send(update).await {
@@ -427,13 +434,13 @@ impl Profiler for LiveServer {
                     let agg = aggregator.read();
                     let mut threads: Vec<ThreadInfo> = agg
                         .iter_threads()
-                        .map(|(tid, sample_count)| ThreadInfo {
+                        .map(|(tid, duration_ns)| ThreadInfo {
                             tid,
                             name: agg.thread_name(tid).map(|s| s.to_owned()),
-                            sample_count,
+                            duration_ns,
                         })
                         .collect();
-                    threads.sort_by(|a, b| b.sample_count.cmp(&a.sample_count));
+                    threads.sort_by(|a, b| b.duration_ns.cmp(&a.duration_ns));
                     ThreadsUpdate { threads }
                 };
                 if let Err(e) = output.send(update).await {
@@ -568,9 +575,9 @@ fn group_top_entries(
     // hex form so it stays unique).
     struct Agg {
         address: u64,
-        representative_self: u64,
-        self_total: u64,
-        total_total: u64,
+        representative_self_duration_ns: u64,
+        self_duration_ns: u64,
+        total_duration_ns: u64,
         self_cycles: u64,
         self_instructions: u64,
         self_l1d_misses: u64,
@@ -598,8 +605,8 @@ fn group_top_entries(
         groups
             .entry(key)
             .and_modify(|g| {
-                g.self_total += e.self_count;
-                g.total_total += e.total_count;
+                g.self_duration_ns += e.self_duration_ns;
+                g.total_duration_ns += e.total_duration_ns;
                 g.self_cycles = g.self_cycles.saturating_add(e.self_pmc.cycles);
                 g.self_instructions = g
                     .self_instructions
@@ -618,16 +625,16 @@ fn group_top_entries(
                 g.total_branch_mispreds = g
                     .total_branch_mispreds
                     .saturating_add(e.total_pmc.branch_mispreds);
-                if e.self_count > g.representative_self {
+                if e.self_duration_ns > g.representative_self_duration_ns {
                     g.address = e.address;
-                    g.representative_self = e.self_count;
+                    g.representative_self_duration_ns = e.self_duration_ns;
                 }
             })
             .or_insert(Agg {
                 address: e.address,
-                representative_self: e.self_count,
-                self_total: e.self_count,
-                total_total: e.total_count,
+                representative_self_duration_ns: e.self_duration_ns,
+                self_duration_ns: e.self_duration_ns,
+                total_duration_ns: e.total_duration_ns,
                 self_cycles: e.self_pmc.cycles,
                 self_instructions: e.self_pmc.instructions,
                 self_l1d_misses: e.self_pmc.l1d_misses,
@@ -647,8 +654,8 @@ fn group_top_entries(
         .into_values()
         .map(|g| TopEntry {
             address: g.address,
-            self_count: g.self_total,
-            total_count: g.total_total,
+            self_duration_ns: g.self_duration_ns,
+            total_duration_ns: g.total_duration_ns,
             function_name: g.function_name,
             binary: g.binary,
             is_main: g.is_main,
@@ -664,19 +671,19 @@ fn group_top_entries(
         })
         .collect();
     // Tie-break on function_name → binary → address so the row order
-    // is stable across snapshots; otherwise rows with equal counts
+    // is stable across snapshots; otherwise rows with equal durations
     // shuffle every tick as the underlying HashMap iterates them in
     // a different order.
     out.sort_by(|a, b| {
         let primary = match sort {
             TopSort::BySelf => b
-                .self_count
-                .cmp(&a.self_count)
-                .then_with(|| b.total_count.cmp(&a.total_count)),
+                .self_duration_ns
+                .cmp(&a.self_duration_ns)
+                .then_with(|| b.total_duration_ns.cmp(&a.total_duration_ns)),
             TopSort::ByTotal => b
-                .total_count
-                .cmp(&a.total_count)
-                .then_with(|| b.self_count.cmp(&a.self_count)),
+                .total_duration_ns
+                .cmp(&a.total_duration_ns)
+                .then_with(|| b.self_duration_ns.cmp(&a.self_duration_ns)),
         };
         primary
             .then_with(|| a.function_name.cmp(&b.function_name))
@@ -687,10 +694,12 @@ fn group_top_entries(
     out
 }
 
-/// Build a sample-density timeline from the per-thread raw sample
-/// log. Bucket size is chosen so we stay around `TARGET_BUCKETS`
-/// regardless of recording duration, with a sensible minimum so we
-/// don't over-quantize a 1-second recording.
+/// Build a wall-clock-time timeline from the per-thread raw sample
+/// log. Each bucket accumulates the `duration_ns` of samples whose
+/// `timestamp_ns` falls inside it, so bar height represents activity
+/// per bucket. Bucket size is chosen so we stay around
+/// `TARGET_BUCKETS` regardless of recording duration, with a sensible
+/// minimum so we don't over-quantize a 1-second recording.
 fn build_timeline_update(
     aggregator: &Arc<RwLock<Aggregator>>,
     tid: Option<u32>,
@@ -701,39 +710,39 @@ fn build_timeline_update(
     let agg = aggregator.read();
     let start = agg.session_start_ns().unwrap_or(0);
     let last = agg.last_sample_ns().unwrap_or(start);
-    let duration = last.saturating_sub(start);
+    let recording_duration_ns = last.saturating_sub(start);
 
-    let bucket_size_ns = if duration == 0 {
+    let bucket_size_ns = if recording_duration_ns == 0 {
         MIN_BUCKET_NS
     } else {
-        (duration / TARGET_BUCKETS).max(MIN_BUCKET_NS)
+        (recording_duration_ns / TARGET_BUCKETS).max(MIN_BUCKET_NS)
     };
-    let n_buckets = ((duration / bucket_size_ns) + 1) as usize;
-    let mut counts: Vec<u64> = vec![0; n_buckets.max(1)];
+    let n_buckets = ((recording_duration_ns / bucket_size_ns) + 1) as usize;
+    let mut bucket_durations: Vec<u64> = vec![0; n_buckets.max(1)];
 
-    let mut total: u64 = 0;
+    let mut total_duration_ns: u64 = 0;
     for (_tid, sample) in agg.iter_samples(tid) {
         let rel = sample.timestamp_ns.saturating_sub(start);
         let idx = (rel / bucket_size_ns) as usize;
-        if idx < counts.len() {
-            counts[idx] += 1;
-            total += 1;
+        if idx < bucket_durations.len() {
+            bucket_durations[idx] = bucket_durations[idx].saturating_add(sample.duration_ns);
+            total_duration_ns = total_duration_ns.saturating_add(sample.duration_ns);
         }
     }
 
-    let buckets: Vec<TimelineBucket> = counts
+    let buckets: Vec<TimelineBucket> = bucket_durations
         .into_iter()
         .enumerate()
-        .map(|(i, count)| TimelineBucket {
+        .map(|(i, duration_ns)| TimelineBucket {
             start_ns: i as u64 * bucket_size_ns,
-            count,
+            duration_ns,
         })
         .collect();
 
     TimelineUpdate {
         bucket_size_ns,
-        duration_ns: duration,
-        total_samples: total,
+        recording_duration_ns,
+        total_duration_ns,
         buckets,
     }
 }
@@ -757,9 +766,10 @@ fn compute_neighbors_update(
 
     #[derive(Default)]
     struct SymbolNode {
-        count: u64,
+        /// Wall-clock time attributed to this symbol, in nanoseconds.
+        duration_ns: u64,
         rep_address: u64,
-        rep_self: u64,
+        rep_self_duration_ns: u64,
         is_main: bool,
         language: nperf_demangle::Language,
         children: HashMap<SymbolKey, SymbolNode>,
@@ -779,10 +789,11 @@ fn compute_neighbors_update(
         }
     }
 
-    /// Insert one (addr, count) sample into `node`, merging by
-    /// SymbolKey-keyed children. `delta` is added to this node's count;
-    /// `rep_self` is the largest single contribution we've seen so we
-    /// can pick the hottest address as the click-through representative.
+    /// Insert one (addr, duration_ns) sample into `node`, merging by
+    /// SymbolKey-keyed children. `delta` is added to this node's
+    /// `duration_ns`; `rep_self_duration_ns` tracks the largest single
+    /// contribution so we can pick the hottest address as the
+    /// click-through representative.
     fn accumulate(
         node: &mut SymbolNode,
         addr: u64,
@@ -790,10 +801,10 @@ fn compute_neighbors_update(
         is_main: bool,
         language: nperf_demangle::Language,
     ) {
-        node.count += delta;
-        if delta > node.rep_self {
+        node.duration_ns = node.duration_ns.saturating_add(delta);
+        if delta > node.rep_self_duration_ns {
             node.rep_address = addr;
-            node.rep_self = delta;
+            node.rep_self_duration_ns = delta;
             node.is_main = is_main;
             node.language = language;
         }
@@ -807,7 +818,7 @@ fn compute_neighbors_update(
         for (caddr, child) in &src.children {
             let (key, is_main, language) = classify(*caddr, bins);
             let entry = dst.children.entry(key).or_default();
-            accumulate(entry, *caddr, child.count, is_main, language);
+            accumulate(entry, *caddr, child.duration_ns, is_main, language);
             merge_descendants(entry, child, bins);
         }
     }
@@ -820,18 +831,18 @@ fn compute_neighbors_update(
         bins: &BinaryRegistry,
         callers: &mut SymbolNode,
         callees: &mut SymbolNode,
-        own_count: &mut u64,
+        own_duration_ns: &mut u64,
     ) {
         if node_addr != 0 {
             let (key, _is_main, _language) = classify(node_addr, bins);
             if &key == target_key {
-                *own_count += node.count;
+                *own_duration_ns = own_duration_ns.saturating_add(node.duration_ns);
                 // Insert ancestor chain into callers_tree, innermost-first.
                 let mut cur = &mut *callers;
                 for &caller_addr in ancestors.iter().rev() {
                     let (ckey, cmain, clang) = classify(caller_addr, bins);
                     let entry = cur.children.entry(ckey).or_default();
-                    accumulate(entry, caller_addr, node.count, cmain, clang);
+                    accumulate(entry, caller_addr, node.duration_ns, cmain, clang);
                     cur = entry;
                 }
                 // Merge descendants into callees_tree.
@@ -852,7 +863,7 @@ fn compute_neighbors_update(
                 bins,
                 callers,
                 callees,
-                own_count,
+                own_duration_ns,
             );
         }
         if pushed {
@@ -867,23 +878,23 @@ fn compute_neighbors_update(
         interner: &mut StringInterner,
     ) -> FlameNode {
         let SymbolNode {
-            count,
+            duration_ns,
             rep_address,
             is_main,
             language,
             children,
             ..
         } = sn;
-        // Sort by (count desc, fname asc, bin asc) on the SymbolKey
-        // strings, before interning, so the order is stable across
-        // snapshots. See compute_flame_update for the rationale.
+        // Sort by (duration desc, fname asc, bin asc) on the
+        // SymbolKey strings, before interning, so the order is stable
+        // across snapshots. See compute_flame_update for the rationale.
         let mut entries: Vec<(SymbolKey, SymbolNode)> = children
             .into_iter()
-            .filter(|(_, c)| c.count >= threshold)
+            .filter(|(_, c)| c.duration_ns >= threshold)
             .collect();
         entries.sort_by(|a, b| {
-            b.1.count
-                .cmp(&a.1.count)
+            b.1.duration_ns
+                .cmp(&a.1.duration_ns)
                 .then_with(|| a.0.0.cmp(&b.0.0))
                 .then_with(|| a.0.1.cmp(&b.0.1))
         });
@@ -893,14 +904,14 @@ fn compute_neighbors_update(
             .collect();
         FlameNode {
             address: rep_address,
-            count,
+            duration_ns,
             function_name: interner.intern_opt(key.0),
             binary: interner.intern_opt(key.1),
             is_main,
             language: interner.intern_str(language.as_str()),
             // PMC values aren't currently propagated through the
             // SymbolNode-based callers/callees trees -- the neighbors
-            // view shows counts only.
+            // view shows time only.
             cycles: 0,
             instructions: 0,
             l1d_misses: 0,
@@ -921,7 +932,7 @@ fn compute_neighbors_update(
 
     let mut callers = SymbolNode::default();
     let mut callees = SymbolNode::default();
-    let mut own_count: u64 = 0;
+    let mut own_duration_ns: u64 = 0;
 
     let mut ancestors: Vec<u64> = Vec::new();
     walk(
@@ -932,23 +943,23 @@ fn compute_neighbors_update(
         binaries,
         &mut callers,
         &mut callees,
-        &mut own_count,
+        &mut own_duration_ns,
     );
 
-    // Stamp the target's own count + representative onto each tree's
-    // root so the renderer has a useful "self" frame.
-    callers.count = own_count;
+    // Stamp the target's own duration + representative onto each
+    // tree's root so the renderer has a useful "self" frame.
+    callers.duration_ns = own_duration_ns;
     callers.rep_address = target_address;
     callers.is_main = target_resolved.as_ref().map(|r| r.is_main).unwrap_or(false);
     callers.language = target_language;
-    callees.count = own_count;
+    callees.duration_ns = own_duration_ns;
     callees.rep_address = target_address;
     callees.is_main = target_resolved.as_ref().map(|r| r.is_main).unwrap_or(false);
     callees.language = target_language;
 
     // Same lenient 0.05% threshold as the main flamegraph so the
     // family tree shows small but non-trivial neighbours.
-    let threshold = (own_count / 2000).max(1);
+    let threshold = (own_duration_ns / 2000).max(1);
     let mut interner = StringInterner::new();
     let target_fname = interner.intern_opt(target_key.0.clone());
     let target_bin = interner.intern_opt(target_key.1.clone());
@@ -962,7 +973,7 @@ fn compute_neighbors_update(
         binary: target_bin,
         is_main: target_resolved.as_ref().map(|r| r.is_main).unwrap_or(false),
         language: target_lang,
-        own_count,
+        own_duration_ns,
         callers_tree,
         callees_tree,
     }
@@ -1017,23 +1028,22 @@ impl StringInterner {
 }
 
 fn compute_flame_update(
-    total: u64,
+    total_duration_ns: u64,
     flame_root: &aggregator::StackNode,
     binaries: &BinaryRegistry,
 ) -> FlamegraphUpdate {
     // 0.05% of total. Lower than the previous 0.5% so that when the
-    // user focuses into a smaller subtree (say 30k of 750k samples)
-    // there's still meaningful per-callsite detail instead of one
-    // big "(N small frames)" cell. Bumps the wire payload roughly
-    // 5-10x but the live UI handles it; the residue cell still
-    // catches the truly-tiny tail.
-    let threshold = (total / 2000).max(1);
+    // user focuses into a smaller subtree there's still meaningful
+    // per-callsite detail instead of one big "(N small frames)" cell.
+    // Bumps the wire payload roughly 5-10x but the live UI handles
+    // it; the residue cell still catches the truly-tiny tail.
+    let threshold = (total_duration_ns / 2000).max(1);
     let mut interner = StringInterner::new();
     let (mut children, residue) =
         build_children_with_residue(&[flame_root], threshold, binaries, &mut interner);
     // build_children_with_residue already returns children sorted by
-    // (count desc, fname asc, bin asc); fold_recursion only rewrites
-    // a node's children Vec, never the node's own count, so the
+    // (duration desc, fname asc, bin asc); fold_recursion only rewrites
+    // a node's children Vec, never the node's own duration, so the
     // top-level order stays correct.
     for c in &mut children {
         fold_recursion(c);
@@ -1045,20 +1055,21 @@ fn compute_flame_update(
     let unknown_lang = interner.intern_str(nperf_demangle::Language::Unknown.as_str());
 
     // Samples whose user-stack walk returned zero frames (kernel-only
-    // samples, walk failures, etc.) increment `total_samples` but
-    // never touch `flame_root.children`. Without this synthetic leaf
-    // the (all) row says "100%" but the visible cells fill <100% of
-    // the width, leaving black space that looks like a bug. Spell it
-    // out instead.
-    let visible_sum: u64 = children.iter().map(|c| c.count).sum();
-    if total > visible_sum {
-        let missing = total - visible_sum;
+    // samples, walk failures, etc.) contribute to `total_duration_ns`
+    // but never touch `flame_root.children`. Without this synthetic
+    // leaf the (all) row says "100%" but the visible cells fill <100%
+    // of the width, leaving black space that looks like a bug. Spell
+    // it out instead.
+    let visible_sum: u64 = children.iter().map(|c| c.duration_ns).sum();
+    if total_duration_ns > visible_sum {
+        let missing_ns = total_duration_ns - visible_sum;
         let label = interner.intern(format!(
-            "(in-kernel / no user stack: {missing} samples)"
+            "(in-kernel / no user stack: {:.1}ms)",
+            missing_ns as f64 / 1_000_000.0
         ));
         children.push(FlameNode {
             address: u64::MAX - 1,
-            count: missing,
+            duration_ns: missing_ns,
             function_name: Some(label),
             binary: None,
             is_main: false,
@@ -1081,7 +1092,7 @@ fn compute_flame_update(
     let all_label = interner.intern_str("(all)");
     let root = FlameNode {
         address: 0,
-        count: total,
+        duration_ns: total_duration_ns,
         function_name: Some(all_label),
         binary: None,
         is_main: false,
@@ -1093,7 +1104,7 @@ fn compute_flame_update(
         children,
     };
     FlamegraphUpdate {
-        total_samples: total,
+        total_duration_ns,
         strings: interner.into_strings(),
         root,
     }
@@ -1119,7 +1130,7 @@ fn symbol_eq(a: &FlameNode, b: &FlameNode) -> bool {
 
 /// Walk a list of "sibling" StackNodes that should be considered
 /// together, group their children by resolved (function, binary)
-/// symbol, apply a count threshold, and recurse. The siblings list
+/// symbol, apply a duration threshold, and recurse. The siblings list
 /// lets us fold multiple call-site addresses that map to the same
 /// symbol into one cell without copying subtrees: callers below pass
 /// the borrowed `StackNode`s of the merged group on to the recursive
@@ -1145,10 +1156,10 @@ fn build_children_with_residue(
     type SymbolKey = (Option<String>, Option<String>);
 
     struct Acc<'a> {
-        count: u64,
+        duration_ns: u64,
         pmc: PmcAccum,
         rep_addr: u64,
-        rep_count: u64,
+        rep_duration_ns: u64,
         is_main: bool,
         language: nperf_demangle::Language,
         sub_sources: Vec<&'a aggregator::StackNode>,
@@ -1169,15 +1180,15 @@ fn build_children_with_residue(
             };
             let key = (fname, bin);
             let acc = groups.entry(key).or_insert_with(|| Acc {
-                count: 0,
+                duration_ns: 0,
                 pmc: PmcAccum::default(),
                 rep_addr: addr,
-                rep_count: 0,
+                rep_duration_ns: 0,
                 is_main,
                 language: lang,
                 sub_sources: Vec::new(),
             });
-            acc.count += child.count;
+            acc.duration_ns = acc.duration_ns.saturating_add(child.duration_ns);
             acc.pmc.cycles = acc.pmc.cycles.saturating_add(child.pmc.cycles);
             acc.pmc.instructions = acc.pmc.instructions.saturating_add(child.pmc.instructions);
             acc.pmc.l1d_misses = acc.pmc.l1d_misses.saturating_add(child.pmc.l1d_misses);
@@ -1187,9 +1198,9 @@ fn build_children_with_residue(
                 .saturating_add(child.pmc.branch_mispreds);
             // Largest single contributor's address is the click-through
             // representative (matches what compute_neighbors_update does).
-            if child.count > acc.rep_count {
+            if child.duration_ns > acc.rep_duration_ns {
                 acc.rep_addr = addr;
-                acc.rep_count = child.count;
+                acc.rep_duration_ns = child.duration_ns;
                 acc.is_main = is_main;
                 acc.language = lang;
             }
@@ -1197,26 +1208,25 @@ fn build_children_with_residue(
         }
     }
 
-    // Sort by (count desc, function_name asc, binary asc) before
+    // Sort by (duration desc, function_name asc, binary asc) before
     // interning so the visible order is stable across snapshots.
-    // Without the symbol-key tie-break, runs of equal-count siblings
-    // (extremely common when many cells hold a single sample) shuffle
-    // on every tick because HashMap iteration order is non-deterministic
-    // and the interner indices we'd otherwise sort on are themselves
-    // assigned in HashMap iteration order.
+    // Without the symbol-key tie-break, runs of equal-duration
+    // siblings (common when many cells hold ~1 sample worth) shuffle
+    // on every tick because HashMap iteration order is
+    // non-deterministic.
     let mut entries: Vec<((Option<String>, Option<String>), Acc)> = groups.into_iter().collect();
     entries.sort_by(|a, b| {
-        b.1.count
-            .cmp(&a.1.count)
+        b.1.duration_ns
+            .cmp(&a.1.duration_ns)
             .then_with(|| a.0.0.cmp(&b.0.0))
             .then_with(|| a.0.1.cmp(&b.0.1))
     });
 
     let mut visible: Vec<FlameNode> = Vec::new();
-    let mut residue_count: u64 = 0;
+    let mut residue_duration_ns: u64 = 0;
     let mut residue_dropped: u64 = 0;
     for ((fname, bin), acc) in entries {
-        if acc.count >= threshold {
+        if acc.duration_ns >= threshold {
             let (mut grandchildren, gres) =
                 build_children_with_residue(&acc.sub_sources, threshold, binaries, interner);
             if let Some(extra) = gres {
@@ -1224,7 +1234,7 @@ fn build_children_with_residue(
             }
             visible.push(FlameNode {
                 address: acc.rep_addr,
-                count: acc.count,
+                duration_ns: acc.duration_ns,
                 function_name: interner.intern_opt(fname),
                 binary: interner.intern_opt(bin),
                 is_main: acc.is_main,
@@ -1236,11 +1246,12 @@ fn build_children_with_residue(
                 children: grandchildren,
             });
         } else {
-            residue_count = residue_count.saturating_add(acc.count);
+            residue_duration_ns =
+                residue_duration_ns.saturating_add(acc.duration_ns);
             residue_dropped += 1;
         }
     }
-    let residue = if residue_count > 0 && residue_dropped > 0 {
+    let residue = if residue_duration_ns > 0 && residue_dropped > 0 {
         let label = interner.intern(format!("({} small frames)", residue_dropped));
         let unknown_lang = interner.intern_str(nperf_demangle::Language::Unknown.as_str());
         Some(FlameNode {
@@ -1250,7 +1261,7 @@ fn build_children_with_residue(
             // path first, but we also pick u64::MAX here as a defence
             // in case future renderers fall back to address.
             address: u64::MAX,
-            count: residue_count,
+            duration_ns: residue_duration_ns,
             function_name: Some(label),
             binary: None,
             is_main: false,
@@ -1271,13 +1282,13 @@ fn compute_annotated_view(
     binaries: &Arc<RwLock<BinaryRegistry>>,
     source: &Arc<parking_lot::Mutex<source::SourceResolver>>,
     address: u64,
-    self_count: impl Fn(u64) -> u64,
+    self_duration_ns: impl Fn(u64) -> u64,
 ) -> AnnotatedView {
     let resolved = binaries.write().resolve(address);
 
     let mut hl = highlight::AsmHighlighter::new();
     let mut lines: Vec<AnnotatedLine> = match &resolved {
-        Some(r) => disassemble::disassemble(r, &mut hl, |addr| self_count(addr)),
+        Some(r) => disassemble::disassemble(r, &mut hl, |addr| self_duration_ns(addr)),
         None => Vec::new(),
     };
 
@@ -1336,6 +1347,7 @@ pub async fn start(addr: &str) -> Result<(LiveSinkImpl, tokio::task::JoinHandle<
                     LiveEvent::Sample {
                         tid,
                         timestamp_ns,
+                        duration_ns,
                         user_addrs,
                         is_offcpu,
                         cycles,
@@ -1346,6 +1358,7 @@ pub async fn start(addr: &str) -> Result<(LiveSinkImpl, tokio::task::JoinHandle<
                         aggregator.write().record(
                             tid,
                             timestamp_ns,
+                            duration_ns,
                             &user_addrs,
                             is_offcpu,
                             PmuSample {

@@ -77,6 +77,7 @@ impl JitdumpTailer {
             return Ok(Vec::new());
         }
         let to_read = (len - self.offset) as usize;
+        let prev_offset = self.offset;
         let mut buf = vec![0u8; to_read];
         self.file.seek(SeekFrom::Start(self.offset))?;
         self.file.read_exact(&mut buf)?;
@@ -116,13 +117,31 @@ impl JitdumpTailer {
             }
             if id == JIT_CODE_LOAD {
                 if let Some(rec) = parse_code_load(&buf[cursor + 16..cursor + total_size]) {
+                    log::warn!(
+                        "jitdump_tail: CodeLoad name={:?} avma={:#x} size={:#x} (range {:#x}..{:#x})",
+                        rec.name,
+                        rec.avma,
+                        rec.code_size,
+                        rec.avma,
+                        rec.avma + rec.code_size,
+                    );
                     out.push(rec);
                 }
+            } else {
+                log::warn!(
+                    "jitdump_tail: skipping record id={id} size={total_size}"
+                );
             }
             cursor += total_size;
         }
 
         self.offset += cursor as u64;
+        log::warn!(
+            "jitdump_tail tick: read {to_read}B (offset {prev_offset} -> {} of {len}), \
+             produced {} CodeLoad records",
+            self.offset,
+            out.len(),
+        );
         Ok(out)
     }
 }
