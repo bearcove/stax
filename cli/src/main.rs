@@ -71,30 +71,22 @@ fn run_record(args: RecordArgs) -> Result<(), Box<dyn Error>> {
         .enable_all()
         .build()?;
 
-    let (live_sink, _forwarder): (Option<Box<dyn stax_core::live_sink::LiveSink>>, _) =
-        if let Some(ref addr) = args.serve {
-            let (sink, _server_handle) = runtime.block_on(stax_live::start(addr))?;
-            (Some(Box::new(sink)), None)
-        } else if let Some(socket) = stax_server_socket() {
-            match runtime.block_on(connect_to_server(&socket, &args)) {
-                Ok((id, sink, fwd)) => {
-                    eprintln!(
-                        "stax: registered run {} with stax-server at {}",
-                        id.0,
-                        socket.display()
-                    );
-                    (Some(Box::new(sink)), Some(fwd))
-                }
-                Err(e) => {
-                    eprintln!("stax: stax-server unreachable ({e}); recording without a sink");
-                    (None, None)
-                }
-            }
-        } else {
-            (None, None)
-        };
+    // Recording is meaningless without a server to forward events
+    // to — refuse rather than silently drop everything.
+    let socket = stax_server_socket().ok_or_else(|| {
+        "stax-server isn't running. Start it with `stax-server` (or set \
+         STAX_SERVER_SOCKET if you've moved the socket)."
+            .to_owned()
+    })?;
+    let (id, sink, _forwarder) = runtime.block_on(connect_to_server(&socket, &args))?;
+    eprintln!(
+        "stax: registered run {} with stax-server at {}",
+        id.0,
+        socket.display()
+    );
 
-    let result = cmd_record_mac::main_with_live_sink(args, live_sink);
+    let live_sink: Box<dyn stax_core::live_sink::LiveSink> = Box::new(sink);
+    let result = cmd_record_mac::main_with_live_sink(args, Some(live_sink));
     drop(runtime);
     result
 }

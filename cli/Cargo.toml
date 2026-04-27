@@ -14,9 +14,6 @@ stax-core = { path = "..", default-features = false }
 stax-live-proto = { path = "../stax-live-proto" }
 vox = { path = "/Users/amos/bearcove/vox/rust/vox" }
 
-[dependencies.stax-live]
-path = "../stax-live"
-
 [dependencies.tokio]
 version = "1"
 features = ["rt-multi-thread"]

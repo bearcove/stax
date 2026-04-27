@@ -6,12 +6,9 @@ rust-version = "1.91"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-stax-core = { path = ".." }
 stax-live-proto = { path = "../stax-live-proto" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
-eyre = "0.6"
+tokio = { version = "1", features = ["rt", "time"] }
 tracing = "0.1"
-log = "0.4"
 parking_lot = "0.12"
 arborium = { version = "2.16", features = ["lang-asm", "lang-rust", "lang-c", "lang-cpp"] }
 addr2line = { version = "0.21", default-features = false, features = ["std"] }
@@ -22,8 +19,8 @@ object = { version = "0.39.1", default-features = false, features = ["std", "rea
 memmap2 = "0.9"
 stax-demangle = { path = "../stax-demangle" }
 
-[target.'cfg(target_os = "macos")'.dependencies]
-mach2 = "0.4"
-stax-mac-capture = { version = "0.1", path = "../stax-mac-capture" }
+vox = { path = "/Users/amos/bearcove/vox/rust/vox" }
 
-vox = { path = "/Users/amos/bearcove/vox/rust/vox", features = ["transport-websocket"] }
+[target.'cfg(target_os = "macos")'.dependencies]
+stax-mac-capture = { version = "0.1", path = "../stax-mac-capture" }
+mach2 = "0.4"

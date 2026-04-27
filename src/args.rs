@@ -20,7 +20,9 @@ pub struct Cli {
 #[derive(Facet, Debug)]
 #[repr(u8)]
 pub enum Command {
-    /// Record live profiling data, streamed over `--serve`.
+    /// Record live profiling data. Forwards events to the running
+    /// `stax-server` for the web UI and `stax {top,annotate,…}` to
+    /// query.
     Record(RecordArgs),
 
     /// Codesign this stax binary (or, when run as root, install staxd
@@ -112,11 +114,6 @@ pub struct RecordArgs {
     /// Profile an existing process by PID instead of launching one.
     #[facet(args::named, args::short = 'p', default)]
     pub pid: Option<u32>,
-
-    /// Start a live RPC/WebSocket server on the given host:port (e.g.
-    /// 127.0.0.1:8080).
-    #[facet(args::named, default)]
-    pub serve: Option<String>,
 
     /// Local socket path of the running `staxd` daemon. Defaults to the
     /// path `sudo stax setup` installs.
