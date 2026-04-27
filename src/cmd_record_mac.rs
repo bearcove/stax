@@ -57,7 +57,8 @@ fn record_existing_pid(
         ..Default::default()
     };
 
-    let should_stop = || sigint.was_triggered();
+    let stop_via_sink = sink.live_sink_stop_flag();
+    let should_stop = || sigint.was_triggered() || stop_via_sink();
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -102,8 +103,9 @@ fn record_child_launch(
         ..Default::default()
     };
 
+    let stop_via_sink = sink.live_sink_stop_flag();
     let should_stop = move || {
-        if sigint.was_triggered() {
+        if sigint.was_triggered() || stop_via_sink() {
             return true;
         }
         match child_for_stop.lock() {
@@ -141,6 +143,22 @@ struct LiveOnlySink {
 fn notify_target_attached(sink: &LiveOnlySink, pid: u32) {
     if let Some(live) = sink.live_sink.as_ref() {
         live.on_target_attached(&TargetAttached { pid, task_port: 0 });
+    }
+}
+
+impl LiveOnlySink {
+    /// Build a `Fn() -> bool` that reflects the live sink's
+    /// out-of-band stop signal (server closed ingest channel,
+    /// etc.). Returns a closure that always returns `false` when
+    /// the sink doesn't expose a stop flag — keeps the
+    /// `should_stop` pattern in `record_*` symmetric.
+    fn live_sink_stop_flag(&self) -> impl Fn() -> bool + Send + Sync + 'static {
+        let flag = self.live_sink.as_ref().and_then(|s| s.stop_flag());
+        move || {
+            flag.as_ref()
+                .map(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+                .unwrap_or(false)
+        }
     }
 }
 

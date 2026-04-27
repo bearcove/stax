@@ -5,6 +5,7 @@
 //! task drains.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use stax_live_proto::{
     IngestEvent, RunIngestClient, WireBinaryLoaded, WireMachOSymbol, WireOffCpuInterval,
@@ -22,17 +23,28 @@ use crate::live_sink::MachOByteSource;
 
 /// `LiveSink` impl that drops every event into a channel which a
 /// forwarder task drains and pushes into a vox `Tx<IngestEvent>`.
+///
+/// `stop_requested` flips to `true` when the forwarder sees the
+/// vox `Tx` reject a send — typically because stax-server dropped
+/// its `Rx<IngestEvent>` after a `RunControl::stop_active`. The
+/// recorder loop polls `LiveSink::stop_requested()` to break out
+/// of `drive_session` cleanly.
 pub struct IngestSink {
     tx: UnboundedSender<IngestEvent>,
+    stop_requested: Arc<AtomicBool>,
 }
 
 impl IngestSink {
-    pub fn new(tx: UnboundedSender<IngestEvent>) -> Self {
-        Self { tx }
+    pub fn new(tx: UnboundedSender<IngestEvent>, stop_requested: Arc<AtomicBool>) -> Self {
+        Self { tx, stop_requested }
     }
 }
 
 impl LiveSink for IngestSink {
+    fn stop_flag(&self) -> Option<Arc<AtomicBool>> {
+        Some(self.stop_requested.clone())
+    }
+
     fn on_sample(&self, ev: &SampleEvent) {
         let user_backtrace = ev.user_backtrace.iter().map(|f| f.address).collect();
         let _ = self.tx.send(IngestEvent::Sample(WireSampleEvent {
@@ -159,14 +171,23 @@ pub async fn connect_and_register(
     };
 
     let (sync_tx, mut sync_rx) = mpsc::unbounded_channel::<IngestEvent>();
+    let stop_requested = Arc::new(AtomicBool::new(false));
+    let stop_for_forwarder = stop_requested.clone();
     let forwarder = tokio::spawn(async move {
         while let Some(event) = sync_rx.recv().await {
             if vox_tx.send(event).await.is_err() {
+                // Server dropped its Rx (most likely
+                // stop_active fired). Tell the recorder loop to
+                // bail out via LiveSink::stop_requested.
+                stop_for_forwarder.store(true, Ordering::Relaxed);
                 break;
             }
         }
         let _ = vox_tx.close(Default::default()).await;
+        // Cover the cases where sync_rx closed for any other
+        // reason — the recorder should stop either way.
+        stop_for_forwarder.store(true, Ordering::Relaxed);
     });
 
-    Ok((run_id, IngestSink::new(sync_tx), forwarder))
+    Ok((run_id, IngestSink::new(sync_tx, stop_requested), forwarder))
 }

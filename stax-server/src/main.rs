@@ -159,6 +159,11 @@ struct ServerState {
 
 struct Inner {
     active: Option<RunSummary>,
+    /// Notify that wakes the active run's drainer task so it drops
+    /// its `Rx<IngestEvent>`. Set when a run starts, cleared by
+    /// `stop_active` (which then notifies, and by the drainer
+    /// itself when its Rx closes naturally).
+    cancel: Option<Arc<tokio::sync::Notify>>,
     history: Vec<RunSummary>,
 }
 
@@ -167,6 +172,7 @@ impl ServerState {
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 active: None,
+                cancel: None,
                 history: Vec::new(),
             })),
             aggregator: Arc::new(RwLock::new(Aggregator::default())),
@@ -291,19 +297,27 @@ impl RunControl for ServerState {
     }
 
     async fn stop_active(&self) -> Result<RunSummary, String> {
-        let mut inner = self.inner.lock();
-        match inner.active.as_mut() {
-            Some(summary) => {
-                summary.state = RunState::Stopped;
-                summary.stop_reason = Some(StopReason::UserStop);
-                summary.stopped_at_unix_ns = Some(now_unix_ns());
-                let snapshot = summary.clone();
-                inner.history.push(snapshot.clone());
-                inner.active = None;
-                Ok(snapshot)
-            }
-            None => Err("no active run".to_owned()),
+        // Mark as stopped + grab the cancel handle under the lock,
+        // then notify outside the lock so the drainer can run
+        // freely. The drainer is responsible for moving the run
+        // from `active` to `history` once its Rx is closed; we
+        // return the snapshot we just produced so the caller has
+        // something to print without waiting on the recorder.
+        let (snapshot, cancel) = {
+            let mut inner = self.inner.lock();
+            let summary = match inner.active.as_mut() {
+                Some(s) => s,
+                None => return Err("no active run".to_owned()),
+            };
+            summary.state = RunState::Stopped;
+            summary.stop_reason = Some(StopReason::UserStop);
+            summary.stopped_at_unix_ns = Some(now_unix_ns());
+            (summary.clone(), inner.cancel.take())
+        };
+        if let Some(cancel) = cancel {
+            cancel.notify_waiters();
         }
+        Ok(snapshot)
     }
 }
 
@@ -325,6 +339,7 @@ impl RunIngest for ServerState {
             pet_samples: 0,
             off_cpu_intervals: 0,
         };
+        let cancel = Arc::new(tokio::sync::Notify::new());
         {
             let mut inner = self.inner.lock();
             if inner.active.is_some() {
@@ -333,6 +348,7 @@ impl RunIngest for ServerState {
                     .to_owned());
             }
             inner.active = Some(summary);
+            inner.cancel = Some(cancel.clone());
         }
 
         // Reset aggregator + binary registry for this run. Historical
@@ -349,12 +365,26 @@ impl RunIngest for ServerState {
 
         let state = self.clone();
         tokio::spawn(async move {
-            while let Ok(Some(event_sref)) = events.recv().await {
-                let state = state.clone();
-                let _ = event_sref.map(|event| {
-                    state.apply_event(id, event);
-                });
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancel.notified() => break,
+                    recv = events.recv() => match recv {
+                        Ok(Some(event_sref)) => {
+                            let state = state.clone();
+                            let _ = event_sref.map(|event| {
+                                state.apply_event(id, event);
+                            });
+                        }
+                        _ => break,
+                    },
+                }
             }
+            // Drop the Rx explicitly so the recorder's Tx::send
+            // surfaces an error and its forwarder flips
+            // stop_requested → recorder bails out of drive_session
+            // → the whole pipeline cascades down.
+            drop(events);
             state.finalize_run(id, StopReason::TargetExited);
         });
 
@@ -459,7 +489,7 @@ impl ServerState {
         }
     }
 
-    fn finalize_run(&self, run_id: RunId, reason: StopReason) {
+    fn finalize_run(&self, run_id: RunId, default_reason: StopReason) {
         let mut inner = self.inner.lock();
         let Some(active) = inner.active.as_ref() else {
             return;
@@ -468,9 +498,15 @@ impl ServerState {
             return;
         }
         let mut summary = inner.active.take().expect("checked above");
-        summary.state = RunState::Stopped;
-        summary.stop_reason = Some(reason);
-        summary.stopped_at_unix_ns = Some(now_unix_ns());
+        // `stop_active` already set state + reason + timestamp. If
+        // we got here naturally (channel closed because the
+        // recorder finished on its own), fill them in.
+        if summary.state != RunState::Stopped {
+            summary.state = RunState::Stopped;
+            summary.stop_reason = Some(default_reason);
+            summary.stopped_at_unix_ns = Some(now_unix_ns());
+        }
+        inner.cancel = None;
         tracing::info!(
             "stax-server: run {} stopped after {} samples / {} intervals",
             summary.id.0,

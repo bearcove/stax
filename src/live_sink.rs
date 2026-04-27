@@ -128,6 +128,16 @@ pub struct WakeupEvent< 'a > {
 }
 
 pub trait LiveSink: Send + Sync {
+    /// Hand the recorder a clonable handle on this sink's "stop
+    /// now" signal. `IngestSink` returns `Some(_)` and flips it
+    /// when stax-server closes its end of the ingest channel
+    /// (typically because `RunControl::stop_active` fired from
+    /// another shell); the legacy in-process aggregator returns
+    /// `None` and recording runs until SIGINT.
+    fn stop_flag(&self) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+        None
+    }
+
     fn on_sample( &self, event: &SampleEvent );
 
     /// Recorder acquired its handle on the target. Fires once at the
