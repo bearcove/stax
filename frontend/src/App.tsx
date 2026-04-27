@@ -105,8 +105,10 @@ function defaultUrl(): string {
 type SortKey = "self" | "total";
 
 export function App() {
-  const [url, setUrl] = useState(defaultUrl());
-  const [committedUrl, setCommittedUrl] = useState(url);
+  // The WebSocket URL is fixed for the lifetime of the page; override
+  // by passing `?ws=<url>` at load time. There is intentionally no UI
+  // to change it after connection -- the in-page input was clutter.
+  const [committedUrl] = useState(defaultUrl());
   const [status, setStatus] = useState<Status>("pending");
   const [error, setError] = useState<string | null>(null);
   const [client, setClient] = useState<ProfilerClient | null>(null);
@@ -142,7 +144,6 @@ export function App() {
   const [pmuMetric, setPmuMetric] = useState<PmuMetric>("ipc");
   const [theme, setTheme] = useState<Theme>(initialTheme);
   const [paused, setPaused] = useState(false);
-  const [editingUrl, setEditingUrl] = useState(false);
 
   // Reflect the theme onto the <html> element so the CSS tokens flip,
   // and persist the user's choice across reloads.
@@ -353,39 +354,12 @@ export function App() {
                 className={`dot ${status}`}
                 title={
                   status === "ok"
-                    ? `connected to ${committedUrl} — double-click to change`
+                    ? `connected to ${committedUrl}`
                     : `${status} · ${committedUrl}`
                 }
-                onDoubleClick={() => setEditingUrl(true)}
               />
             )}
           </span>
-          {(status !== "ok" || editingUrl) && (
-            <>
-              <input
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    setCommittedUrl(url);
-                    setEditingUrl(false);
-                  }
-                }}
-                autoFocus={editingUrl}
-                onBlur={() => {
-                  if (status === "ok") setEditingUrl(false);
-                }}
-              />
-              <button
-                onClick={() => {
-                  setCommittedUrl(url);
-                  setEditingUrl(false);
-                }}
-              >
-                connect
-              </button>
-            </>
-          )}
           {error && <span className="err-text">{error}</span>}
           {client && (
             <button
