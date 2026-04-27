@@ -2018,6 +2018,7 @@ dependencies = [
  "stax-live",
  "stax-live-proto",
  "tokio",
+ "vox",
 ]
 
 [[package]]
@@ -2123,6 +2124,7 @@ dependencies = [
  "libc",
  "log",
  "parking_lot",
+ "stax-live",
  "stax-live-proto",
  "tokio",
  "vox",

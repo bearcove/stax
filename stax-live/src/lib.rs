@@ -25,19 +25,18 @@ use stax_live_proto::{
     TopSort, TopUpdate, ViewParams,
 };
 
-use crate::aggregator::{
-    Aggregation, EventCtx, IntervalKind, OffCpuBreakdown, PmcAccum, PmuSample, StackNode,
-};
+pub use crate::aggregator::{IntervalKind, PmuSample};
+use crate::aggregator::{Aggregation, EventCtx, OffCpuBreakdown, PmcAccum, StackNode};
 
 mod aggregator;
 mod binaries;
 mod classify;
 mod disassemble;
 mod highlight;
-mod source;
+pub mod source;
 
 pub use aggregator::Aggregator;
-pub use binaries::{BinaryRegistry, LoadedBinary};
+pub use binaries::{BinaryRegistry, LiveSymbolOwned, LoadedBinary};
 
 /// What the sampler thread pushes into tokio. Owned data so we can move
 /// across the thread boundary cheaply.

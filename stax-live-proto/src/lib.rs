@@ -634,12 +634,14 @@ pub struct RunSummary {
 
 #[derive(Clone, Debug, Facet)]
 pub struct ServerStatus {
-    /// `None` when no run is active. The server hosts one run at a
-    /// time; agents should `wait_active` or `stop_active` before
-    /// starting another.
-    pub active: Option<RunSummary>,
     /// Wall-clock time the server itself started, unix nanos.
     pub server_started_at_unix_ns: u64,
+    /// Empty when no run is active. The server hosts one run at a
+    /// time; agents should `wait_active` or `stop_active` before
+    /// starting another. (Modelled as `Vec<RunSummary>` rather than
+    /// `Option<RunSummary>` because Option-of-struct trips
+    /// vox-postcard at the moment.)
+    pub active: Vec<RunSummary>,
 }
 
 /// Agent-side wait condition: which event makes `wait_active` return.

@@ -8,6 +8,7 @@ description = "Unprivileged long-running daemon: hosts the run registry, the liv
 
 [dependencies]
 stax-live-proto = { path = "../stax-live-proto" }
+stax-live = { path = "../stax-live" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 log = "0.4"
 env_logger = "0.11"

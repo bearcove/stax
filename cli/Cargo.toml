@@ -1,7 +1,7 @@
 [package]
 name = "stax"
 version = "0.1.1"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 log = "0.4"
@@ -12,6 +12,7 @@ facet = { version = "0.46" }
 figue = { version = "2.0" }
 stax-core = { path = "..", default-features = false }
 stax-live-proto = { path = "../stax-live-proto" }
+vox = { git = "https://github.com/bearcove/vox", rev = "1bdc0aa4911765af726a4142ceb67812b0f6963d", features = ["transport-local"] }
 
 [dependencies.stax-live]
 path = "../stax-live"
