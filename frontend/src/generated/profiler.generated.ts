@@ -392,13 +392,11 @@ export class ProfilerClient implements ProfilerCaller {
       const payload = new Uint8Array(0);
       return { payload, channels };
     };
-    const { channels } = prepareRetry();
       const value = await this.caller.call({
         method: "Profiler.subscribeTop",
         args: { limit, sort, params, output },
         descriptor,
         sendSchemas,
-        channels,
         prepareRetry,
         finalizeChannels: () => finalizeBoundChannelsForTypeRefs(argTypeRefs, [limit, sort, params, output], sendSchemas.schemas),
       });
@@ -438,13 +436,11 @@ export class ProfilerClient implements ProfilerCaller {
       const payload = new Uint8Array(0);
       return { payload, channels };
     };
-    const { channels } = prepareRetry();
       const value = await this.caller.call({
         method: "Profiler.subscribeAnnotated",
         args: { address, params, output },
         descriptor,
         sendSchemas,
-        channels,
         prepareRetry,
         finalizeChannels: () => finalizeBoundChannelsForTypeRefs(argTypeRefs, [address, params, output], sendSchemas.schemas),
       });
@@ -466,13 +462,11 @@ export class ProfilerClient implements ProfilerCaller {
       const payload = new Uint8Array(0);
       return { payload, channels };
     };
-    const { channels } = prepareRetry();
       const value = await this.caller.call({
         method: "Profiler.subscribeFlamegraph",
         args: { params, output },
         descriptor,
         sendSchemas,
-        channels,
         prepareRetry,
         finalizeChannels: () => finalizeBoundChannelsForTypeRefs(argTypeRefs, [params, output], sendSchemas.schemas),
       });
@@ -494,13 +488,11 @@ export class ProfilerClient implements ProfilerCaller {
       const payload = new Uint8Array(0);
       return { payload, channels };
     };
-    const { channels } = prepareRetry();
       const value = await this.caller.call({
         method: "Profiler.subscribeThreads",
         args: { output },
         descriptor,
         sendSchemas,
-        channels,
         prepareRetry,
         finalizeChannels: () => finalizeBoundChannelsForTypeRefs(argTypeRefs, [output], sendSchemas.schemas),
       });
@@ -526,13 +518,11 @@ export class ProfilerClient implements ProfilerCaller {
       const payload = new Uint8Array(0);
       return { payload, channels };
     };
-    const { channels } = prepareRetry();
       const value = await this.caller.call({
         method: "Profiler.subscribeTimeline",
         args: { tid, output },
         descriptor,
         sendSchemas,
-        channels,
         prepareRetry,
         finalizeChannels: () => finalizeBoundChannelsForTypeRefs(argTypeRefs, [tid, output], sendSchemas.schemas),
       });
@@ -554,13 +544,11 @@ export class ProfilerClient implements ProfilerCaller {
       const payload = new Uint8Array(0);
       return { payload, channels };
     };
-    const { channels } = prepareRetry();
       const value = await this.caller.call({
         method: "Profiler.subscribeNeighbors",
         args: { address, params, output },
         descriptor,
         sendSchemas,
-        channels,
         prepareRetry,
         finalizeChannels: () => finalizeBoundChannelsForTypeRefs(argTypeRefs, [address, params, output], sendSchemas.schemas),
       });
@@ -589,13 +577,11 @@ export class ProfilerClient implements ProfilerCaller {
       const payload = new Uint8Array(0);
       return { payload, channels };
     };
-    const { channels } = prepareRetry();
       const value = await this.caller.call({
         method: "Profiler.subscribeWakers",
         args: { wakeeTid, output },
         descriptor,
         sendSchemas,
-        channels,
         prepareRetry,
         finalizeChannels: () => finalizeBoundChannelsForTypeRefs(argTypeRefs, [wakeeTid, output], sendSchemas.schemas),
       });
@@ -625,13 +611,11 @@ export class ProfilerClient implements ProfilerCaller {
       const payload = new Uint8Array(0);
       return { payload, channels };
     };
-    const { channels } = prepareRetry();
       const value = await this.caller.call({
         method: "Profiler.subscribeIntervals",
         args: { flameKey, params, output },
         descriptor,
         sendSchemas,
-        channels,
         prepareRetry,
         finalizeChannels: () => finalizeBoundChannelsForTypeRefs(argTypeRefs, [flameKey, params, output], sendSchemas.schemas),
       });
@@ -658,13 +642,11 @@ export class ProfilerClient implements ProfilerCaller {
       const payload = new Uint8Array(0);
       return { payload, channels };
     };
-    const { channels } = prepareRetry();
       const value = await this.caller.call({
         method: "Profiler.subscribePetSamples",
         args: { flameKey, params, output },
         descriptor,
         sendSchemas,
-        channels,
         prepareRetry,
         finalizeChannels: () => finalizeBoundChannelsForTypeRefs(argTypeRefs, [flameKey, params, output], sendSchemas.schemas),
       });
@@ -758,7 +740,6 @@ export class ProfilerDispatcher implements Dispatcher {
     } else if (method.id === 0x5e5b065bf333971bn) {
       try {
         const result = await this.handler.subscribeTop(args[0] as number, args[1] as TopSort, args[2] as ViewParams, args[3] as Tx<TopUpdate>);
-        (args[3] as { close(): void }).close(); // close output before reply
         call.reply(result);
       } catch (error) {
         call.replyInternalError(error instanceof Error ? error.message : String(error));
@@ -773,7 +754,6 @@ export class ProfilerDispatcher implements Dispatcher {
     } else if (method.id === 0xbd08d48f35f68c69n) {
       try {
         const result = await this.handler.subscribeAnnotated(args[0] as bigint, args[1] as ViewParams, args[2] as Tx<AnnotatedView>);
-        (args[2] as { close(): void }).close(); // close output before reply
         call.reply(result);
       } catch (error) {
         call.replyInternalError(error instanceof Error ? error.message : String(error));
@@ -781,7 +761,6 @@ export class ProfilerDispatcher implements Dispatcher {
     } else if (method.id === 0x6889c2c730466af0n) {
       try {
         const result = await this.handler.subscribeFlamegraph(args[0] as ViewParams, args[1] as Tx<FlamegraphUpdate>);
-        (args[1] as { close(): void }).close(); // close output before reply
         call.reply(result);
       } catch (error) {
         call.replyInternalError(error instanceof Error ? error.message : String(error));
@@ -789,7 +768,6 @@ export class ProfilerDispatcher implements Dispatcher {
     } else if (method.id === 0xbf5f73ea223d9f7dn) {
       try {
         const result = await this.handler.subscribeThreads(args[0] as Tx<ThreadsUpdate>);
-        (args[0] as { close(): void }).close(); // close output before reply
         call.reply(result);
       } catch (error) {
         call.replyInternalError(error instanceof Error ? error.message : String(error));
@@ -797,7 +775,6 @@ export class ProfilerDispatcher implements Dispatcher {
     } else if (method.id === 0xc3381210c17fc3c4n) {
       try {
         const result = await this.handler.subscribeTimeline(args[0] as number | null, args[1] as Tx<TimelineUpdate>);
-        (args[1] as { close(): void }).close(); // close output before reply
         call.reply(result);
       } catch (error) {
         call.replyInternalError(error instanceof Error ? error.message : String(error));
@@ -805,7 +782,6 @@ export class ProfilerDispatcher implements Dispatcher {
     } else if (method.id === 0x42acdf6aa85cc2d3n) {
       try {
         const result = await this.handler.subscribeNeighbors(args[0] as bigint, args[1] as ViewParams, args[2] as Tx<NeighborsUpdate>);
-        (args[2] as { close(): void }).close(); // close output before reply
         call.reply(result);
       } catch (error) {
         call.replyInternalError(error instanceof Error ? error.message : String(error));
@@ -813,7 +789,6 @@ export class ProfilerDispatcher implements Dispatcher {
     } else if (method.id === 0xc6ab2f2a4444e87cn) {
       try {
         const result = await this.handler.subscribeWakers(args[0] as number, args[1] as Tx<WakersUpdate>);
-        (args[1] as { close(): void }).close(); // close output before reply
         call.reply(result);
       } catch (error) {
         call.replyInternalError(error instanceof Error ? error.message : String(error));
@@ -821,7 +796,6 @@ export class ProfilerDispatcher implements Dispatcher {
     } else if (method.id === 0xc689c5fb8e7ec474n) {
       try {
         const result = await this.handler.subscribeIntervals(args[0] as string, args[1] as ViewParams, args[2] as Tx<IntervalListUpdate>);
-        (args[2] as { close(): void }).close(); // close output before reply
         call.reply(result);
       } catch (error) {
         call.replyInternalError(error instanceof Error ? error.message : String(error));
@@ -829,7 +803,6 @@ export class ProfilerDispatcher implements Dispatcher {
     } else if (method.id === 0xca1b65cabd8a8f38n) {
       try {
         const result = await this.handler.subscribePetSamples(args[0] as string, args[1] as ViewParams, args[2] as Tx<PetSampleListUpdate>);
-        (args[2] as { close(): void }).close(); // close output before reply
         call.reply(result);
       } catch (error) {
         call.replyInternalError(error instanceof Error ? error.message : String(error));

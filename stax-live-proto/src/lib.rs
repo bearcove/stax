@@ -575,8 +575,151 @@ pub trait Profiler {
     async fn is_paused(&self) -> bool;
 }
 
+/// Stable handle for one run hosted by the server. Returned by
+/// `RunControl::start_run` and accepted by every other run-scoped
+/// query. New format / domain in the future; today it's just a u64
+/// monotonically issued by the server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Facet)]
+pub struct RunId(pub u64);
+
+/// Lifecycle phase of a hosted run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum RunState {
+    /// Recording is in progress; samples are streaming in.
+    Recording = 0,
+    /// The recorder reported it stopped (target exited, time limit hit,
+    /// `stop_active` was called). Aggregator state is frozen but still
+    /// queryable.
+    Stopped = 1,
+}
+
+/// Why a run stopped. Surfaced once the run transitions to
+/// `RunState::Stopped`.
+#[derive(Clone, Debug, Facet)]
+#[repr(u8)]
+pub enum StopReason {
+    /// The launched child exited (or the attached PID went away).
+    TargetExited = 0,
+    /// `--time-limit` elapsed.
+    TimeLimit = 1,
+    /// User Ctrl-C'd the recorder, or an agent called `stop_active`.
+    UserStop = 2,
+    /// The recorder errored. `message` carries the human-readable
+    /// detail.
+    RecorderError {
+        message: String,
+    } = 3,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct RunSummary {
+    pub id: RunId,
+    pub state: RunState,
+    /// `None` while still recording.
+    pub stop_reason: Option<StopReason>,
+    /// Wall-clock start (unix nanos).
+    pub started_at_unix_ns: u64,
+    /// Wall-clock stop (unix nanos). `None` while still recording.
+    pub stopped_at_unix_ns: Option<u64>,
+    /// PID of the target process, if any. `None` for runs that
+    /// haven't acquired a PID yet (very early in the lifecycle).
+    pub target_pid: Option<u32>,
+    /// Best-effort label derived from the launch command or attached
+    /// PID's executable basename. Free-form; not guaranteed unique.
+    pub label: String,
+    /// PET stack-walk hits ingested so far.
+    pub pet_samples: u64,
+    /// Off-CPU intervals ingested so far.
+    pub off_cpu_intervals: u64,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct ServerStatus {
+    /// `None` when no run is active. The server hosts one run at a
+    /// time; agents should `wait_active` or `stop_active` before
+    /// starting another.
+    pub active: Option<RunSummary>,
+    /// Wall-clock time the server itself started, unix nanos.
+    pub server_started_at_unix_ns: u64,
+}
+
+/// Agent-side wait condition: which event makes `wait_active` return.
+/// First-fired wins; `wait_active` always also returns once the run
+/// transitions to `Stopped`, regardless of which condition was set.
+#[derive(Clone, Debug, Facet)]
+#[repr(u8)]
+pub enum WaitCondition {
+    /// Block until the active run transitions to `Stopped`. The
+    /// natural choice for "let the recording finish, then I'll
+    /// query."
+    UntilStopped = 0,
+    /// Return as soon as the run has ingested at least `count` PET
+    /// samples (returns immediately if already past). Useful for
+    /// "give me enough data to be statistically meaningful, then
+    /// look."
+    ForSamples { count: u64 } = 1,
+    /// Return after `seconds` of wall-clock time inside `wait_active`,
+    /// even if the run is still recording.
+    ForSeconds { seconds: u64 } = 2,
+    /// Return as soon as a symbol whose demangled name contains
+    /// `needle` (case-sensitive substring match) has been observed
+    /// in the binary registry. Useful for "wait until the JIT has
+    /// produced the function I want to look at."
+    UntilSymbolSeen { needle: String } = 3,
+}
+
+/// Outcome of a `wait_active` call.
+#[derive(Clone, Debug, Facet)]
+#[repr(u8)]
+pub enum WaitOutcome {
+    /// The wait condition fired. `summary` is the run's snapshot
+    /// at the moment the condition fired (still `Recording` if the
+    /// condition was, e.g., `ForSamples`).
+    ConditionMet { summary: RunSummary } = 0,
+    /// The run reached `Stopped`. Always returned for `UntilStopped`,
+    /// and pre-empts any other condition for the other variants.
+    Stopped { summary: RunSummary } = 1,
+    /// The caller-supplied `timeout_ms` elapsed first. `summary` is
+    /// the run's snapshot at that moment (still `Recording`).
+    TimedOut { summary: RunSummary } = 2,
+    /// No run was active when `wait_active` was called.
+    NoActiveRun = 3,
+}
+
+/// Agent-facing control plane. One service instance per server; runs
+/// are addressed by `RunId`. The web UI uses the existing `Profiler`
+/// trait for view subscriptions; agents use `RunControl` for
+/// lifecycle + the same `Profiler` for queries (with `subscribe_*`
+/// returning a single update being equivalent to a unary call).
+#[vox::service]
+pub trait RunControl {
+    /// Snapshot the server. Returns the active run (if any) plus
+    /// server-wide info. Used by `stax status`.
+    async fn status(&self) -> ServerStatus;
+
+    /// All runs the server has ever hosted (active + historical
+    /// in-memory archive). Bounded by the server's eviction policy
+    /// (in-memory only for now; on-disk persistence is a follow-up).
+    async fn list_runs(&self) -> Vec<RunSummary>;
+
+    /// Block until `condition` fires, the active run stops, or
+    /// `timeout_ms` elapses (whichever comes first). Returns
+    /// `NoActiveRun` immediately when nothing is recording.
+    async fn wait_active(
+        &self,
+        condition: WaitCondition,
+        timeout_ms: Option<u64>,
+    ) -> WaitOutcome;
+
+    /// Ask the recorder to stop the active run cleanly. Returns the
+    /// final `RunSummary` once the run has transitioned to `Stopped`.
+    /// Errors if no run is active.
+    async fn stop_active(&self) -> Result<RunSummary, String>;
+}
+
 /// All service descriptors exposed by stax-live; the codegen iterates over
 /// this list.
 pub fn all_services() -> Vec<&'static vox::session::ServiceDescriptor> {
-    vec![profiler_service_descriptor()]
+    vec![profiler_service_descriptor(), run_control_service_descriptor()]
 }
