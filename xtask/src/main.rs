@@ -127,49 +127,62 @@ fn install_server_launch_agent(cargo_bin: &Path) -> Result<(), Box<dyn Error>> {
     let domain = format!("gui/{uid_str}");
     let label_target = format!("{domain}/eu.bearcove.stax-server");
 
-    println!(":: launchctl bootout {label_target} (best-effort)");
-    let _ = Command::new("launchctl")
-        .args(["bootout", &label_target])
-        .status();
+    if is_loaded(&label_target) {
+        println!(":: launchctl bootout {label_target}");
+        let _ = Command::new("launchctl")
+            .args(["bootout", &label_target])
+            .status();
+
+        // bootout returns before launchd actually tears the
+        // service down — wait for it to really be gone before
+        // calling bootstrap, otherwise we hit "Input/output
+        // error" because the label is still in the domain.
+        wait_until_unloaded(&label_target)?;
+    }
 
     println!(":: launchctl bootstrap {domain} {}", plist_dst.display());
     let status = Command::new("launchctl")
         .args(["bootstrap", &domain])
         .arg(&plist_dst)
         .status()?;
-    if status.success() {
-        println!(":: stax-server LaunchAgent loaded.");
-        return Ok(());
+    if !status.success() {
+        return Err(format!(
+            "launchctl bootstrap exited with {status} (try `launchctl load {}` manually)",
+            plist_dst.display()
+        )
+        .into());
     }
+    println!(":: stax-server LaunchAgent loaded.");
+    Ok(())
+}
 
-    // Bootstrap exit 5 ("Input/output error") usually means "still
-    // loaded" — bootout returns before launchd has actually torn
-    // the service down. If that's what happened, just kickstart
-    // it: re-exec the current label with the binary we just wrote.
-    let print_status = Command::new("launchctl")
-        .args(["print", &label_target])
+#[cfg(target_os = "macos")]
+fn is_loaded(label_target: &str) -> bool {
+    Command::new("launchctl")
+        .args(["print", label_target])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .ok();
-    if matches!(print_status, Some(s) if s.success()) {
-        println!(":: bootstrap reported {status} but {label_target} is loaded;");
-        println!("::   running launchctl kickstart -k {label_target} instead");
-        let kick = Command::new("launchctl")
-            .args(["kickstart", "-k", &label_target])
-            .status()?;
-        if kick.success() {
-            println!(":: stax-server kickstarted with the new binary.");
-            return Ok(());
-        }
-        return Err(format!("launchctl kickstart exited with {kick}").into());
-    }
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
 
-    Err(format!(
-        "launchctl bootstrap exited with {status} (try `launchctl load {}` manually)",
-        plist_dst.display()
-    )
-    .into())
+#[cfg(target_os = "macos")]
+fn wait_until_unloaded(label_target: &str) -> Result<(), Box<dyn Error>> {
+    use std::thread::sleep;
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while is_loaded(label_target) {
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "launchctl bootout: {label_target} still loaded after 10s; \
+                 try `launchctl bootout {label_target}` manually"
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(100));
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
