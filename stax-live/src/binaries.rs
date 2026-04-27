@@ -106,8 +106,18 @@ pub struct ResolvedAddress {
 }
 
 pub struct BinaryRegistry {
-    /// Loaded images, keyed by base AVMA. Linear scan; tens of entries.
+    /// Loaded images. Order is insertion order — used as the
+    /// stable identity for `by_base_index` below. Has thousands
+    /// of entries once the recorder ships the dyld shared cache,
+    /// so don't ever linear-scan this for address lookups.
     by_base: Vec<LoadedBinary>,
+    /// Sorted (base_avma, avma_end, by_base_idx) index for
+    /// O(log N) address-to-binary lookup. Lazily rebuilt: any
+    /// `insert`/`remove` clears it, the next `lookup_symbol`
+    /// rebuilds. Wrapped in `Mutex` because lookups happen
+    /// behind the outer `RwLock`'s read guard, so we need
+    /// interior mutability of just this cache.
+    by_base_index: parking_lot::Mutex<Option<Vec<(u64, u64, usize)>>>,
     /// CodeImage cache keyed by binary path. `Option` so a failed load
     /// is remembered (don't keep re-trying the dyld cache for an image
     /// we already proved isn't there).
@@ -137,6 +147,7 @@ impl BinaryRegistry {
     pub fn new() -> Self {
         Self {
             by_base: Vec::new(),
+            by_base_index: parking_lot::Mutex::new(None),
             images: std::collections::HashMap::new(),
             dyld_bundle: None,
             dyld_arch: None,
@@ -172,10 +183,48 @@ impl BinaryRegistry {
         // sampled address on every top-N tick.
         binary.symbols.sort_by_key(|s| s.start_svma);
         self.by_base.push(binary);
+        self.invalidate_index();
     }
 
     pub fn remove(&mut self, base_avma: u64) {
         self.by_base.retain(|b| b.base_avma != base_avma);
+        self.invalidate_index();
+    }
+
+    fn invalidate_index(&mut self) {
+        *self.by_base_index.lock() = None;
+    }
+
+    /// Find the binary that covers `address` via binary search on
+    /// the lazily-built `by_base_index`. Rebuilds the index on
+    /// first call after any insert/remove.
+    fn binary_for_address(&self, address: u64) -> Option<usize> {
+        let mut guard = self.by_base_index.lock();
+        if guard.is_none() {
+            let mut idx: Vec<(u64, u64, usize)> = self
+                .by_base
+                .iter()
+                .enumerate()
+                .map(|(i, b)| (b.base_avma, b.avma_end, i))
+                .collect();
+            // Stable sort by base_avma. Overlapping ranges (rare —
+            // happens when a binary is replaced and the same range
+            // gets reused) are tolerated: partition_point picks the
+            // last entry with base_avma <= address, and the
+            // end-bound check below filters out a stale prior
+            // mapping.
+            idx.sort_by_key(|e| e.0);
+            *guard = Some(idx);
+        }
+        let idx = guard.as_ref().expect("just populated");
+        // partition_point gives us the first entry with base_avma > address;
+        // the candidate is the one before that.
+        let pos = idx.partition_point(|e| e.0 <= address);
+        if pos == 0 {
+            return None;
+        }
+        let (_, end, by_base_idx) = idx[pos - 1];
+        if address < end { Some(by_base_idx) } else { None }
     }
 
     /// True when any loaded binary has a symbol whose raw name
@@ -205,10 +254,7 @@ impl BinaryRegistry {
     /// triple without loading any image bytes. Used by top-N rendering
     /// where we want labels but don't need disassembly.
     pub fn lookup_symbol(&self, address: u64) -> Option<ResolvedSymbol> {
-        let binary = self
-            .by_base
-            .iter()
-            .find(|b| address >= b.base_avma && address < b.avma_end)?;
+        let binary = &self.by_base[self.binary_for_address(address)?];
         let svma = svma_for(binary, address);
         let basename = short_path(&binary.path).to_owned();
         let is_main = binary.is_executable;
@@ -252,11 +298,7 @@ impl BinaryRegistry {
     ///      (still gives disassembly, just no DWARF/source)
     ///   3. address not in any mapped binary → read window of target memory
     pub fn resolve(&mut self, address: u64) -> Option<ResolvedAddress> {
-        let binary_idx = match self
-            .by_base
-            .iter()
-            .position(|b| address >= b.base_avma && address < b.avma_end)
-        {
+        let binary_idx = match self.binary_for_address(address) {
             Some(i) => i,
             None => return self.resolve_unmapped(address),
         };

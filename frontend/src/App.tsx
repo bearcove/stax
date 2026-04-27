@@ -37,9 +37,57 @@ import {
   offCpuTotal,
   reasonSegments,
   REASON_LABEL,
+  type FlamegraphView,
+  type FlameView,
 } from "./wire.ts";
 
 type Status = "pending" | "ok" | "err";
+
+/// Walk a flame tree by layout key ("r/2/1/0"). Mirrors the matching
+/// helper in Flamegraph.tsx — kept private here so the App-side
+/// "copy as text" code path doesn't reach into Flamegraph internals.
+function findFlameByKey(node: FlameView, target: string): FlameView | null {
+  if (target === "r") return node;
+  const parts = target.split("/").slice(1);
+  let cur: FlameView = node;
+  for (const p of parts) {
+    const i = Number(p);
+    if (!Number.isFinite(i) || i < 0 || i >= cur.children.length) return null;
+    cur = cur.children[i];
+  }
+  return cur;
+}
+
+/// Render a flame subtree as a plain-text indented tree, sorted by
+/// on_cpu_ns descending at each level. Same shape as `stax flame`
+/// from the CLI: per-line `   XXms PP.P%  └─ name (binary)`. Trees
+/// can be huge; this prints everything (no depth/threshold caps),
+/// the assumption being clipboard targets handle large pastes
+/// fine and the user asked for a deep copy.
+function renderFlameAsText(root: FlameView, totalOnCpuNs: bigint): string {
+  const total = Number(totalOnCpuNs > 0n ? totalOnCpuNs : 1n);
+  const lines: string[] = [];
+
+  function rec(node: FlameView, depth: number) {
+    const onCpu = Number(node.on_cpu_ns);
+    const ms = (onCpu / 1e6).toFixed(2);
+    const pct = ((onCpu / total) * 100).toFixed(1);
+    const indent = "  ".repeat(depth);
+    const prefix = depth === 0 ? "" : "└─ ";
+    const label =
+      depth === 0
+        ? "(root)"
+        : `${node.function_name ?? "<unresolved>"}  (${node.binary ?? "?"})`;
+    lines.push(`${ms.padStart(8)}ms ${pct.padStart(5)}%  ${indent}${prefix}${label}`);
+    const children = [...node.children].sort((a, b) =>
+      a.on_cpu_ns > b.on_cpu_ns ? -1 : a.on_cpu_ns < b.on_cpu_ns ? 1 : 0,
+    );
+    for (const c of children) rec(c, depth + 1);
+  }
+
+  rec(root, 0);
+  return lines.join("\n") + "\n";
+}
 type Theme = "dark" | "light";
 
 /// Read the stored theme on first paint, falling back to the OS
@@ -136,6 +184,10 @@ export function App() {
   // breadcrumb removes just that one step, Esc pops one level.
   const [drillStack, setDrillStack] = useState<DrillStep[]>([]);
   const [menu, setMenu] = useState<ContextMenuTarget | null>(null);
+  // Latest flamegraph snapshot, kept here so the context menu can
+  // copy a subtree to the clipboard without poking into Flamegraph
+  // internals.
+  const [latestFlame, setLatestFlame] = useState<FlamegraphView | null>(null);
   // `filter` carries the non-stack filter knobs (time range, sample
   // mode). exclude_symbols is derived from drillStack and merged in
   // on the way to the wire so the two stay consistent.
@@ -512,6 +564,7 @@ export function App() {
             onFrozenChange={setFlameFrozen}
             onContextMenu={openMenu}
             onDropSymbol={dropSymbol}
+            onUpdate={setLatestFlame}
           />
         </section>
       )}
@@ -709,6 +762,22 @@ export function App() {
               }}
             >
               Copy symbol name
+            </button>
+          )}
+          {latestFlame && (
+            <button
+              onClick={() => {
+                const subtree = menu.flameKey
+                  ? findFlameByKey(latestFlame.root, menu.flameKey) ?? latestFlame.root
+                  : latestFlame.root;
+                const text = renderFlameAsText(subtree, latestFlame.total_on_cpu_ns);
+                navigator.clipboard?.writeText(text);
+                setMenu(null);
+              }}
+            >
+              {menu.flameKey === "r" || !menu.flameKey
+                ? "Copy flamegraph as text"
+                : "Copy subtree as text"}
             </button>
           )}
         </div>

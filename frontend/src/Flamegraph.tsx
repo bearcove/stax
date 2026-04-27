@@ -153,6 +153,7 @@ export function Flamegraph({
   onFrozenChange,
   onContextMenu,
   onDropSymbol,
+  onUpdate,
 }: {
   client: ProfilerClient;
   tid: number | null;
@@ -176,6 +177,10 @@ export function Flamegraph({
   onFrozenChange?: (frozen: boolean) => void;
   onContextMenu: (t: ContextMenuTarget) => void;
   onDropSymbol: (s: { function_name: string | null; binary: string | null }) => void;
+  /// Hand the latest flame view back to the parent so its context
+  /// menu can do whole-tree operations like "copy as text" without
+  /// re-subscribing.
+  onUpdate?: (u: FlamegraphView | null) => void;
 }) {
   const [update, setUpdate] = useState<FlamegraphView | null>(null);
   const [hover, setHover] = useState<Box | null>(null);
@@ -228,6 +233,7 @@ export function Flamegraph({
         if (cancelled) break;
         const next = hydrateFlamegraph(wire);
         latestRef.current = next;
+        onUpdate?.(next);
         if (!frozenRef.current) setUpdate(next);
       }
     })();
