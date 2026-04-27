@@ -22,7 +22,7 @@ use crate::jitdump_tail::JitdumpTailer;
 use crate::kdebug::{self, kdbg_class, kdbg_code, kdbg_func, kdbg_subclass, KdBuf, KdRegtype, DBG_PERF};
 use crate::kernel_symbols::{KernelImage, SlideEstimator};
 use crate::libproc;
-use crate::offcpu::OffCpuTracker;
+use crate::offcpu::CpuIntervalTracker;
 use crate::parser::Parser;
 use crate::pmu_events::{self, ConfiguredPmu, PmuSlot};
 
@@ -461,7 +461,7 @@ fn drain_loop<S: SampleSink>(
     // (subclass, code, func) -> count, for diagnostics.
     let mut histogram: BTreeMap<(u8, u16, u32), u64> = BTreeMap::new();
     let mut total_drained: u64 = 0;
-    let mut offcpu = OffCpuTracker::new();
+    let mut offcpu = CpuIntervalTracker::new();
     // Wall-clock duration represented by one PET tick. Samples and
     // off-CPU intervals are weighted by ns of wall-clock time, so
     // the aggregator works in "duration of activity" rather than
@@ -629,13 +629,6 @@ fn drain_loop<S: SampleSink>(
                     tid: sample.tid,
                     backtrace: sample.user_backtrace,
                     kernel_backtrace: sample.kernel_backtrace,
-                    // One PET sample stands in for one sampling
-                    // period of wall-clock time. With samples
-                    // weighted by their period, on-CPU stack widths
-                    // map directly to time -- no need for the UI to
-                    // multiply count by 1/Hz.
-                    duration_ns: pet_period_ns,
-                    is_offcpu: false,
                     cycles,
                     instructions,
                     l1d_misses,
@@ -643,6 +636,9 @@ fn drain_loop<S: SampleSink>(
                 });
             });
         }
+        // pet_period_ns left here for the on-CPU interval emission
+        // path below; suppress dead-code warning when not used.
+        let _ = pet_period_ns;
 
         // Emit any wakeup events captured this batch. The waker's
         // stack is borrowed from its last PET tick, so the sink gets
@@ -659,40 +655,40 @@ fn drain_loop<S: SampleSink>(
             });
         }
 
-        // Emit one off-CPU sample per closed interval, with
-        // `duration_ns` set to the actual blocked time. The stack is
-        // frozen from the last on-CPU sample for the thread, so a
-        // thread blocked deep inside `mach_msg_overwrite_trap` lights
-        // up that frame for the entire blocked interval rather than
-        // disappearing the way it would in a CPU-only profiler.
-        //
-        // Earlier this expanded each interval into N synthetic
-        // samples spaced at the sampling period, but that conflated
-        // "samples observed" with "wall time blocked" -- a thread
-        // parked for 100ms looked 100x more interesting than a busy
-        // thread sampled at 1kHz. Aggregator now works in time, so
-        // one sample per interval (carrying the actual duration)
-        // attributes the right amount of wall time to the cached
-        // stack and stops drowning the flame in identical synthetic
-        // samples.
+        // Forward every closed CPU interval (on-CPU and off-CPU) to
+        // the sink. Both are SCHED-derived; durations are ground
+        // truth. The aggregator distributes on-CPU interval time
+        // across the PET samples that fell inside it, and credits
+        // off-CPU interval time in full to the cached blocking
+        // stack (classified by leaf into an OffCpuReason).
         for interval in offcpu.drain_pending() {
-            let interval_ns = interval.on_ns.saturating_sub(interval.off_ns);
-            if interval_ns == 0 {
-                continue;
+            match interval.kind {
+                crate::offcpu::PendingKind::OnCpu => {
+                    sink.on_cpu_interval(nerf_mac_capture::sample_sink::CpuIntervalEvent {
+                        pid: opts.pid,
+                        tid: interval.tid,
+                        start_ns: interval.start_ns,
+                        end_ns: interval.end_ns,
+                        kind: nerf_mac_capture::sample_sink::CpuIntervalKind::OnCpu,
+                    });
+                }
+                crate::offcpu::PendingKind::OffCpu {
+                    user_stack,
+                    kernel_stack: _,
+                } => {
+                    sink.on_cpu_interval(nerf_mac_capture::sample_sink::CpuIntervalEvent {
+                        pid: opts.pid,
+                        tid: interval.tid,
+                        start_ns: interval.start_ns,
+                        end_ns: interval.end_ns,
+                        kind: nerf_mac_capture::sample_sink::CpuIntervalKind::OffCpu {
+                            stack: &user_stack,
+                            waker_tid: None,
+                            waker_user_stack: None,
+                        },
+                    });
+                }
             }
-            sink.on_sample(SampleEvent {
-                timestamp_ns: interval.off_ns,
-                pid: opts.pid,
-                tid: interval.tid,
-                backtrace: &interval.user_stack,
-                kernel_backtrace: &interval.kernel_stack,
-                duration_ns: interval_ns,
-                is_offcpu: true,
-                cycles: 0,
-                instructions: 0,
-                l1d_misses: 0,
-                branch_mispreds: 0,
-            });
         }
     }
 
@@ -722,7 +718,7 @@ fn log_session_summary(
     total: u64,
     parser: &Parser,
     histogram: &BTreeMap<(u8, u16, u32), u64>,
-    offcpu: &OffCpuTracker,
+    offcpu: &CpuIntervalTracker,
 ) {
     let s = &parser.stats;
     log::info!(

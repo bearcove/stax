@@ -515,8 +515,6 @@ impl SampleSink for MacSink {
                 cpu: u32::MAX,
                 kernel_backtrace: &kernel_backtrace,
                 user_backtrace: &user_backtrace,
-                duration_ns: ev.duration_ns,
-                is_offcpu: ev.is_offcpu,
                 cycles: ev.cycles,
                 instructions: ev.instructions,
                 l1d_misses: ev.l1d_misses,
@@ -533,6 +531,54 @@ impl SampleSink for MacSink {
         };
         if let Err(err) = self.write_packet(packet) {
             warn!("on_sample write failed: {}", err);
+        }
+    }
+
+    fn on_cpu_interval(&mut self, ev: nerf_mac_capture::sample_sink::CpuIntervalEvent<'_>) {
+        // Forward to the live sink only -- the offline archive
+        // format doesn't carry CPU intervals (yet); the live
+        // aggregator is the only consumer that needs them right now.
+        let Some(sink) = self.live_sink.as_ref() else {
+            return;
+        };
+        match ev.kind {
+            nerf_mac_capture::sample_sink::CpuIntervalKind::OnCpu => {
+                sink.on_cpu_interval(&crate::live_sink::CpuIntervalEvent {
+                    pid: ev.pid,
+                    tid: ev.tid,
+                    start_ns: ev.start_ns,
+                    end_ns: ev.end_ns,
+                    kind: crate::live_sink::CpuIntervalKind::OnCpu,
+                });
+            }
+            nerf_mac_capture::sample_sink::CpuIntervalKind::OffCpu {
+                stack,
+                waker_tid,
+                waker_user_stack,
+            } => {
+                // Materialise the cached stack as `UserFrame`s for
+                // the live-sink shape. The local Vec lives for the
+                // duration of the sink call; the sink copies into
+                // an owned `LiveEvent` so it can drop the borrow.
+                let stack: Vec<UserFrame> = stack
+                    .iter()
+                    .map(|&address| UserFrame {
+                        address,
+                        initial_address: None,
+                    })
+                    .collect();
+                sink.on_cpu_interval(&crate::live_sink::CpuIntervalEvent {
+                    pid: ev.pid,
+                    tid: ev.tid,
+                    start_ns: ev.start_ns,
+                    end_ns: ev.end_ns,
+                    kind: crate::live_sink::CpuIntervalKind::OffCpu {
+                        stack: &stack,
+                        waker_tid,
+                        waker_user_stack,
+                    },
+                });
+            }
         }
     }
 

@@ -12,7 +12,8 @@ use parking_lot::RwLock;
 use tokio::sync::mpsc;
 
 use nperf_core::live_sink::{
-    BinaryLoadedEvent, BinaryUnloadedEvent, LiveSink, SampleEvent, TargetAttached, ThreadName,
+    BinaryLoadedEvent, BinaryUnloadedEvent, CpuIntervalEvent as LiveCpuIntervalEvent,
+    CpuIntervalKind as LiveCpuIntervalKind, LiveSink, SampleEvent, TargetAttached, ThreadName,
     WakeupEvent as LiveWakeupEvent,
 };
 #[cfg(target_os = "macos")]
@@ -114,44 +115,38 @@ impl LiveSink for LiveSinkImpl {
             return;
         }
         let user_addrs: Vec<u64> = event.user_backtrace.iter().map(|f| f.address).collect();
-        if event.is_offcpu {
-            // Transitional path: the recorder still sends synthesised
-            // off-CPU "samples" with a duration. Translate them into a
-            // proper interval so the aggregator can attribute the
-            // blocked time correctly. Once the recorder grows native
-            // SCHED-driven interval emission these will be dropped.
-            let end_ns = event.timestamp.saturating_add(event.duration_ns);
-            let _ = self.tx.send(LiveEvent::CpuInterval {
-                tid: event.tid,
-                start_ns: event.timestamp,
-                end_ns,
-                kind: CpuIntervalKind::OffCpu {
-                    stack: user_addrs,
-                    waker_tid: None,
-                    waker_user_stack: None,
-                },
-            });
-            return;
-        }
-        // PET stack-walk hit: real on-CPU sample. Forward as-is, plus
-        // a same-period synthetic on-CPU interval so the aggregator's
-        // interval-driven attribution has something to credit until
-        // we wire up real SCHED-derived on-CPU intervals.
         let _ = self.tx.send(LiveEvent::PetSample {
             tid: event.tid,
             timestamp_ns: event.timestamp,
-            user_addrs: user_addrs.clone(),
+            user_addrs,
             cycles: event.cycles,
             instructions: event.instructions,
             l1d_misses: event.l1d_misses,
             branch_mispreds: event.branch_mispreds,
         });
-        let end_ns = event.timestamp.saturating_add(event.duration_ns);
+    }
+
+    fn on_cpu_interval(&self, event: &LiveCpuIntervalEvent) {
+        if self.paused.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        let kind = match &event.kind {
+            LiveCpuIntervalKind::OnCpu => CpuIntervalKind::OnCpu,
+            LiveCpuIntervalKind::OffCpu {
+                stack,
+                waker_tid,
+                waker_user_stack,
+            } => CpuIntervalKind::OffCpu {
+                stack: stack.iter().map(|f| f.address).collect(),
+                waker_tid: *waker_tid,
+                waker_user_stack: waker_user_stack.map(|s| s.to_vec()),
+            },
+        };
         let _ = self.tx.send(LiveEvent::CpuInterval {
             tid: event.tid,
-            start_ns: event.timestamp,
-            end_ns,
-            kind: CpuIntervalKind::OnCpu,
+            start_ns: event.start_ns,
+            end_ns: event.end_ns,
+            kind,
         });
     }
 

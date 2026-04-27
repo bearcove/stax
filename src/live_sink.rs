@@ -5,6 +5,9 @@ use nwind::UserFrame;
 #[cfg(target_os = "macos")]
 pub use nerf_mac_capture::MachOByteSource;
 
+/// One PET stack-walk hit. PET samples are stack-identity *only* in
+/// the new model: time accounting comes from `CpuIntervalEvent`s
+/// sourced from SCHED records.
 pub struct SampleEvent< 'a > {
     pub timestamp: u64,
     pub pid: u32,
@@ -12,22 +15,8 @@ pub struct SampleEvent< 'a > {
     pub cpu: u32,
     pub kernel_backtrace: &'a [u64],
     pub user_backtrace: &'a [UserFrame],
-    /// How much wall-clock time this sample accounts for, in
-    /// nanoseconds. For an on-CPU PET sample this is the sampling
-    /// period (1ms at 1kHz). For an off-CPU sample this is the
-    /// duration the thread spent blocked at this stack. The
-    /// aggregator sums `duration_ns` per stack node so flame widths
-    /// represent wall-clock time directly, not arbitrary sample
-    /// counts.
-    pub duration_ns: u64,
-    /// `true` when this sample is synthesised for an off-CPU interval
-    /// (the thread was blocked at `user_backtrace` for `duration_ns`).
-    /// `false` for real on-CPU PET samples. Always `false` on the Linux
-    /// backend (we don't synthesise off-CPU samples there yet).
-    pub is_offcpu: bool,
     /// CPU cycles consumed by the thread since the previous on-CPU
-    /// sample (Apple Silicon fixed PMU counter 0). 0 on Linux and on
-    /// off-CPU samples.
+    /// sample (Apple Silicon fixed PMU counter 0). 0 on Linux.
     pub cycles: u64,
     /// Instructions retired since the previous on-CPU sample (Apple
     /// Silicon fixed PMU counter 1).
@@ -38,6 +27,28 @@ pub struct SampleEvent< 'a > {
     /// Branch mispredicts since the previous on-CPU sample. Same
     /// availability semantics as `l1d_misses`.
     pub branch_mispreds: u64,
+}
+
+/// One closed CPU interval. See `nerf_mac_capture::CpuIntervalEvent`
+/// for the semantics; this is the live-sink mirror with a
+/// `UserFrame`-typed stack instead of raw `u64`s so it composes with
+/// the rest of the `live_sink` event types.
+pub struct CpuIntervalEvent< 'a > {
+    pub pid: u32,
+    pub tid: u32,
+    pub start_ns: u64,
+    pub end_ns: u64,
+    pub kind: CpuIntervalKind< 'a >,
+}
+
+pub enum CpuIntervalKind< 'a > {
+    OnCpu,
+    OffCpu {
+        /// Cached user-space stack at moment of blocking, leaf-first.
+        stack: &'a [UserFrame],
+        waker_tid: Option<u32>,
+        waker_user_stack: Option<&'a [u64]>,
+    },
 }
 
 /// One symbol from a binary's symbol table (Mach-O `nlist_64` or ELF
@@ -142,6 +153,13 @@ pub trait LiveSink: Send + Sync {
     /// records). Default no-op so other backends compile.
     #[allow(unused_variables)]
     fn on_wakeup( &self, event: &WakeupEvent ) {}
+
+    /// One closed CPU interval (on-CPU or off-CPU) sourced from
+    /// MACH_SCHED records. Drives the live aggregator's time
+    /// attribution. Default no-op for backends that don't track
+    /// scheduling events.
+    #[allow(unused_variables)]
+    fn on_cpu_interval( &self, event: &CpuIntervalEvent ) {}
 
     /// Recorder hands the live side a typed byte source it can use
     /// to satisfy disassembly requests for addresses inside the

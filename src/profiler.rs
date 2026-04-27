@@ -797,17 +797,22 @@ impl ProfilingController {
                     cpu: event.cpu,
                     kernel_backtrace: &event.kernel_backtrace,
                     user_backtrace: &user_backtrace,
-                    // Linux backend doesn't surface its sampling
-                    // period here; assume the perf default 1kHz so
-                    // each sample stands in for 1ms of wall-clock
-                    // time. Wire this through if/when the Linux
-                    // recorder grows a configurable rate.
-                    duration_ns: 1_000_000,
-                    is_offcpu: false,
                     cycles: 0,
                     instructions: 0,
                     l1d_misses: 0,
                     branch_mispreds: 0,
+                });
+                // Linux backend doesn't surface SCHED records here;
+                // synth a one-period on-CPU interval per PET sample
+                // so the aggregator's interval-driven attribution
+                // has something to credit. Wire real sched_switch
+                // tracking through later for ground-truth durations.
+                sink.on_cpu_interval( &crate::live_sink::CpuIntervalEvent {
+                    pid: event.pid,
+                    tid: event.tid,
+                    start_ns: event.timestamp,
+                    end_ns: event.timestamp.saturating_add(1_000_000),
+                    kind: crate::live_sink::CpuIntervalKind::OnCpu,
                 });
             }
 

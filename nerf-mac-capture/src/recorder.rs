@@ -282,12 +282,24 @@ fn sample_all_threads<S: SampleSink>(
             tid,
             backtrace: &backtrace,
             kernel_backtrace: &[],
-            duration_ns: sample_period_ns,
-            is_offcpu: false,
             cycles: 0,
             instructions: 0,
             l1d_misses: 0,
             branch_mispreds: 0,
+        });
+        // No MACH_SCHED stream on the suspend-and-walk path, so we
+        // can't reconstruct true on-CPU intervals. Synthesise a
+        // single-period on-CPU interval centered on the sample so
+        // the aggregator's time attribution has something to work
+        // with -- mathematically equivalent to "1 sample = 1 period"
+        // but expressed as an interval the new aggregator
+        // understands.
+        sink.on_cpu_interval(crate::sample_sink::CpuIntervalEvent {
+            pid,
+            tid,
+            start_ns: timestamp_ns,
+            end_ns: timestamp_ns.saturating_add(sample_period_ns),
+            kind: crate::sample_sink::CpuIntervalKind::OnCpu,
         });
     }
     Ok(())

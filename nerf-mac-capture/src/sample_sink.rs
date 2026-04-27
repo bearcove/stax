@@ -38,6 +38,16 @@ pub trait SampleSink {
     #[allow(unused_variables)]
     fn on_wakeup(&mut self, event: WakeupEvent<'_>) {}
 
+    /// One closed CPU interval. Drives the aggregator's time
+    /// attribution: on-CPU intervals get their duration distributed
+    /// across the PET samples that fell inside them; off-CPU
+    /// intervals get attributed to the cached stack the thread was
+    /// running before it parked. Sourced from `MACH_SCHED`
+    /// transitions, so durations are ground truth -- no
+    /// "samples × period" fabrication.
+    #[allow(unused_variables)]
+    fn on_cpu_interval(&mut self, event: CpuIntervalEvent<'_>) {}
+
     /// The recorder opened a shared resource that the live UI can
     /// query for raw bytes (today: the dyld shared cache mmap,
     /// wrapped in an `Arc<dyn MachOByteSource>`). Default no-op so
@@ -46,8 +56,12 @@ pub trait SampleSink {
     fn on_macho_byte_source(&mut self, source: std::sync::Arc<dyn MachOByteSource>) {}
 }
 
-/// One sample. Backtraces are callee-most first; addresses are absolute
-/// (i.e. AVMAs in samply terminology, runtime instruction pointers).
+/// One PET stack-walk hit: a snapshot of where a thread was at one
+/// moment of being on-CPU. Backtraces are callee-most first;
+/// addresses are absolute (AVMAs / runtime instruction pointers).
+///
+/// `SampleEvent` is *only* the stack-identity input. Time accounting
+/// happens via `CpuIntervalEvent`s sourced from MACH_SCHED records.
 pub struct SampleEvent<'a> {
     pub timestamp_ns: u64,
     pub pid: u32,
@@ -60,20 +74,10 @@ pub struct SampleEvent<'a> {
     /// suspend-and-walk path) always emits empty here; nerf-mac-kperf
     /// fills it when kperf walked the kernel side.
     pub kernel_backtrace: &'a [u64],
-    /// Wall-clock time this sample accounts for, in nanoseconds.
-    /// Sampling period for on-CPU PET samples (1ms at 1kHz);
-    /// interval duration for off-CPU samples.
-    pub duration_ns: u64,
-    /// `true` if this is a synthesised "off-CPU" sample standing in
-    /// for time the thread spent blocked. The stack is borrowed from
-    /// the last on-CPU sample; one sample is emitted per closed
-    /// off-CPU interval, with `duration_ns` set to the interval
-    /// length. samply has no equivalent.
-    pub is_offcpu: bool,
     /// CPU cycles consumed since the previous PET sample on this
     /// thread (Apple Silicon fixed counter 0). 0 when not available
-    /// (Linux backend, off-CPU samples, or kperf didn't emit a KPC
-    /// record for this sample).
+    /// (Linux backend, or kperf didn't emit a KPC record for this
+    /// sample).
     pub cycles: u64,
     /// Instructions retired since the previous PET sample (Apple
     /// Silicon fixed counter 1). Same availability semantics as
@@ -153,6 +157,50 @@ pub struct WakeupEvent<'a> {
 /// Cow, etc.) before dropping the borrow.
 pub trait MachOByteSource: Send + Sync {
     fn fetch<'a>(&'a self, avma: u64, len: usize) -> Option<&'a [u8]>;
+}
+
+/// One closed CPU interval delivered by the recorder.
+///
+/// `kind` separates the two cases:
+///
+/// - `OnCpu`: the thread was running on a CPU for `[start_ns, end_ns)`.
+///   No stack is included -- the aggregator finds the PET samples
+///   that fell inside the interval and credits the duration across
+///   them. If no PET sample landed in the interval (very short slice
+///   between context switches), the interval contributes nothing
+///   to flame attribution but still counts toward total CPU time.
+///
+/// - `OffCpu { stack, ... }`: the thread was blocked at `stack`
+///   (the cached PET stack from the moment it parked) for
+///   `[start_ns, end_ns)`. Whole interval is credited to that stack;
+///   the aggregator classifies the leaf into an `OffCpuReason`
+///   bucket. `waker_*` fields carry the MACH_MAKERUNNABLE wakeup
+///   attribution when one was caught (often missing for intervals
+///   that just happen to not have a wakeup observed yet).
+pub struct CpuIntervalEvent<'a> {
+    pub pid: u32,
+    pub tid: u32,
+    /// Start of the interval in the same monotonic timestamp space
+    /// as `SampleEvent::timestamp_ns`.
+    pub start_ns: u64,
+    /// End of the interval (exclusive). Always `>= start_ns`.
+    pub end_ns: u64,
+    pub kind: CpuIntervalKind<'a>,
+}
+
+pub enum CpuIntervalKind<'a> {
+    OnCpu,
+    OffCpu {
+        /// Cached user stack the thread was running just before it
+        /// parked. Leaf-first. Empty when no PET sample had been
+        /// captured for the thread before the off-CPU transition.
+        stack: &'a [u64],
+        /// Optional MACH_MAKERUNNABLE attribution: who woke the
+        /// thread. None when the wakeup batch hadn't drained yet, or
+        /// the interval ended at end-of-recording without a wakeup.
+        waker_tid: Option<u32>,
+        waker_user_stack: Option<&'a [u64]>,
+    },
 }
 
 pub struct ThreadNameEvent<'a> {
