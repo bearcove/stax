@@ -74,8 +74,28 @@ stax wait     # block until the active run stops
 stax stop     # ask stax-server to stop it now
 ```
 
-Historical runs stay queryable via `stax list` (in-memory only for now;
-persistence is a follow-up).
+`stax list` shows every run the daemon has hosted (active + history,
+in-memory only for now — persistence is a follow-up).
+
+### Which run does `stax top` / `stax annotate` query?
+
+There's no run selector yet. They operate on the **current** aggregator
+state, which is whichever run is active *or* the most recent one — the
+aggregator stays populated until the next `start_run` resets it. So the
+working flow is:
+
+```
+stax record …           # start a recording (in another shell or backgrounded)
+stax wait --for-samples 5000
+stax top                # snapshot of the active run
+stax stop               # stops the run; aggregator stays queryable
+stax top                # still works — same data as above
+stax record …           # NEW run resets the aggregator; the previous one is gone
+```
+
+If you need to query an older run later, you'll have to stop the active
+one first (so its data sticks around) and avoid starting a new recording
+until you're done. Per-`RunId` querying is on the roadmap.
 
 ## Lifecycle from an agent's POV
 
@@ -211,15 +231,26 @@ $ stax top -n 5
     …
 ```
 
-### `stax annotate <ADDR> [--tid TID]`
+### `stax annotate <TARGET> [--tid TID]`
 
-Disassemble the function containing `ADDR` (hex with `0x` prefix or
-decimal) and annotate every instruction with self-attribution counts.
-Source lines are interleaved when DWARF is present and the file is
-readable.
+Disassemble + annotate one function from the current run.
+
+`TARGET` is either:
+- a **hex address** (`0x10004ad60`) — passed straight through to the
+  Profiler RPC.
+- a **substring of a function name** (`translate`, `cranelift::lower`,
+  `MyType::method`) — case-insensitive. The CLI asks for the top 256
+  leaf-self functions and picks the hottest one whose demangled name
+  matches; the address that wins gets logged so you can re-target by
+  address next time.
+
+If nothing matches, you'll see the hottest names that *did* land —
+useful when nothing's been sampled yet, or your symbol got merged into a
+parent (try a name from `stax top` directly).
 
 ```
-$ stax annotate 0x10004ad60
+$ stax annotate translate
+stax: matched "translate" → vox_jit::translate (3812 self samples)
 ; vox_jit::translate (rust) @ 0x10004ad58
 ; src/translate.rs:412
   0x10004ad58      0 samples    push rbp
@@ -228,7 +259,7 @@ $ stax annotate 0x10004ad60
   …
 ```
 
-The `--tid` flag filters to one thread. Omit for whole-process.
+`--tid` filters to one thread. Omit for whole-process.
 
 ### `stax setup`
 

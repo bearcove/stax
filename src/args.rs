@@ -90,10 +90,14 @@ pub struct TopArgs {
 
 #[derive(Facet, Debug)]
 pub struct AnnotateArgs {
-    /// Address (hex with `0x` prefix or decimal) of an instruction
-    /// inside the function to annotate.
+    /// Function to annotate. Either a hex address (`0x10004ad60`)
+    /// or a substring of the demangled symbol name; the substring
+    /// is matched against the current run's top-N leaf samples and
+    /// the hottest match wins. Operates on whichever run the
+    /// server has active (or last finished); historical runs by
+    /// id are not yet addressable.
     #[facet(args::positional)]
-    pub address: String,
+    pub target: String,
 
     /// Filter to one thread by tid. Default: all threads.
     #[facet(args::named, default)]

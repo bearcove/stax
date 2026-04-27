@@ -275,23 +275,20 @@ async fn run_top(args: TopArgs) -> Result<(), Box<dyn Error>> {
 
 async fn run_annotate(args: AnnotateArgs) -> Result<(), Box<dyn Error>> {
     let url = require_server_socket()?;
-    let address = parse_address(&args.address)?;
     let client: ProfilerClient = vox::connect(&url).await?;
+    let view_params = ViewParams {
+        tid: args.tid,
+        filter: LiveFilter {
+            time_range: None,
+            exclude_symbols: Vec::new(),
+        },
+    };
+    let address = resolve_target(&client, &args.target, view_params.clone()).await?;
     // subscribe_annotated streams updates every ~250ms; we want a one-shot
     // snapshot, so take the first item and drop the channel.
     let (tx, mut rx) = vox::channel();
     client
-        .subscribe_annotated(
-            address,
-            ViewParams {
-                tid: args.tid,
-                filter: LiveFilter {
-                    time_range: None,
-                    exclude_symbols: Vec::new(),
-                },
-            },
-            tx,
-        )
+        .subscribe_annotated(address, view_params, tx)
         .await
         .map_err(|e| format!("{e:?}"))?;
     let view_sref = rx
@@ -322,15 +319,75 @@ async fn run_annotate(args: AnnotateArgs) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn parse_address(raw: &str) -> Result<u64, Box<dyn Error>> {
+fn parse_address(raw: &str) -> Option<u64> {
     let trimmed = raw.trim();
-    if let Some(rest) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
-        return u64::from_str_radix(rest, 16)
-            .map_err(|e| format!("invalid hex address {raw:?}: {e}").into());
+    let rest = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))?;
+    u64::from_str_radix(rest, 16).ok()
+}
+
+/// Look up the address to feed to `subscribe_annotated`. `target`
+/// is either a hex address (returned as-is) or a substring of a
+/// demangled function name; in the latter case we ask the server
+/// for the top-N leaf-self functions and return the hottest one
+/// whose name contains the substring (case-insensitive).
+async fn resolve_target(
+    client: &ProfilerClient,
+    target: &str,
+    params: ViewParams,
+) -> Result<u64, Box<dyn Error>> {
+    if let Some(addr) = parse_address(target) {
+        return Ok(addr);
     }
-    trimmed
-        .parse::<u64>()
-        .map_err(|e| format!("invalid address {raw:?}: {e}").into())
+    let needle = target.to_lowercase();
+    // 256 entries is enough to catch any function the user is
+    // realistically asking about; we sort by self_pet_samples on
+    // the server side already.
+    let entries = client
+        .top(256, TopSort::BySelf, params)
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+    if entries.is_empty() {
+        return Err(
+            "no samples on the server (run a recording first, then retry)".into(),
+        );
+    }
+    let hit = entries.iter().find(|e| {
+        e.function_name
+            .as_deref()
+            .map(|n| n.to_lowercase().contains(&needle))
+            .unwrap_or(false)
+    });
+    match hit {
+        Some(e) => {
+            eprintln!(
+                "stax: matched {:?} → {} ({} self samples)",
+                target,
+                e.function_name.as_deref().unwrap_or("<unresolved>"),
+                e.self_pet_samples,
+            );
+            Ok(e.address)
+        }
+        None => {
+            // Help the user out by showing what *did* land in top.
+            let mut suggestions: Vec<&str> = entries
+                .iter()
+                .filter_map(|e| e.function_name.as_deref())
+                .take(8)
+                .collect();
+            suggestions.dedup();
+            let hint = if suggestions.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\nhottest names in this run:\n  - {}",
+                    suggestions.join("\n  - "),
+                )
+            };
+            Err(format!("no symbol matching {target:?} in the current run{hint}").into())
+        }
+    }
 }
 
 /// Naive HTML-tag stripper for arborium output. Arborium emits things
