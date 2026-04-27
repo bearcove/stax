@@ -41,6 +41,42 @@ const HOST_CPUTYPE: u32 = if cfg!( target_arch = "aarch64" ) {
     0
 };
 
+/// Return the host-arch slice of a Mach-O blob. If `bytes` starts with
+/// a fat magic, find the slice matching the host cputype and return it;
+/// otherwise return `bytes` unchanged. Used by addr2line context
+/// construction so callers don't choke on `cafebabe` headers (e.g.
+/// `/usr/lib/dyld` is shipped as a fat binary on Apple Silicon and
+/// `object::File::parse` can't parse the fat wrapper directly).
+pub fn host_thin_slice( bytes: &[u8] ) -> io::Result< &[u8] > {
+    let magic = match magic_be( bytes ) {
+        Some( m ) => m,
+        None => return Ok( bytes ),
+    };
+    match magic {
+        macho::FAT_MAGIC | macho::FAT_CIGAM => {
+            let arches = FatHeader::parse_arch32( bytes ).map_err( other )?;
+            let arch = arches.iter()
+                .find( |a| a.cputype() == HOST_CPUTYPE )
+                .ok_or_else( || io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!( "Mach-O: fat archive has no slice for host cputype 0x{:x}", HOST_CPUTYPE )
+                ))?;
+            arch.data( bytes ).map_err( other )
+        }
+        macho::FAT_MAGIC_64 | macho::FAT_CIGAM_64 => {
+            let arches = FatHeader::parse_arch64( bytes ).map_err( other )?;
+            let arch = arches.iter()
+                .find( |a| a.cputype() == HOST_CPUTYPE )
+                .ok_or_else( || io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!( "Mach-O: fat archive has no slice for host cputype 0x{:x}", HOST_CPUTYPE )
+                ))?;
+            arch.data( bytes ).map_err( other )
+        }
+        _ => Ok( bytes )
+    }
+}
+
 /// True if `bytes` starts with a Mach-O magic we recognize (thin 64-bit or
 /// any flavor of fat).
 pub fn is_macho( bytes: &[u8] ) -> bool {

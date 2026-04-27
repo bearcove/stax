@@ -174,7 +174,13 @@ fn lookup_comp_dir( _: &addr2line::Context< AddrCtxReader >, _: u64 ) -> Option<
 fn build_addr2line_context( binary_data: &Arc< BinaryData > ) -> Result< addr2line::Context< AddrCtxReader >, String > {
     use object::{Object, ObjectSection};
 
-    let bytes = binary_data.as_bytes();
+    // On macOS, system binaries (most notably `/usr/lib/dyld`) ship as
+    // Mach-O fat archives. `object::File::parse` doesn't follow the
+    // `cafebabe` wrapper, so we slice into the host-arch sub-binary
+    // first. For thin (single-arch) Mach-Os and ELF binaries this is
+    // a no-op.
+    let bytes = crate::macho::host_thin_slice( binary_data.as_bytes() )
+        .map_err( |err| format!( "fat-archive slice: {}", err ) )?;
     let object = object::File::parse( bytes )
         .map_err( |err| format!( "object parse failed: {}", err ) )?;
 
@@ -1214,7 +1220,7 @@ pub fn reload< A: Architecture >(
                     match build_addr2line_context( &binary_data ) {
                         Ok( ctx ) => context = Some( Mutex::new( ctx ) ),
                         Err( error ) => {
-                            warn!( "Failed to create addr2line context: {}", error );
+                            warn!( "Failed to create addr2line context for '{}' ({}): {}", data.name, binary_data.name(), error );
                         }
                     }
                 }
