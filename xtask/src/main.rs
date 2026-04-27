@@ -74,41 +74,46 @@ fn print_usage() {
 
 fn install() -> Result<(), Box<dyn Error>> {
     let workspace_root = workspace_root();
+    let cargo_bin = cargo_bin_dir()?;
+    fs::create_dir_all(&cargo_bin)?;
 
-    println!(":: Building {BIN_NAME} (release)...");
-    let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let status = Command::new(&cargo)
-        .args(["build", "--release", "-p", BIN_NAME])
-        .current_dir(&workspace_root)
-        .status()?;
-    if !status.success() {
-        return Err(format!("cargo build failed: {status}").into());
+    // Build all three: the user-facing CLI plus the trinity binaries.
+    // Both the CLI and the broker need cs.debugger; the daemon doesn't
+    // (it runs under launchd as root, no entitlement needed).
+    for bin in [BIN_NAME, DAEMON_BIN, BROKER_BIN] {
+        println!(":: Building {bin} (release)...");
+        cargo_build_release(&workspace_root, bin)?;
+
+        let src = workspace_root.join("target").join("release").join(bin);
+        if !src.exists() {
+            return Err(format!("expected built binary at {} but it wasn't there", src.display()).into());
+        }
+        let dst = cargo_bin.join(bin);
+        println!(":: Copying {} -> {}", src.display(), dst.display());
+        fs::copy(&src, &dst)?;
+
+        #[cfg(target_os = "macos")]
+        if bin == BIN_NAME {
+            codesign_macos(&dst)?;
+        } else if bin == BROKER_BIN {
+            let entitlements = workspace_root.join(BROKER_BIN).join("entitlements.plist");
+            codesign_with_entitlements(&dst, &entitlements)?;
+        }
+        // DAEMON_BIN: no codesign — runs as root under launchd, no
+        // entitlement needed; gets installed to /usr/local/bin by
+        // `sudo nperf setup`.
     }
-
-    let src = workspace_root
-        .join("target")
-        .join("release")
-        .join(BIN_NAME);
-    if !src.exists() {
-        return Err(format!("expected built binary at {} but it wasn't there", src.display()).into());
-    }
-
-    let dst = cargo_bin_dir()?.join(BIN_NAME);
-    fs::create_dir_all(dst.parent().unwrap())?;
-
-    println!(":: Copying {} -> {}", src.display(), dst.display());
-    fs::copy(&src, &dst)?;
-
-    #[cfg(target_os = "macos")]
-    codesign_macos(&dst)?;
 
     println!();
-    println!(":: Installed. Try `{BIN_NAME} --help`.");
-    #[cfg(target_os = "macos")]
-    println!(
-        ":: macOS: this binary is signed with the com.apple.security.cs.debugger \
-        entitlement so `{BIN_NAME} record --pid` works without sudo on non-hardened targets."
-    );
+    println!(":: Installed three binaries to {}.", cargo_bin.display());
+    println!(":: To enable the trinity (sudo-less profiling, framehop,");
+    println!(":: future arg-capture), run:");
+    println!();
+    println!("     sudo nperf setup");
+    println!();
+    println!(":: This installs nperfd as a LaunchDaemon under /usr/local/bin/");
+    println!(":: and /Library/LaunchDaemons/. After that, the same nperf CLI");
+    println!(":: works without sudo via `--mac-backend daemon`.");
     Ok(())
 }
 
