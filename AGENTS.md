@@ -231,6 +231,27 @@ $ stax top -n 5
     …
 ```
 
+### `stax threads [-n N]`
+
+Per-thread on/off-CPU breakdown for the current run, sorted by
+on-CPU time descending. Use it to figure out *which thread* is
+worth flaming.
+
+```
+$ stax threads -n 5
+ on-CPU ms off-CPU ms    samples   blocked  tid    name
+   1240.20      31.40       1102      lock  501    main
+    860.00      99.00        710     sleep  592    tokio-runtime-worker
+    220.10      14.50        198      idle  600    grpc-pool
+    …
+```
+
+The `blocked` column names the largest off-CPU bucket for that
+thread (`idle`, `lock`, `sem`, `ipc`, `ioR`, `ioW`, `ready`,
+`sleep`, `conn`, `other`).
+
+`-n 0` prints every thread. Default 20.
+
 ### `stax flame [-d MAX_DEPTH] [--threshold-pct PCT] [--tid TID]`
 
 Print the on-CPU flamegraph as an indented Markdown tree, sorted by

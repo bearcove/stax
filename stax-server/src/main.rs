@@ -311,10 +311,8 @@ impl RunControl for ServerState {
                 WaitCondition::ForSeconds { .. } => condition_deadline
                     .map(|d| std::time::Instant::now() >= d)
                     .unwrap_or(false),
-                WaitCondition::UntilSymbolSeen { needle: _ } => {
-                    // Symbol watcher needs a BinaryRegistry helper that
-                    // doesn't exist yet; deferred to a follow-up.
-                    false
+                WaitCondition::UntilSymbolSeen { needle } => {
+                    self.binaries.read().any_symbol_contains(needle)
                 }
             };
             if condition_met {

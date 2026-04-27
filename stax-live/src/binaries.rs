@@ -178,6 +178,29 @@ impl BinaryRegistry {
         self.by_base.retain(|b| b.base_avma != base_avma);
     }
 
+    /// True when any loaded binary has a symbol whose raw name
+    /// (LC_SYMTAB / jitdump bytes) contains `needle` as a
+    /// substring. Drives `WaitCondition::UntilSymbolSeen`. Cheap
+    /// rather than thorough: case-sensitive, no demangling, no
+    /// regex. JIT'd names typically arrive un-mangled so a
+    /// substring of the source-level function name lands; for
+    /// Rust / C++ the user can pass a chunk of the mangled
+    /// symbol they're after.
+    pub fn any_symbol_contains(&self, needle: &str) -> bool {
+        let needle_bytes = needle.as_bytes();
+        if needle_bytes.is_empty() {
+            return true;
+        }
+        for binary in &self.by_base {
+            for sym in &binary.symbols {
+                if memchr::memmem::find(&sym.name, needle_bytes).is_some() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Resolve `address` to a (function name, binary basename, is-main)
     /// triple without loading any image bytes. Used by top-N rendering
     /// where we want labels but don't need disassembly.

@@ -2053,6 +2053,7 @@ dependencies = [
  "addr2line",
  "arborium",
  "mach2",
+ "memchr",
  "memmap2",
  "object 0.39.1",
  "parking_lot",

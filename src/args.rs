@@ -50,6 +50,9 @@ pub enum Command {
 
     /// Print the on-CPU flamegraph as an indented tree.
     Flame(FlameArgs),
+
+    /// Per-thread on/off-CPU breakdown for the active run.
+    Threads(ThreadsArgs),
 }
 
 #[derive(Facet, Debug)]
@@ -89,6 +92,14 @@ pub struct TopArgs {
     /// Filter to one thread by tid. Default: all threads.
     #[facet(args::named, default)]
     pub tid: Option<u32>,
+}
+
+#[derive(Facet, Debug)]
+pub struct ThreadsArgs {
+    /// Maximum number of threads to print (sorted by on-CPU
+    /// descending). 0 to print all.
+    #[facet(args::named, args::short = 'n', default = 20)]
+    pub limit: u32,
 }
 
 #[derive(Facet, Debug)]

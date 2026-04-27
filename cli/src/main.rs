@@ -5,12 +5,12 @@ use std::process::exit;
 
 use figue as args;
 use stax_core::{
-    args::{AnnotateArgs, Cli, Command, FlameArgs, RecordArgs, TopArgs, WaitArgs},
+    args::{AnnotateArgs, Cli, Command, FlameArgs, RecordArgs, ThreadsArgs, TopArgs, WaitArgs},
     cmd_record_mac, cmd_setup_mac,
 };
 use stax_live_proto::{
-    FlameNode, FlamegraphUpdate, LiveFilter, ProfilerClient, RunControlClient, RunSummary,
-    ServerStatus, TopSort, ViewParams, WaitCondition, WaitOutcome,
+    FlameNode, FlamegraphUpdate, LiveFilter, OffCpuBreakdown, ProfilerClient, RunControlClient,
+    RunSummary, ServerStatus, ThreadsUpdate, TopSort, ViewParams, WaitCondition, WaitOutcome,
 };
 
 fn main_impl() -> Result<(), Box<dyn Error>> {
@@ -47,6 +47,7 @@ fn main_impl() -> Result<(), Box<dyn Error>> {
         Command::Top(args) => block_on_async(async { run_top(args).await })?,
         Command::Annotate(args) => block_on_async(async { run_annotate(args).await })?,
         Command::Flame(args) => block_on_async(async { run_flame(args).await })?,
+        Command::Threads(args) => block_on_async(async { run_threads(args).await })?,
     }
     Ok(())
 }
@@ -320,6 +321,79 @@ async fn run_annotate(args: AnnotateArgs) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+async fn run_threads(args: ThreadsArgs) -> Result<(), Box<dyn Error>> {
+    let url = require_server_socket()?;
+    let client: ProfilerClient = vox::connect(&url).await?;
+    // subscribe_threads streams every ~250ms; take the first.
+    let (tx, mut rx) = vox::channel();
+    client
+        .subscribe_threads(tx)
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+    let update_sref = rx
+        .recv()
+        .await
+        .map_err(|e| format!("{e:?}"))?
+        .ok_or("threads stream closed before sending an update")?;
+    update_sref.map(|update| print_threads(&update, args.limit));
+    Ok(())
+}
+
+fn print_threads(update: &ThreadsUpdate, limit: u32) {
+    let mut threads: Vec<&stax_live_proto::ThreadInfo> = update.threads.iter().collect();
+    threads.sort_by(|a, b| b.on_cpu_ns.cmp(&a.on_cpu_ns));
+    if threads.is_empty() {
+        println!("(no thread samples yet — is a recording in progress?)");
+        return;
+    }
+    println!(
+        "{:>10} {:>10} {:>10} {:>9}  tid    name",
+        "on-CPU ms", "off-CPU ms", "samples", "blocked",
+    );
+    let take = if limit == 0 { threads.len() } else { limit as usize };
+    for t in threads.iter().take(take) {
+        let off_total = off_cpu_total_ns(&t.off_cpu);
+        let dominant = dominant_off_cpu_reason(&t.off_cpu);
+        println!(
+            "{:>10.2} {:>10.2} {:>10} {:>9}  {:<6} {}",
+            t.on_cpu_ns as f64 / 1e6,
+            off_total as f64 / 1e6,
+            t.pet_samples,
+            dominant,
+            t.tid,
+            t.name.as_deref().unwrap_or("(unnamed)"),
+        );
+    }
+    if threads.len() > take {
+        println!("…{} more threads", threads.len() - take);
+    }
+}
+
+/// Pick the largest field of the off-CPU breakdown so the user can
+/// see at a glance whether a thread was idle vs. blocked vs. doing
+/// IO. Returns the bucket name padded to a stable width.
+fn dominant_off_cpu_reason(b: &OffCpuBreakdown) -> &'static str {
+    let buckets: [(u64, &str); 10] = [
+        (b.idle_ns, "idle"),
+        (b.lock_ns, "lock"),
+        (b.semaphore_ns, "sem"),
+        (b.ipc_ns, "ipc"),
+        (b.io_read_ns, "ioR"),
+        (b.io_write_ns, "ioW"),
+        (b.readiness_ns, "ready"),
+        (b.sleep_ns, "sleep"),
+        (b.connect_ns, "conn"),
+        (b.other_ns, "other"),
+    ];
+    let mut best = ("-", 0u64);
+    for (ns, name) in buckets {
+        if ns > best.1 {
+            best = (name, ns);
+        }
+    }
+    best.0
+}
+
 async fn run_flame(args: FlameArgs) -> Result<(), Box<dyn Error>> {
     let url = require_server_socket()?;
     let client: ProfilerClient = vox::connect(&url).await?;
@@ -368,7 +442,7 @@ fn print_flame(update: &FlamegraphUpdate, max_depth: usize, threshold_pct: f64) 
     println!("```");
 }
 
-fn off_cpu_total_ns(b: &stax_live_proto::OffCpuBreakdown) -> u64 {
+fn off_cpu_total_ns(b: &OffCpuBreakdown) -> u64 {
     b.idle_ns
         + b.lock_ns
         + b.semaphore_ns
