@@ -60,8 +60,13 @@ fn record_existing_pid(
     let stop_via_sink = sink.live_sink_stop_flag();
     let should_stop = || sigint.was_triggered() || stop_via_sink();
 
-    let rt = tokio::runtime::Builder::new_current_thread()
+    // Multi-thread so vox session tasks (keepalive pongs, in particular)
+    // run on a different worker than the synchronous-ish kdebug
+    // parsing, which can otherwise hog the runtime for seconds at a
+    // time and make staxd think the recorder went away.
+    let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
+        .worker_threads(2)
         .build()
         .map_err(|err| format!("daemon backend: tokio runtime build: {err}"))?;
     info!("Running... press Ctrl-C to stop.");
@@ -114,8 +119,13 @@ fn record_child_launch(
         }
     };
 
-    let rt = tokio::runtime::Builder::new_current_thread()
+    // Multi-thread so vox session tasks (keepalive pongs, in particular)
+    // run on a different worker than the synchronous-ish kdebug
+    // parsing, which can otherwise hog the runtime for seconds at a
+    // time and make staxd think the recorder went away.
+    let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
+        .worker_threads(2)
         .build()
         .map_err(|err| format!("daemon backend: tokio runtime build: {err}"))?;
     info!("Running... press Ctrl-C to stop.");

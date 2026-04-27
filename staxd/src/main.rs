@@ -96,17 +96,18 @@ async fn main() -> Result<()> {
                 let dispatcher = StaxdDispatcher::new(server);
                 let result = vox::acceptor_on(link)
                     .non_resumable()
-                    // Heartbeat ping every 1s; if the client doesn't
-                    // pong within 2s, the session is declared dead and
-                    // (because non_resumable) every per-channel Tx
-                    // surfaces the close as a send error. Without this,
-                    // a hard-killed recorder leaves staxd holding the
-                    // single recording slot forever — local-socket
-                    // peer-FD-close doesn't always propagate to vox's
-                    // per-channel Tx::send promptly enough on its own.
+                    // Detect dead peers without flagging legit ones.
+                    // The recorder fires a giant pile of synchronous
+                    // BinaryLoaded events at session start (~3500 dyld
+                    // cache images, ~14M symbols), which on a busy
+                    // runtime can starve the vox pong task for several
+                    // seconds. So the timeout has to comfortably
+                    // outlast that burst. ping every 5s, pong within
+                    // 30s — still guarantees the slot frees within
+                    // ~30s of a hard-kill.
                     .keepalive(vox::SessionKeepaliveConfig {
-                        ping_interval: std::time::Duration::from_secs(1),
-                        pong_timeout: std::time::Duration::from_secs(2),
+                        ping_interval: std::time::Duration::from_secs(5),
+                        pong_timeout: std::time::Duration::from_secs(30),
                     })
                     .on_connection(dispatcher)
                     .establish::<vox::NoopClient>()

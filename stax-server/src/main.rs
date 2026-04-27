@@ -122,13 +122,11 @@ fn spawn_session_local(server: ServerState, link: vox::transport::local::LocalLi
     tokio::spawn(async move {
         let result = vox::acceptor_on(link)
             .non_resumable()
-            // Same heartbeat shape as staxd — surfaces a dead
-            // recorder within ~2s so the active-run drainer
-            // notices and finalises rather than spinning on a
-            // half-closed Rx.
+            // Same shape as staxd's keepalive — see the longer
+            // comment there for why the timeout is generous.
             .keepalive(vox::SessionKeepaliveConfig {
-                ping_interval: std::time::Duration::from_secs(1),
-                pong_timeout: std::time::Duration::from_secs(2),
+                ping_interval: std::time::Duration::from_secs(5),
+                pong_timeout: std::time::Duration::from_secs(30),
             })
             .on_connection(factory(server))
             .establish::<vox::NoopClient>()
