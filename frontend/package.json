@@ -1,5 +1,5 @@
 {
-  "name": "nperf-live-frontend",
+  "name": "stax-live-frontend",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -26,11 +26,11 @@
   },
   "pnpm": {
     "overrides": {
-      "@bearcove/vox-core": "link:/Users/amos/bearcove/vox/typescript/packages/vox-core",
-      "@bearcove/vox-postcard": "link:/Users/amos/bearcove/vox/typescript/packages/vox-postcard",
-      "@bearcove/vox-tcp": "link:/Users/amos/bearcove/vox/typescript/packages/vox-tcp",
-      "@bearcove/vox-wire": "link:/Users/amos/bearcove/vox/typescript/packages/vox-wire",
-      "@bearcove/vox-ws": "link:/Users/amos/bearcove/vox/typescript/packages/vox-ws"
+      "@bearcove/vox-core": "link:../../vox/typescript/packages/vox-core",
+      "@bearcove/vox-postcard": "link:../../vox/typescript/packages/vox-postcard",
+      "@bearcove/vox-tcp": "link:../../vox/typescript/packages/vox-tcp",
+      "@bearcove/vox-wire": "link:../../vox/typescript/packages/vox-wire",
+      "@bearcove/vox-ws": "link:../../vox/typescript/packages/vox-ws"
     }
   }
 }

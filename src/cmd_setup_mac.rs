@@ -1,21 +1,21 @@
-//! `nperf setup` (macOS only).
+//! `stax setup` (macOS only).
 //!
 //! Two modes, dispatched on euid at runtime:
 //!
-//!   * **non-root**: ad-hoc-codesign the current `nperf` binary with the
+//!   * **non-root**: ad-hoc-codesign the current `stax` binary with the
 //!     `com.apple.security.cs.debugger` entitlement so `task_for_pid`
 //!     works against non-hardened processes without sudo. This is the
 //!     legacy behaviour, adapted from samply/src/mac/codesign_setup.rs
 //!     (1920bd32, MIT OR Apache-2.0).
 //!
-//!   * **root** (`sudo nperf setup`): install `nperfd` as a
-//!     LaunchDaemon. Copies `~$SUDO_USER/.cargo/bin/nperfd` to
-//!     `/usr/local/bin/nperfd`, drops the LaunchDaemon plist into
+//!   * **root** (`sudo stax setup`): install `staxd` as a
+//!     LaunchDaemon. Copies `~$SUDO_USER/.cargo/bin/staxd` to
+//!     `/usr/local/bin/staxd`, drops the LaunchDaemon plist into
 //!     `/Library/LaunchDaemons/`, and `launchctl bootstrap`s it. After
-//!     this, `nperf record --mac-backend daemon …` runs without sudo
+//!     this, `stax record --mac-backend daemon …` runs without sudo
 //!     and the recorder reaches kperf via the privileged daemon.
 //!
-//! The broker (`nperf-task-broker`, a per-user LaunchAgent) gets
+//! The broker (`stax-task-broker`, a per-user LaunchAgent) gets
 //! installed in a follow-up; for now `cargo xtask install` already
 //! drops a codesigned copy in `~/.cargo/bin/` so it's exec'able.
 
@@ -30,7 +30,7 @@ use std::process::Command;
 
 use crate::args;
 
-/// Entitlements applied to the user-facing `nperf` binary.
+/// Entitlements applied to the user-facing `stax` binary.
 const NPERF_ENTITLEMENTS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -42,16 +42,16 @@ const NPERF_ENTITLEMENTS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 "#;
 
 /// LaunchDaemon plist installed at `/Library/LaunchDaemons/`. Embedded
-/// verbatim as a constant so a freshly-installed `nperf` doesn't have
+/// verbatim as a constant so a freshly-installed `stax` doesn't have
 /// to find the source tree at install time. The canonical version on
-/// disk is `nperfd/launchd/eu.bearcove.nperfd.plist`; if you change
+/// disk is `staxd/launchd/eu.bearcove.staxd.plist`; if you change
 /// one, update both.
 const NPERFD_LAUNCHD_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>eu.bearcove.nperfd</string>
+    <string>eu.bearcove.staxd</string>
 
     <key>UserName</key>
     <string>root</string>
@@ -64,28 +64,28 @@ const NPERFD_LAUNCHD_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/bin/nperfd</string>
+        <string>/usr/local/bin/staxd</string>
         <string>--socket</string>
-        <string>/var/run/nperfd.sock</string>
+        <string>/var/run/staxd.sock</string>
     </array>
 
     <key>StandardOutPath</key>
-    <string>/var/log/nperfd.log</string>
+    <string>/var/log/staxd.log</string>
     <key>StandardErrorPath</key>
-    <string>/var/log/nperfd.log</string>
+    <string>/var/log/staxd.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>
         <key>RUST_LOG</key>
-        <string>nperfd=info,nerf_mac_kperf_sys=info</string>
+        <string>staxd=info,stax_mac_kperf_sys=info</string>
     </dict>
 </dict>
 </plist>
 "#;
 
-const PLIST_PATH: &str = "/Library/LaunchDaemons/eu.bearcove.nperfd.plist";
-const BINARY_INSTALL_PATH: &str = "/usr/local/bin/nperfd";
-const LAUNCHD_LABEL: &str = "eu.bearcove.nperfd";
+const PLIST_PATH: &str = "/Library/LaunchDaemons/eu.bearcove.staxd.plist";
+const BINARY_INSTALL_PATH: &str = "/usr/local/bin/staxd";
+const LAUNCHD_LABEL: &str = "eu.bearcove.staxd";
 
 pub fn main(args: args::SetupArgs) -> Result<(), Box<dyn Error>> {
     if is_root() {
@@ -112,7 +112,7 @@ fn codesign_self(args: &args::SetupArgs) -> Result<(), Box<dyn Error>> {
             r#"
 On macOS, attaching to an existing process via task_for_pid requires the
 com.apple.security.cs.debugger entitlement. This subcommand will ad-hoc
-codesign your nperf binary with that entitlement (signed for your local
+codesign your stax binary with that entitlement (signed for your local
 machine only -- not redistributable). The following command will run:
 
     codesign --force --options runtime --sign - \
@@ -144,20 +144,20 @@ Press Enter to continue, or Ctrl-C to cancel."#,
 
     println!("Code signing successful: {}", exe.display());
     println!(
-        "You can now run `nperf record --pid <PID> ...` against most user processes \
+        "You can now run `stax record --pid <PID> ...` against most user processes \
          without sudo. Hardened-runtime apps (App Store / system) still need root.",
     );
     println!();
     println!(
         "To enable the daemon backend (`--mac-backend daemon`, no sudo even for \
-         hardened-runtime targets), run: sudo nperf setup",
+         hardened-runtime targets), run: sudo stax setup",
     );
     Ok(())
 }
 
 fn stage_entitlements() -> io::Result<PathBuf> {
     let mut path = env::temp_dir();
-    path.push(format!("nperf-entitlements-{}.xml", std::process::id()));
+    path.push(format!("stax-entitlements-{}.xml", std::process::id()));
     let mut f = fs::File::create(&path)?;
     f.write_all(NPERF_ENTITLEMENTS.as_bytes())?;
     f.flush()?;
@@ -165,7 +165,7 @@ fn stage_entitlements() -> io::Result<PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
-// Root: install nperfd as LaunchDaemon
+// Root: install staxd as LaunchDaemon
 // ---------------------------------------------------------------------------
 
 fn install_daemon(args: &args::SetupArgs) -> Result<(), Box<dyn Error>> {
@@ -175,15 +175,15 @@ fn install_daemon(args: &args::SetupArgs) -> Result<(), Box<dyn Error>> {
     if !args.yes {
         println!(
             r#"
-This will install nperfd as a LaunchDaemon (runs as root, owns kperf).
+This will install staxd as a LaunchDaemon (runs as root, owns kperf).
 
 Steps:
   1. Copy {} -> {}
   2. Write {} from embedded plist
   3. launchctl bootstrap system {} (or load on older macOS)
 
-After install, nperf record --mac-backend daemon works without sudo
-because the privileged kperf calls happen in nperfd.
+After install, stax record --mac-backend daemon works without sudo
+because the privileged kperf calls happen in staxd.
 
 Press Enter to continue, or Ctrl-C to cancel."#,
             staged.display(),
@@ -197,7 +197,7 @@ Press Enter to continue, or Ctrl-C to cancel."#,
 
     println!(":: copying binary -> {}", BINARY_INSTALL_PATH);
     fs::copy(&staged, BINARY_INSTALL_PATH).map_err(|err| {
-        format!("copying nperfd to {}: {err}", BINARY_INSTALL_PATH)
+        format!("copying staxd to {}: {err}", BINARY_INSTALL_PATH)
     })?;
     fs::set_permissions(BINARY_INSTALL_PATH, fs::Permissions::from_mode(0o755))?;
 
@@ -229,25 +229,25 @@ Press Enter to continue, or Ctrl-C to cancel."#,
     }
 
     println!();
-    println!(":: nperfd installed and running.");
-    println!(":: socket    : /var/run/nperfd.sock");
-    println!(":: logs      : /var/log/nperfd.log");
-    println!(":: now: nperf record --mac-backend daemon --pid <PID>");
+    println!(":: staxd installed and running.");
+    println!(":: socket    : /var/run/staxd.sock");
+    println!(":: logs      : /var/log/staxd.log");
+    println!(":: now: stax record --mac-backend daemon --pid <PID>");
     Ok(())
 }
 
-/// Find `nperfd` to install. Walk the candidate paths in order:
-/// `~$SUDO_USER/.cargo/bin/nperfd` (where `cargo xtask install`
-/// dropped it), `~/.cargo/bin/nperfd` (root's own — unusual), and
-/// `/usr/local/bin/nperfd` (if the user staged it manually).
+/// Find `staxd` to install. Walk the candidate paths in order:
+/// `~$SUDO_USER/.cargo/bin/staxd` (where `cargo xtask install`
+/// dropped it), `~/.cargo/bin/staxd` (root's own — unusual), and
+/// `/usr/local/bin/staxd` (if the user staged it manually).
 fn locate_staged_daemon() -> Result<PathBuf, Box<dyn Error>> {
     let mut candidates: Vec<PathBuf> = Vec::new();
 
     if let Some(user_home) = sudo_user_home() {
-        candidates.push(user_home.join(".cargo").join("bin").join("nperfd"));
+        candidates.push(user_home.join(".cargo").join("bin").join("staxd"));
     }
     if let Some(home) = env::var_os("HOME") {
-        candidates.push(PathBuf::from(home).join(".cargo").join("bin").join("nperfd"));
+        candidates.push(PathBuf::from(home).join(".cargo").join("bin").join("staxd"));
     }
 
     for c in &candidates {
@@ -256,7 +256,7 @@ fn locate_staged_daemon() -> Result<PathBuf, Box<dyn Error>> {
         }
     }
     Err(format!(
-        "couldn't find a staged `nperfd` binary. Looked in:\n{}\n\
+        "couldn't find a staged `staxd` binary. Looked in:\n{}\n\
          Run `cargo xtask install` first (as your normal user, not under sudo).",
         candidates
             .iter()

@@ -47,7 +47,7 @@ type Theme = "dark" | "light";
 /// throw on `localStorage` access.
 function initialTheme(): Theme {
   try {
-    const stored = localStorage.getItem("nperf-theme");
+    const stored = localStorage.getItem("stax-theme");
     if (stored === "light" || stored === "dark") return stored;
   } catch {}
   if (
@@ -156,7 +156,7 @@ export function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     try {
-      localStorage.setItem("nperf-theme", theme);
+      localStorage.setItem("stax-theme", theme);
     } catch {}
   }, [theme]);
 

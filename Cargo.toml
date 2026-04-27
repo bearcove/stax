@@ -1,5 +1,5 @@
 [package]
-name = "nperf-core"
+name = "stax-core"
 version = "0.1.1"
 edition = "2018"
 
@@ -9,8 +9,8 @@ log = "0.4"
 structopt = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-nerf-mac-capture = { version = "0.1", path = "nerf-mac-capture" }
-nperfd-client = { version = "0.1", path = "nperfd-client" }
+stax-mac-capture = { version = "0.1", path = "stax-mac-capture" }
+staxd-client = { version = "0.1", path = "staxd-client" }
 tokio = { version = "1", features = ["rt", "macros", "time"] }
 mach2 = "0.4"
 
@@ -35,17 +35,17 @@ members = [
     "nwind",
     "proc-maps",
     "thread-local-reentrant",
-    "nerf-mac-capture",
-    "nerf-mac-kperf-sys",
-    "nerf-mac-kperf-parse",
-    "nperf-mac-shared-cache",
+    "stax-mac-capture",
+    "stax-mac-kperf-sys",
+    "stax-mac-kperf-parse",
+    "stax-mac-shared-cache",
     "xtask",
-    "nperf-live",
-    "nperf-live-proto",
-    "nperf-demangle",
-    "nperfd-proto",
-    "nperfd",
-    "nperfd-client",
+    "stax-live",
+    "stax-live-proto",
+    "stax-demangle",
+    "staxd-proto",
+    "staxd",
+    "staxd-client",
 ]
 
 [patch."https://github.com/bearcove/vox"]

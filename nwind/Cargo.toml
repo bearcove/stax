@@ -11,7 +11,7 @@ memmap2 = "0.9"
 log = { version = "0.4", optional = true }
 speedy = "0.8"
 lru = "0.12"
-nperf-demangle = { version = "0.1", path = "../nperf-demangle" }
+stax-demangle = { version = "0.1", path = "../stax-demangle" }
 addr2line = { version = "0.21", optional = true, default-features = false, features = ["std"] }
 object = { version = "0.32", default-features = false, features = ["std", "read_core", "elf", "macho", "compression"] }
 proc-maps = { version = "0.1", path = "../proc-maps" }

@@ -1,13 +1,13 @@
 //! `cargo xtask <subcommand>` — dev-only entrypoints.
 //!
 //! Available subcommands:
-//!   - `install`        Build nperf in release mode, copy to ~/.cargo/bin/,
+//!   - `install`        Build stax in release mode, copy to ~/.cargo/bin/,
 //!                      and (on macOS) ad-hoc codesign with the
 //!                      `com.apple.security.cs.debugger` entitlement.
-//!   - `build-daemon`   Build nperfd in release mode and print the
+//!   - `build-daemon`   Build staxd in release mode and print the
 //!                      one-time `sudo cp` / `launchctl load` instructions
 //!                      for the LaunchDaemon plist.
-//!   - `codegen`        Generate TypeScript bindings for nperf-live into
+//!   - `codegen`        Generate TypeScript bindings for stax-live into
 //!                      frontend/src/generated/.
 
 use std::env;
@@ -20,8 +20,8 @@ use std::process::Command;
 
 mod codegen;
 
-const BIN_NAME: &str = "nperf";
-const DAEMON_BIN: &str = "nperfd";
+const BIN_NAME: &str = "stax";
+const DAEMON_BIN: &str = "staxd";
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = env::args().collect();
@@ -55,7 +55,7 @@ fn print_usage() {
         bin = DAEMON_BIN
     );
     eprintln!(
-        "  codegen              Generate TypeScript bindings for nperf-live into frontend/src/generated/"
+        "  codegen              Generate TypeScript bindings for stax-live into frontend/src/generated/"
     );
 }
 
@@ -87,10 +87,10 @@ fn install() -> Result<(), Box<dyn Error>> {
     println!();
     println!(":: Installed binaries to {}.", cargo_bin.display());
     println!();
-    println!("     sudo nperf setup");
+    println!("     sudo stax setup");
     println!();
-    println!(":: This installs nperfd as a LaunchDaemon. After that,");
-    println!(":: nperf record --serve … works without sudo.");
+    println!(":: This installs staxd as a LaunchDaemon. After that,");
+    println!(":: stax record --serve … works without sudo.");
     Ok(())
 }
 
@@ -113,7 +113,7 @@ fn codesign_macos(binary: &Path) -> Result<(), Box<dyn Error>> {
 "#;
 
     let mut entitlements_path = env::temp_dir();
-    entitlements_path.push(format!("nperf-xtask-entitlements-{}.xml", std::process::id()));
+    entitlements_path.push(format!("stax-xtask-entitlements-{}.xml", std::process::id()));
     fs::write(&entitlements_path, ENTITLEMENTS_XML)?;
 
     println!(
@@ -149,17 +149,17 @@ fn build_daemon() -> Result<(), Box<dyn Error>> {
     let plist = workspace_root
         .join(DAEMON_BIN)
         .join("launchd")
-        .join("eu.bearcove.nperfd.plist");
+        .join("eu.bearcove.staxd.plist");
     println!();
     println!(":: Built {}", binary.display());
     println!();
     println!(":: To install (one-time, requires sudo):");
     println!("     sudo cp {} /usr/local/bin/", binary.display());
     println!("     sudo cp {} /Library/LaunchDaemons/", plist.display());
-    println!("     sudo launchctl load /Library/LaunchDaemons/eu.bearcove.nperfd.plist");
+    println!("     sudo launchctl load /Library/LaunchDaemons/eu.bearcove.staxd.plist");
     println!();
-    println!(":: After install, the daemon listens on /var/run/nperfd.sock.");
-    println!(":: Logs at /var/log/nperfd.log.");
+    println!(":: After install, the daemon listens on /var/run/staxd.sock.");
+    println!(":: Logs at /var/log/staxd.log.");
     Ok(())
 }
 

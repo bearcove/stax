@@ -1,0 +1,9 @@
+[package]
+name = "stax-demangle"
+version = "0.1.0"
+edition = "2021"
+description = "Shared symbol demangler for stax — wraps symbolic-demangle with the cleanups (.isra., _GLOBAL__sub_I_, leading-underscore) that the rest of the toolchain expects."
+
+[dependencies]
+symbolic-common = "12"
+symbolic-demangle = { version = "12", default-features = false, features = ["cpp", "rust", "swift", "msvc"] }

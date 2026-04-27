@@ -93,4 +93,4 @@ export RUSTFLAGS="-C linker=${CC%% *} -C link-arg=--sysroot=$OECORE_TARGET_SYSRO
 export CARGO_INCREMENTAL=0
 
 cargo build --release --target=$TARGET
-cp ../target/$TARGET/release/nperf bin/$PREFIX-nperf
+cp ../target/$TARGET/release/stax bin/$PREFIX-stax

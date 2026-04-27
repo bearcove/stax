@@ -190,7 +190,7 @@ export function Flamegraph({
   // event by itself, but ResizeObserver picks up the dimensions),
   // and write back to localStorage. Wrapped in try/catch because
   // some embedding contexts throw on storage access.
-  const FLAME_H_KEY = "nperf-flame-height";
+  const FLAME_H_KEY = "stax-flame-height";
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;

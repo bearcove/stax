@@ -3,7 +3,7 @@ use std::sync::Arc;
 use nwind::UserFrame;
 
 #[cfg(target_os = "macos")]
-pub use nerf_mac_capture::MachOByteSource;
+pub use stax_mac_capture::MachOByteSource;
 
 /// One PET stack-walk hit. PET samples are stack-identity *only* in
 /// the new model: time accounting comes from `CpuIntervalEvent`s
@@ -29,7 +29,7 @@ pub struct SampleEvent< 'a > {
     pub branch_mispreds: u64,
 }
 
-/// One closed CPU interval. See `nerf_mac_capture::CpuIntervalEvent`
+/// One closed CPU interval. See `stax_mac_capture::CpuIntervalEvent`
 /// for the semantics; this is the live-sink mirror with a
 /// `UserFrame`-typed stack instead of raw `u64`s so it composes with
 /// the rest of the `live_sink` event types.

@@ -3,7 +3,7 @@ use std::error::Error;
 use std::process::exit;
 use structopt::StructOpt;
 
-use nperf_core::{args, cmd_record_mac, cmd_setup_mac};
+use stax_core::{args, cmd_record_mac, cmd_setup_mac};
 
 fn main_impl() -> Result<(), Box<dyn Error>> {
     if env::var("RUST_LOG").is_err() {
@@ -31,12 +31,12 @@ fn main() {
 }
 
 fn run_record(args: args::RecordArgs) -> Result<(), Box<dyn Error>> {
-    let (live_sink, _runtime): (Option<Box<dyn nperf_core::live_sink::LiveSink>>, _) =
+    let (live_sink, _runtime): (Option<Box<dyn stax_core::live_sink::LiveSink>>, _) =
         if let Some(ref addr) = args.serve {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
-            let (sink, _server_handle) = runtime.block_on(nperf_live::start(addr))?;
+            let (sink, _server_handle) = runtime.block_on(stax_live::start(addr))?;
             (Some(Box::new(sink)), Some(runtime))
         } else {
             (None, None)

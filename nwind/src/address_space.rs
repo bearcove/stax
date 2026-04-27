@@ -251,7 +251,7 @@ fn process_frame< R: gimli::Reader >( raw_frame: addr2line::Frame< R >, frame: &
     }
 }
 
-/// Thin shim over the shared `nperf_demangle` crate so the rest of
+/// Thin shim over the shared `stax_demangle` crate so the rest of
 /// `nwind` keeps the `Option<String>` return shape it expects.
 /// `Some` is returned only when the demangler actually rewrote the
 /// symbol; otherwise we leave it to the caller to keep the raw name.
@@ -259,7 +259,7 @@ fn demangle( symbol: &str ) -> Option< String > {
     if !symbol.starts_with( "_" ) && !symbol.starts_with( "$s" ) && !symbol.starts_with( "?" ) {
         return None;
     }
-    let result = nperf_demangle::demangle_str( symbol );
+    let result = stax_demangle::demangle_str( symbol );
     if result.name == symbol {
         None
     } else {

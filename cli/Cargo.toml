@@ -1,5 +1,5 @@
 [package]
-name = "nperf"
+name = "stax"
 version = "0.1.1"
 edition = "2018"
 
@@ -7,10 +7,10 @@ edition = "2018"
 structopt = "0.2"
 log = "0.4"
 env_logger = "0.11"
-nperf-core = { path = "..", default-features = false }
+stax-core = { path = "..", default-features = false }
 
-[dependencies.nperf-live]
-path = "../nperf-live"
+[dependencies.stax-live]
+path = "../stax-live"
 
 [dependencies.tokio]
 version = "1"
@@ -18,5 +18,5 @@ features = ["rt-multi-thread"]
 
 [features]
 default = ["addr2line"]
-addr2line = ["nperf-core/addr2line"]
-debug-logs = ["nperf-core/debug-logs"]
+addr2line = ["stax-core/addr2line"]
+debug-logs = ["stax-core/debug-logs"]

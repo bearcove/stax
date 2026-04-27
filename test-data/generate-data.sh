@@ -8,14 +8,14 @@ function generate_test_ex {
     local OUTPUT_NAME=$2
     local EXTRA_ARGS=$3
 
-    if [ -e "artifacts/$PREFIX-$OUTPUT_NAME.nperf" ]; then
+    if [ -e "artifacts/$PREFIX-$OUTPUT_NAME.stax" ]; then
         return
     fi
 
     PENDING=1
     echo "./$PREFIX-$TEST &" >> "$WORKDIR/script.sh"
     echo "PID=\$!" >> "$WORKDIR/script.sh"
-    echo "./$PREFIX-nperf record -F 100 --sample-count 200 -s sw_cpu_clock -P $PREFIX-$TEST -w -o /output/$PREFIX-$OUTPUT_NAME.nperf $EXTRA_ARGS" >> "$WORKDIR/script.sh"
+    echo "./$PREFIX-stax record -F 100 --sample-count 200 -s sw_cpu_clock -P $PREFIX-$TEST -w -o /output/$PREFIX-$OUTPUT_NAME.stax $EXTRA_ARGS" >> "$WORKDIR/script.sh"
     echo "kill \$PID" >> "$WORKDIR/script.sh"
     echo "wait \$PID" >> "$WORKDIR/script.sh"
 }

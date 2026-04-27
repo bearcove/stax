@@ -1,12 +1,12 @@
 # macOS support roadmap
 
-Goal: enable nerf to record on macOS by reusing samply's Mach-based capture
-backend. Recorded files feed the existing nperf analysis pipeline
+Goal: enable stax to record on macOS by reusing samply's Mach-based capture
+backend. Recorded files feed the existing stax analysis pipeline
 (`cmd_collate`, `cmd_flamegraph`, `cmd_csv`, `cmd_trace_events`, …).
 
 Strategy: hybrid. Online mode (unwind-at-sample-time, framehop) ships first,
 offline mode (raw stack + regs) follows. No backwards compatibility with v1
-nperf files — the format break is acknowledged.
+stax files — the format break is acknowledged.
 
 ## Background — what's reusable from samply
 
@@ -27,7 +27,7 @@ Vendored files (MIT/Apache headers preserved):
 - `dyld_bindings.rs`, `thread_act.rs`, `thread_info.rs`, `time.rs`,
   `kernel_error.rs`
 - `samply-mac-preload` dylib (separate workspace member, becomes
-  `nerf-mac-preload`)
+  `stax-mac-preload`)
 
 ## Out of scope (for now)
 
@@ -63,24 +63,24 @@ Stop and review before M1.
 
 Crates compile, no integration yet.
 
-- ✅ New crate `nerf-mac-capture`, gated on `#[cfg(target_os = "macos")]`.
-- ✅ New crate `nerf-mac-preload` (standalone workspace, since it needs
+- ✅ New crate `stax-mac-capture`, gated on `#[cfg(target_os = "macos")]`.
+- ✅ New crate `stax-mac-preload` (standalone workspace, since it needs
   `no_std` + `panic = "abort"` settings that don't work as a workspace
   member). Vendored verbatim from samply with the bootstrap env var
   renamed `SAMPLY_BOOTSTRAP_SERVER_NAME` → `NERF_BOOTSTRAP_SERVER_NAME`.
-- ✅ Leaf-level Mach utilities vendored into `nerf-mac-capture`:
+- ✅ Leaf-level Mach utilities vendored into `stax-mac-capture`:
   `dyld_bindings`, `kernel_error`, `thread_act`, `thread_info`, `time`,
   `error`, `mach_ipc`. One behaviour change: `mach_ipc::nonce_i64`
   replaces samply's `rand::rng().random::<i64>()` (rand 0.10 has a
   pre-release-only chacha20 transitive dep).
 - Dependencies wired up: `mach2 = "0.6"`, `libc`, `framehop = "0.16"`,
   `lazy_static`, `crossbeam-channel`, `thiserror`. samply commit pinned
-  in `nerf-mac-capture/Cargo.toml`.
+  in `stax-mac-capture/Cargo.toml`.
 - ⏭ Folded into M2: vendoring + stripping `proc_maps`, `process_launcher`,
   `sampler`, `task_profiler`, `thread_profiler`, `profiler`. These files
   carry heavy `fxprof-processed-profile` / `wholesym` / `samply-symbols` /
   `crate::shared::*` coupling. The same surgery that strips that coupling
-  also rewires the output to the nperf packet writer, so it makes more
+  also rewires the output to the stax packet writer, so it makes more
   sense to do it in M2 than to land an intermediate stubbed-out state.
 
 ## M2 — Online recording
@@ -91,15 +91,15 @@ Mac records, analysis pipeline reads the result.
   `process_launcher`, `sampler`, `task_profiler`, `thread_profiler`,
   `profiler`). Replace `fxprof-processed-profile` / `UnresolvedSamples` /
   `crate::shared::*` glue with a small `Sample` callback trait that
-  emits `Packet::Sample` directly into the nperf writer.
+  emits `Packet::Sample` directly into the stax writer.
 - `cmd_record.rs` dispatches by platform: linux → existing path, mac →
-  `nerf-mac-capture`.
+  `stax-mac-capture`.
 - Mac path: framehop unwinds at sample time. Each sample becomes
   `Packet::Sample { user_backtrace: Vec<UserFrame { address, symbol_id: None,
   is_inline: false }>, kernel_backtrace: empty, … }`.
 - On dyld load events from `DyldInfoManager`, emit `Packet::BinaryInfo`
   (Mach-O variant) + `Packet::MachOSymbolTable` (LC_SYMTAB + string table).
-- Symbol resolution: do what nperf does — leave `symbol_id: None` at record
+- Symbol resolution: do what stax does — leave `symbol_id: None` at record
   time; `data_reader.rs` resolves from the embedded `MachOSymbolTable` at
   load time. No record-time wholesym calls.
 - Verify: `cmd_metadata` reads the file. `cmd_flamegraph` produces a sensible
@@ -109,7 +109,7 @@ Stop and review before M3.
 
 ## M3a — Child-launch + preload-dylib + JIT auto-discovery
 
-Brings up the `nperf record --process <cmd>` path on macOS so that:
+Brings up the `stax record --process <cmd>` path on macOS so that:
 
 - We can spawn a target with `DYLD_INSERT_LIBRARIES` pointing at our
   preload dylib, which Mach-IPC's its task port back to us. This is
@@ -121,14 +121,14 @@ Brings up the `nperf record --process <cmd>` path on macOS so that:
 
 Steps:
 
-1. Build pipeline: `nerf-mac-capture/build.rs` invokes `cargo build`
-   on `nerf-mac-preload` for the host target, gzips the resulting
-   cdylib, places the bytes in `$OUT_DIR/libnerf_mac_preload.dylib.gz`.
-   `nerf-mac-capture` then `include_bytes!`s the blob and drops it to
+1. Build pipeline: `stax-mac-capture/build.rs` invokes `cargo build`
+   on `stax-mac-preload` for the host target, gzips the resulting
+   cdylib, places the bytes in `$OUT_DIR/libstax_mac_preload.dylib.gz`.
+   `stax-mac-capture` then `include_bytes!`s the blob and drops it to
    a tempfile at runtime. (Multi-arch / `lipo` come later; host-only
    for v1.)
 2. Vendor + strip `samply/src/mac/process_launcher.rs` into
-   `nerf-mac-capture/src/process_launcher.rs`. Replace
+   `stax-mac-capture/src/process_launcher.rs`. Replace
    `crate::shared::ctrl_c::CtrlC` with a small inline equivalent.
    Drop the `__XPC_*` env-var double-set unless we actually need it.
 3. Surface `JitdumpPath` events on `SampleSink`. The on-disk

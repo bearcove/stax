@@ -1533,147 +1533,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bc0287524726960e07b119cebd01678f852f147742ae0d925e6a520dca956126"
 
 [[package]]
-name = "nerf-mac-capture"
-version = "0.1.0"
-
-[[package]]
-name = "nerf-mac-kperf-parse"
-version = "0.1.0"
-dependencies = [
- "libc",
- "log",
- "memmap2",
- "nerf-mac-capture",
- "nerf-mac-kperf-sys",
- "nperf-mac-shared-cache",
- "object 0.39.1",
-]
-
-[[package]]
-name = "nerf-mac-kperf-sys"
-version = "0.1.0"
-dependencies = [
- "libc",
- "log",
- "thiserror",
-]
-
-[[package]]
-name = "nperf"
-version = "0.1.1"
-dependencies = [
- "env_logger",
- "log",
- "nperf-core",
- "nperf-live",
- "structopt",
- "tokio",
-]
-
-[[package]]
-name = "nperf-core"
-version = "0.1.1"
-dependencies = [
- "libc",
- "log",
- "mach2",
- "nerf-mac-capture",
- "nperfd-client",
- "nwind",
- "structopt",
- "tokio",
-]
-
-[[package]]
-name = "nperf-demangle"
-version = "0.1.0"
-dependencies = [
- "symbolic-common",
- "symbolic-demangle",
-]
-
-[[package]]
-name = "nperf-live"
-version = "0.1.0"
-dependencies = [
- "addr2line",
- "arborium",
- "eyre",
- "log",
- "mach2",
- "memmap2",
- "nerf-mac-capture",
- "nperf-core",
- "nperf-demangle",
- "nperf-live-proto",
- "object 0.39.1",
- "parking_lot",
- "tokio",
- "tracing",
- "vox",
- "yaxpeax-arch",
- "yaxpeax-arm",
- "yaxpeax-x86",
-]
-
-[[package]]
-name = "nperf-live-proto"
-version = "0.1.0"
-dependencies = [
- "facet",
- "vox",
-]
-
-[[package]]
-name = "nperf-mac-shared-cache"
-version = "0.1.0"
-dependencies = [
- "log",
- "memmap2",
- "nerf-mac-capture",
- "object 0.39.1",
-]
-
-[[package]]
-name = "nperfd"
-version = "0.1.0"
-dependencies = [
- "eyre",
- "libc",
- "nerf-mac-kperf-sys",
- "nperfd-proto",
- "tokio",
- "tracing",
- "tracing-oslog",
- "tracing-subscriber",
- "vox",
-]
-
-[[package]]
-name = "nperfd-client"
-version = "0.1.0"
-dependencies = [
- "log",
- "nerf-mac-capture",
- "nerf-mac-kperf-parse",
- "nerf-mac-kperf-sys",
- "nperf-mac-shared-cache",
- "nperfd-proto",
- "thiserror",
- "tokio",
- "tracing-subscriber",
- "vox",
-]
-
-[[package]]
-name = "nperfd-proto"
-version = "0.1.0"
-dependencies = [
- "facet",
- "vox",
-]
-
-[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1704,10 +1563,10 @@ dependencies = [
  "log",
  "lru",
  "memmap2",
- "nperf-demangle",
  "object 0.32.2",
  "proc-maps",
  "speedy",
+ "stax-demangle",
  "thread-local-reentrant",
 ]
 
@@ -2169,6 +2028,147 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
+name = "stax"
+version = "0.1.1"
+dependencies = [
+ "env_logger",
+ "log",
+ "stax-core",
+ "stax-live",
+ "structopt",
+ "tokio",
+]
+
+[[package]]
+name = "stax-core"
+version = "0.1.1"
+dependencies = [
+ "libc",
+ "log",
+ "mach2",
+ "nwind",
+ "stax-mac-capture",
+ "staxd-client",
+ "structopt",
+ "tokio",
+]
+
+[[package]]
+name = "stax-demangle"
+version = "0.1.0"
+dependencies = [
+ "symbolic-common",
+ "symbolic-demangle",
+]
+
+[[package]]
+name = "stax-live"
+version = "0.1.0"
+dependencies = [
+ "addr2line",
+ "arborium",
+ "eyre",
+ "log",
+ "mach2",
+ "memmap2",
+ "object 0.39.1",
+ "parking_lot",
+ "stax-core",
+ "stax-demangle",
+ "stax-live-proto",
+ "stax-mac-capture",
+ "tokio",
+ "tracing",
+ "vox",
+ "yaxpeax-arch",
+ "yaxpeax-arm",
+ "yaxpeax-x86",
+]
+
+[[package]]
+name = "stax-live-proto"
+version = "0.1.0"
+dependencies = [
+ "facet",
+ "vox",
+]
+
+[[package]]
+name = "stax-mac-capture"
+version = "0.1.0"
+
+[[package]]
+name = "stax-mac-kperf-parse"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "log",
+ "memmap2",
+ "object 0.39.1",
+ "stax-mac-capture",
+ "stax-mac-kperf-sys",
+ "stax-mac-shared-cache",
+]
+
+[[package]]
+name = "stax-mac-kperf-sys"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "log",
+ "thiserror",
+]
+
+[[package]]
+name = "stax-mac-shared-cache"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "memmap2",
+ "object 0.39.1",
+ "stax-mac-capture",
+]
+
+[[package]]
+name = "staxd"
+version = "0.1.0"
+dependencies = [
+ "eyre",
+ "libc",
+ "stax-mac-kperf-sys",
+ "staxd-proto",
+ "tokio",
+ "tracing",
+ "tracing-oslog",
+ "tracing-subscriber",
+ "vox",
+]
+
+[[package]]
+name = "staxd-client"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "stax-mac-capture",
+ "stax-mac-kperf-parse",
+ "stax-mac-kperf-sys",
+ "stax-mac-shared-cache",
+ "staxd-proto",
+ "thiserror",
+ "tokio",
+ "tracing-subscriber",
+ "vox",
+]
+
+[[package]]
+name = "staxd-proto"
+version = "0.1.0"
+dependencies = [
+ "facet",
+ "vox",
+]
 
 [[package]]
 name = "streaming-iterator"
@@ -3157,7 +3157,7 @@ name = "xtask"
 version = "0.0.0"
 dependencies = [
  "arborium-theme",
- "nperf-live-proto",
+ "stax-live-proto",
  "vox-codegen",
 ]
 

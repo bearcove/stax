@@ -5,25 +5,25 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  '@bearcove/vox-core': link:/Users/amos/bearcove/vox/typescript/packages/vox-core
-  '@bearcove/vox-postcard': link:/Users/amos/bearcove/vox/typescript/packages/vox-postcard
-  '@bearcove/vox-tcp': link:/Users/amos/bearcove/vox/typescript/packages/vox-tcp
-  '@bearcove/vox-wire': link:/Users/amos/bearcove/vox/typescript/packages/vox-wire
-  '@bearcove/vox-ws': link:/Users/amos/bearcove/vox/typescript/packages/vox-ws
+  '@bearcove/vox-core': link:../../vox/typescript/packages/vox-core
+  '@bearcove/vox-postcard': link:../../vox/typescript/packages/vox-postcard
+  '@bearcove/vox-tcp': link:../../vox/typescript/packages/vox-tcp
+  '@bearcove/vox-wire': link:../../vox/typescript/packages/vox-wire
+  '@bearcove/vox-ws': link:../../vox/typescript/packages/vox-ws
 
 importers:
 
   .:
     dependencies:
       '@bearcove/vox-core':
-        specifier: link:/Users/amos/bearcove/vox/typescript/packages/vox-core
-        version: link:../../../../../vox/typescript/packages/vox-core
+        specifier: link:../../vox/typescript/packages/vox-core
+        version: link:../../vox/typescript/packages/vox-core
       '@bearcove/vox-postcard':
-        specifier: link:/Users/amos/bearcove/vox/typescript/packages/vox-postcard
-        version: link:../../../../../vox/typescript/packages/vox-postcard
+        specifier: link:../../vox/typescript/packages/vox-postcard
+        version: link:../../vox/typescript/packages/vox-postcard
       '@bearcove/vox-ws':
-        specifier: link:/Users/amos/bearcove/vox/typescript/packages/vox-ws
-        version: link:../../../../../vox/typescript/packages/vox-ws
+        specifier: link:../../vox/typescript/packages/vox-ws
+        version: link:../../vox/typescript/packages/vox-ws
       react:
         specifier: ^18.3.1
         version: 18.3.1

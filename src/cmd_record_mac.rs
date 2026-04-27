@@ -7,7 +7,7 @@ use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use nerf_mac_capture::{
+use stax_mac_capture::{
     BinaryLoadedEvent, BinaryUnloadedEvent, JitdumpEvent, SampleEvent, SampleSink,
     ThreadNameEvent, WakeupEvent,
 };
@@ -49,7 +49,7 @@ fn record_existing_pid(
     let sigint = SigintHandler::new();
     let time_limit = args.time_limit.map(Duration::from_secs);
 
-    let opts = nperfd_client::RemoteOptions {
+    let opts = staxd_client::RemoteOptions {
         daemon_socket: args.daemon_socket.clone(),
         pid,
         frequency_hz: args.frequency,
@@ -64,8 +64,8 @@ fn record_existing_pid(
         .build()
         .map_err(|err| format!("daemon backend: tokio runtime build: {err}"))?;
     info!("Running... press Ctrl-C to stop.");
-    if let Err(err) = rt.block_on(nperfd_client::drive_session(opts, &mut sink, should_stop)) {
-        return Err(format!("nperfd-client failed: {err}").into());
+    if let Err(err) = rt.block_on(staxd_client::drive_session(opts, &mut sink, should_stop)) {
+        return Err(format!("staxd-client failed: {err}").into());
     }
     info!("Recording complete.");
     Ok(())
@@ -93,7 +93,7 @@ fn record_child_launch(
     let sigint = SigintHandler::new();
     let time_limit = args.time_limit.map(Duration::from_secs);
 
-    let opts = nperfd_client::RemoteOptions {
+    let opts = staxd_client::RemoteOptions {
         daemon_socket: args.daemon_socket.clone(),
         pid,
         frequency_hz: args.frequency,
@@ -116,8 +116,8 @@ fn record_child_launch(
         .build()
         .map_err(|err| format!("daemon backend: tokio runtime build: {err}"))?;
     info!("Running... press Ctrl-C to stop.");
-    if let Err(err) = rt.block_on(nperfd_client::drive_session(opts, &mut sink, should_stop)) {
-        return Err(format!("nperfd-client failed: {err}").into());
+    if let Err(err) = rt.block_on(staxd_client::drive_session(opts, &mut sink, should_stop)) {
+        return Err(format!("staxd-client failed: {err}").into());
     }
 
     // child_guard drops at end of scope, killing + reaping the child.
@@ -159,12 +159,12 @@ impl SampleSink for LiveOnlySink {
         });
     }
 
-    fn on_cpu_interval(&mut self, ev: nerf_mac_capture::sample_sink::CpuIntervalEvent<'_>) {
+    fn on_cpu_interval(&mut self, ev: stax_mac_capture::sample_sink::CpuIntervalEvent<'_>) {
         let Some(sink) = self.live_sink.as_ref() else {
             return;
         };
         match ev.kind {
-            nerf_mac_capture::sample_sink::CpuIntervalKind::OnCpu => {
+            stax_mac_capture::sample_sink::CpuIntervalKind::OnCpu => {
                 sink.on_cpu_interval(&crate::live_sink::CpuIntervalEvent {
                     pid: ev.pid,
                     tid: ev.tid,
@@ -173,7 +173,7 @@ impl SampleSink for LiveOnlySink {
                     kind: crate::live_sink::CpuIntervalKind::OnCpu,
                 });
             }
-            nerf_mac_capture::sample_sink::CpuIntervalKind::OffCpu {
+            stax_mac_capture::sample_sink::CpuIntervalKind::OffCpu {
                 stack,
                 waker_tid,
                 waker_user_stack,
@@ -264,7 +264,7 @@ impl SampleSink for LiveOnlySink {
 
     fn on_macho_byte_source(
         &mut self,
-        source: std::sync::Arc<dyn nerf_mac_capture::MachOByteSource>,
+        source: std::sync::Arc<dyn stax_mac_capture::MachOByteSource>,
     ) {
         if let Some(sink) = self.live_sink.as_ref() {
             sink.on_macho_byte_source(source);

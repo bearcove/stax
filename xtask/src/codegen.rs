@@ -1,5 +1,5 @@
 //! `cargo xtask codegen` — generate TypeScript bindings for the
-//! nperf-live RPC service into `frontend/src/generated/`.
+//! stax-live RPC service into `frontend/src/generated/`.
 //!
 //! Mirrors the layout vox itself uses for its bindings: one
 //! `<service>.generated.ts` per service.
@@ -12,7 +12,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let out_dir = workspace_root.join("frontend").join("src").join("generated");
     std::fs::create_dir_all(&out_dir)?;
 
-    for service in nperf_live_proto::all_services() {
+    for service in stax_live_proto::all_services() {
         let ts = vox_codegen::targets::typescript::generate_service(service);
         let filename = format!("{}.generated.ts", service.service_name.to_lowercase());
         let out_path = out_dir.join(&filename);

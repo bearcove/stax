@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!--
+    LaunchDaemon for staxd. Runs as root because kperf+kdebug require
+    it; clients connect over the local socket and exercise the kperf
+    surface without needing root themselves.
+
+    Install via `cargo xtask install-daemon`, which also handles
+    copying the binary, creating /var/run if missing, and loading via
+    launchctl. Or by hand:
+
+      sudo cp staxd/launchd/eu.bearcove.staxd.plist \
+              /Library/LaunchDaemons/
+      sudo launchctl load /Library/LaunchDaemons/eu.bearcove.staxd.plist
+-->
+<dict>
+    <key>Label</key>
+    <string>eu.bearcove.staxd</string>
+
+    <key>UserName</key>
+    <string>root</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/staxd</string>
+        <string>--socket</string>
+        <string>/var/run/staxd.sock</string>
+    </array>
+
+    <key>StandardOutPath</key>
+    <string>/var/log/staxd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/staxd.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RUST_LOG</key>
+        <string>staxd=info,stax_mac_kperf_sys=info</string>
+    </dict>
+</dict>
+</plist>
