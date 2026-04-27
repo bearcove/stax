@@ -44,12 +44,7 @@ const DEFAULT_SOCKET: &str = "/tmp/nperfd.sock";
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "nperfd=info,nerf_mac_kperf_sys=info".into()),
-        )
-        .init();
+    init_logging();
 
     let socket_path = parse_socket_arg();
 
@@ -219,6 +214,35 @@ impl Nperfd for NperfdServer {
         );
         result
     }
+}
+
+/// Set up tracing to fan out to two sinks:
+///
+/// 1. `os_log` under subsystem `eu.bearcove.nperfd` so events are
+///    visible from `log stream --predicate 'subsystem == "eu.bearcove.nperfd"'`
+///    (or Console.app) without root, even when the daemon was
+///    started by launchd. This is the always-on production path —
+///    `/var/log/nperfd.log` is also written via the plist's
+///    StandardErrorPath, but tailing it requires sudo and the file
+///    can lag behind buffered stdio.
+/// 2. The standard `fmt` layer (stderr), useful when running the
+///    daemon in foreground for development. No-op when stderr is
+///    redirected by launchd.
+fn init_logging() {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::EnvFilter;
+
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("nperfd=info,nerf_mac_kperf_sys=info"));
+
+    let oslog = tracing_oslog::OsLogger::new("eu.bearcove.nperfd", "default");
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer())
+        .with(oslog)
+        .init();
 }
 
 fn host_arch() -> &'static str {
