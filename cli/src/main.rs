@@ -78,7 +78,7 @@ fn run_record(args: RecordArgs) -> Result<(), Box<dyn Error>> {
          STAX_SERVER_SOCKET if you've moved the socket)."
             .to_owned()
     })?;
-    let (id, sink, _forwarder) = runtime.block_on(connect_to_server(&socket, &args))?;
+    let (id, sink, forwarder) = runtime.block_on(connect_to_server(&socket, &args))?;
     eprintln!(
         "stax: registered run {} with stax-server at {}",
         id.0,
@@ -87,6 +87,19 @@ fn run_record(args: RecordArgs) -> Result<(), Box<dyn Error>> {
 
     let live_sink: Box<dyn stax_core::live_sink::LiveSink> = Box::new(sink);
     let result = cmd_record_mac::main_with_live_sink(args, Some(live_sink));
+
+    // The recorder is done sampling; live_sink (and therefore the
+    // sync mpsc sender inside IngestSink) was just dropped. Wait
+    // for the forwarder to flush the backlog into vox before we
+    // tear down the tokio runtime — otherwise dropping the runtime
+    // cancels the task with thousands of samples still in flight,
+    // which is why a 5s recording was landing only ~1% of them on
+    // the server.
+    eprintln!("stax: flushing samples to stax-server …");
+    let flush = runtime.block_on(forwarder);
+    if let Err(e) = flush {
+        eprintln!("stax: forwarder task ended unexpectedly: {e}");
+    }
     drop(runtime);
     result
 }
