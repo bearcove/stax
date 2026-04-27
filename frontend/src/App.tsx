@@ -641,7 +641,7 @@ function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-type LangKind = "rust" | "c" | "cpp" | "swift" | "asm" | "unknown";
+export type LangKind = "rust" | "c" | "cpp" | "swift" | "asm" | "unknown";
 export type ObjKind = "main" | "system" | "dylib" | "unknown";
 type PaneTab = "asm" | "neighbors";
 
@@ -649,7 +649,7 @@ type PaneTab = "asm" | "neighbors";
 /// classification (carried on every TopEntry / FlameNode); only falls
 /// back to a string heuristic when the demangler couldn't tell — for
 /// instance unresolved hex addresses or images we never observed.
-function langOf(o: {
+export function langOf(o: {
   function_name: string | null;
   language?: string;
 }): LangKind {
@@ -876,7 +876,7 @@ function KindFilter({
   );
 }
 
-function langIcon(lang: LangKind) {
+export function langIcon(lang: LangKind) {
   switch (lang) {
     case "rust":
       return <SiRust title="Rust" />;

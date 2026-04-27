@@ -11,6 +11,8 @@ import {
   type FlameView,
 } from "./wire.ts";
 import {
+  langIcon,
+  langOf,
   objKindOf,
   viewParams,
   type ContextMenuTarget,
@@ -292,7 +294,7 @@ export function Flamegraph({
               }}
               title={tooltipFor(b.node, total)}
             >
-              {widthPct > 2 ? labelFor(b.node) : ""}
+              {widthPct > 2 ? <FlameBoxLabel node={b.node} /> : null}
             </div>
           );
         })}
@@ -333,6 +335,24 @@ function labelFor(node: FlameView): string {
   if (node.function_name) return node.function_name;
   if (node.address === 0n) return "(all)";
   return `0x${node.address.toString(16)}`;
+}
+
+/// Box content: language icon, symbol name, then a dimmed binary
+/// basename. Same overall shape as the top-table row, just inline on
+/// one line so it fits inside a 17px flame box. Sub-pixel boxes are
+/// blanked out by the caller; this component handles everything from
+/// "narrow but visible" up.
+function FlameBoxLabel({ node }: { node: FlameView }) {
+  const lang = langOf(node);
+  return (
+    <>
+      <span className={`glyph lang-${lang}`}>{langIcon(lang)}</span>
+      <span className="fn-name">{labelFor(node)}</span>
+      {node.binary ? (
+        <span className="bin-name">{node.binary}</span>
+      ) : null}
+    </>
+  );
 }
 
 function pct(count: bigint, total: bigint): string {

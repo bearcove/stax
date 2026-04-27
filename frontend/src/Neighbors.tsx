@@ -11,6 +11,8 @@ import {
   type NeighborsView,
 } from "./wire.ts";
 import {
+  langIcon,
+  langOf,
   objKindOf,
   viewParams,
   type ContextMenuTarget,
@@ -86,6 +88,19 @@ function labelFor(node: FlameView): string {
   return `0x${node.address.toString(16)}`;
 }
 
+function FamilyBoxLabel({ node }: { node: FlameView }) {
+  const lang = langOf(node);
+  return (
+    <>
+      <span className={`glyph lang-${lang}`}>{langIcon(lang)}</span>
+      <span className="fn-name">{labelFor(node)}</span>
+      {node.binary ? (
+        <span className="bin-name">{node.binary}</span>
+      ) : null}
+    </>
+  );
+}
+
 function pct(count: bigint, total: bigint): string {
   if (total === 0n) return "0%";
   const r = Number((count * 10000n) / total) / 100;
@@ -153,7 +168,7 @@ function FamilyChart({
             }}
             title={`${labelFor(b.node)} · ${b.node.count.toString()}/${total.toString()} · ${pct(b.node.count, total)}`}
           >
-            {widthPct > 2 ? labelFor(b.node) : ""}
+            {widthPct > 2 ? <FamilyBoxLabel node={b.node} /> : null}
           </div>
         );
       })}

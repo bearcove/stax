@@ -864,10 +864,16 @@ table.top-table tr.match {
   resize: vertical;
 }
 
-.flame.placeholder {
+.flame-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   padding: 1rem;
   color: var(--text-muted);
   font-size: 12px;
+  pointer-events: none;
 }
 
 .flame-box {
@@ -878,11 +884,46 @@ table.top-table tr.match {
   font-family: var(--font-mono);
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
   border: 1px solid var(--bg-pane);
   cursor: pointer;
   box-sizing: border-box;
   transition: filter 80ms;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Flame-box label parts: language-coloured icon, function name
+   (truncates first when there's room for it), then a dimmed binary
+   basename (drops out before the name does when space gets tight). */
+.flame-box .glyph {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+}
+
+.flame-box .glyph svg {
+  width: 11px;
+  height: 11px;
+}
+
+.flame-box .fn-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.flame-box .bin-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0.55;
+  font-size: 9px;
 }
 
 .flame-box:hover {
