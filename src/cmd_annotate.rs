@@ -755,9 +755,25 @@ pub fn main( args: AnnotateArgs ) -> Result< (), Box< dyn Error > > {
                 let bytes = match code.and_then( |image| image.fetch( &range ) ) {
                     Some( b ) => b,
                     None => {
-                        writeln!( out, "==== {} [{}]  rel 0x{:x}..0x{:x}  total={}  (no code bytes available) ====\n",
-                                  name, label, range.start.raw(), range.end.raw(), total )?;
-                        continue;
+                        // The mac kperf recorder emits each JIT'd
+                        // function as a synthetic Mach-O image with
+                        // path `[jit] <name>` (so symbol resolution
+                        // works the same way it does for native
+                        // code). These have no on-disk bytes, but
+                        // the embedded jitdump does — fall back to
+                        // `state.jit_code()`, keyed by VA. JIT
+                        // entries always have `text_svma ==
+                        // base_avma`, so the relative range start
+                        // equals the absolute VA we'd find in the
+                        // jitdump.
+                        match state.jit_code().get( &range.start.raw() ) {
+                            Some( b ) => b.as_slice(),
+                            None => {
+                                writeln!( out, "==== {} [{}]  rel 0x{:x}..0x{:x}  total={}  (no code bytes available) ====\n",
+                                          name, label, range.start.raw(), range.end.raw(), total )?;
+                                continue;
+                            }
+                        }
                     }
                 };
                 writeln!( out, "==== {} [{}]  rel 0x{:x}..0x{:x}  total={} samples ====",
