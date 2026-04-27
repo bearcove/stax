@@ -20,6 +20,10 @@ libc = "0.2"
 
 vox = { path = "/Users/amos/bearcove/vox/rust/vox", features = ["transport-websocket"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+stax-mac-shared-cache = { version = "0.1", path = "../stax-mac-shared-cache" }
+stax-mac-capture = { version = "0.1", path = "../stax-mac-capture" }
+
 [[bin]]
 name = "stax-server"
 path = "src/main.rs"

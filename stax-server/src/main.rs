@@ -38,6 +38,7 @@ async fn main() -> eyre::Result<()> {
     }
 
     let server = ServerState::new();
+    server.attach_local_shared_cache();
 
     let local_listener = vox::transport::local::LocalLinkAcceptor::bind(
         socket.to_string_lossy().into_owned(),
@@ -183,6 +184,38 @@ impl ServerState {
             next_run_id: Arc::new(AtomicU64::new(1)),
         }
     }
+
+    /// Open the host's dyld shared cache and plug it into the
+    /// binary registry as a Mach-O byte source. This is what makes
+    /// `stax annotate` against a libsystem / libdispatch / etc.
+    /// address actually return disassembly: the recorder ships
+    /// `BinaryLoaded` events with symbols for those images, but
+    /// it can't ferry the bytes (an mmap doesn't cross processes),
+    /// so the server opens the cache itself.
+    ///
+    /// No-op + warning when the cache isn't found; symbol-name
+    /// queries still work, just disassembly of cache-resident code
+    /// won't.
+    #[cfg(target_os = "macos")]
+    fn attach_local_shared_cache(&self) {
+        match stax_mac_shared_cache::SharedCache::for_host() {
+            Some(cache) => {
+                self.binaries.write().set_macho_byte_source(Arc::new(cache));
+                tracing::info!(
+                    "stax-server: dyld shared cache mapped for disassembly fallback"
+                );
+            }
+            None => {
+                tracing::warn!(
+                    "stax-server: no dyld shared cache available; \
+                     stax annotate against libsystem/libdispatch addresses won't disassemble"
+                );
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn attach_local_shared_cache(&self) {}
 
     /// View suitable for hosting the existing `Profiler` impl.
     fn profiler(&self) -> LiveServer {

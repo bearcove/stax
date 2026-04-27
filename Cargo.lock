@@ -2121,6 +2121,8 @@ dependencies = [
  "parking_lot",
  "stax-live",
  "stax-live-proto",
+ "stax-mac-capture",
+ "stax-mac-shared-cache",
  "tokio",
  "tracing",
  "tracing-oslog",
