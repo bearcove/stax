@@ -189,15 +189,22 @@ pub async fn drive_session<S: SampleSink>(
     // records" without spamming the per-batch case. Once the first
     // batch lands we go quiet until the session ends.
     let mut seen_first_batch = false;
+    // Track which side ended the session. On user / duration stop
+    // we have to force-close the underlying connection (see end of
+    // function); on daemon-initiated end we just await the RPC for
+    // its `RecordSummary` / error.
+    let mut user_stopped = false;
 
     loop {
         if should_stop() {
+            user_stopped = true;
             info!("nperfd-client: stop requested");
             break;
         }
         if let Some(d) = opts.duration
             && session_start.elapsed() >= d
         {
+            user_stopped = true;
             info!("nperfd-client: duration elapsed");
             break;
         }
@@ -249,28 +256,60 @@ pub async fn drive_session<S: SampleSink>(
         });
     }
 
-    // Closing `rx` (it gets dropped at end of function) signals the
-    // daemon's `Tx::send().await` to fail; the daemon's drain loop
-    // observes the error, runs teardown, and returns from record().
-    drop(rx);
-    let rpc_result = record_fut
-        .await
-        .map_err(|e| Error::VoxCall(format!("join: {e:?}")))?;
-    match rpc_result {
-        Ok(summary) => info!(
-            "nperfd-client: session ended cleanly, daemon drained {} records ({:?} session)",
-            summary.records_drained,
-            Duration::from_nanos(summary.session_ns)
-        ),
-        Err(vox::VoxError::User(e)) => {
-            warn!("nperfd-client: daemon returned error: {e:?}");
-            return Err(Error::Rpc(e));
-        }
-        Err(e) => {
-            return Err(Error::VoxCall(format!("record rpc: {e:?}")));
+    if user_stopped {
+        // Force the underlying connection closed so the daemon's
+        // record() future actually unblocks.
+        //
+        // vox's per-channel close-on-drop does NOT currently
+        // propagate to the server's Tx::send (only whole-connection
+        // close does, see vox-core/src/driver.rs::send_payload), so
+        // dropping `rx` alone leaves the daemon spinning in its
+        // drain loop forever, sending into a void. With
+        // `non_resumable` on the acceptor builder, killing the
+        // connection makes the daemon's tx.send fail with
+        // Transport("connection closed") and its loop breaks
+        // cleanly. This stops being necessary once vox propagates
+        // per-channel close itself.
+        info!("nperfd-client: forcing connection close (workaround until vox propagates per-channel close)");
+        record_fut.abort();
+        drop(rx);
+        drop(client);
+        // Give the runtime a tick so the abort actually drops the
+        // spawned task's client clone before we return — that's
+        // what makes the connection drop and the daemon notice.
+        tokio::task::yield_now().await;
+    } else {
+        // Daemon-initiated end (clean shutdown or error). Await
+        // the RPC for its RecordSummary or error.
+        drop(rx);
+        let rpc_result = record_fut
+            .await
+            .map_err(|e| Error::VoxCall(format!("join: {e:?}")))?;
+        match rpc_result {
+            Ok(summary) => info!(
+                "nperfd-client: session ended cleanly, daemon drained {} records ({:?} session)",
+                summary.records_drained,
+                Duration::from_nanos(summary.session_ns)
+            ),
+            Err(vox::VoxError::User(e)) => {
+                warn!("nperfd-client: daemon returned error: {e:?}");
+                return Err(Error::Rpc(e));
+            }
+            Err(e) => {
+                return Err(Error::VoxCall(format!("record rpc: {e:?}")));
+            }
         }
     }
-    info!("nperfd-client: locally drained {total_drained} records");
+    let s = &parser.stats;
+    info!(
+        "nperfd-client: locally drained {total_drained} records, parser \
+         started/emitted/orphaned: {}/{}/{}, walk errors u/k: {}/{}",
+        s.samples_started,
+        s.samples_emitted,
+        s.samples_orphaned,
+        s.user_walk_errors,
+        s.kernel_walk_errors,
+    );
     Ok(())
 }
 
