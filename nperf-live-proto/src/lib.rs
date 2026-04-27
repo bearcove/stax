@@ -69,14 +69,19 @@ pub enum TopSort {
 /// One node in the call-tree flamegraph. Address 0 is reserved for the
 /// synthetic root that aggregates all stacks. Children sum to (or are
 /// less than, after pruning) the parent's `count`.
+///
+/// `function_name`, `binary`, and `language` are indices into the
+/// containing `FlamegraphUpdate.strings` / `NeighborsUpdate.strings`
+/// table — interning saves ~50 bytes per node on the wire when most
+/// nodes resolve to the same handful of (function, binary) pairs.
 #[derive(Clone, Debug, Facet)]
 pub struct FlameNode {
     pub address: u64,
     pub count: u64,
-    pub function_name: Option<String>,
-    pub binary: Option<String>,
+    pub function_name: Option<u32>,
+    pub binary: Option<u32>,
     pub is_main: bool,
-    pub language: String,
+    pub language: u32,
     /// PMU counter sums across every sample that traversed this
     /// node. Lets the flamegraph colour-by-event mode fall straight
     /// out of the existing tree (cycles for IPC, l1d_misses for
@@ -92,6 +97,11 @@ pub struct FlameNode {
 #[derive(Clone, Debug, Facet)]
 pub struct FlamegraphUpdate {
     pub total_samples: u64,
+    /// Deduplicated string table: `FlameNode.function_name`,
+    /// `binary`, and `language` are indices into this. A typical
+    /// session has on the order of ~50 unique (function, binary)
+    /// pairs that would otherwise repeat across thousands of nodes.
+    pub strings: Vec<String>,
     pub root: FlameNode,
 }
 
@@ -223,12 +233,15 @@ pub struct TimelineUpdate {
 /// Counts are pruned at ~0.5% of `own_count` to bound the wire size.
 #[derive(Clone, Debug, Facet)]
 pub struct NeighborsUpdate {
-    /// Resolved name of the target symbol; `None` for unresolved
-    /// addresses (JIT, kernel frames, etc.).
-    pub function_name: Option<String>,
-    pub binary: Option<String>,
+    /// Shared string table for all FlameNode references in this
+    /// update plus the target's own symbol fields.
+    pub strings: Vec<String>,
+    /// Resolved name of the target symbol; index into `strings`.
+    /// `None` for unresolved addresses (JIT, kernel frames, etc.).
+    pub function_name: Option<u32>,
+    pub binary: Option<u32>,
     pub is_main: bool,
-    pub language: String,
+    pub language: u32,
     /// Total samples that passed through this symbol (sum across
     /// every address resolving to it).
     pub own_count: u64,

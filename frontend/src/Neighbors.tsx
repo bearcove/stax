@@ -1,11 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import { channel } from "@bearcove/vox-core";
 import type {
-  FlameNode,
   LiveFilter,
-  NeighborsUpdate,
+  NeighborsUpdate as WireNeighborsUpdate,
   ProfilerClient,
 } from "./generated/profiler.generated.ts";
+import {
+  hydrateNeighbors,
+  type FlameView,
+  type NeighborsView,
+} from "./wire.ts";
 import {
   objKindOf,
   viewParams,
@@ -20,14 +24,14 @@ type Box = {
   x0: number;
   x1: number;
   depth: number;
-  node: FlameNode;
+  node: FlameView;
 };
 
-function kindClassFor(node: FlameNode): string {
+function kindClassFor(node: FlameView): string {
   return `kind-${objKindOf(node)}`;
 }
 
-function nodeMatches(n: FlameNode, matchText: ((t: string) => boolean) | null): boolean {
+function nodeMatches(n: FlameView, matchText: ((t: string) => boolean) | null): boolean {
   if (!matchText) return false;
   return (
     (n.function_name != null && matchText(n.function_name)) ||
@@ -36,7 +40,7 @@ function nodeMatches(n: FlameNode, matchText: ((t: string) => boolean) | null): 
 }
 
 function layout(
-  root: FlameNode,
+  root: FlameView,
   hiddenKinds: Set<ObjKind>,
   // Skip rendering the root node itself: its children are what we
   // care about (the target's neighbors), and the root just repeats
@@ -48,7 +52,7 @@ function layout(
   const startDepth = skipRoot ? -1 : 0;
 
   const walk = (
-    node: FlameNode,
+    node: FlameView,
     depth: number,
     x0: number,
     x1: number,
@@ -76,7 +80,7 @@ function layout(
   return { boxes, depth: Math.max(0, maxDepth) };
 }
 
-function labelFor(node: FlameNode): string {
+function labelFor(node: FlameView): string {
   if (node.function_name) return node.function_name;
   if (node.address === 0n) return "(all)";
   return `0x${node.address.toString(16)}`;
@@ -101,7 +105,7 @@ function FamilyChart({
   onContextMenu,
   empty,
 }: {
-  root: FlameNode;
+  root: FlameView;
   flip: boolean;
   matchText: ((t: string) => boolean) | null;
   hiddenKinds: Set<ObjKind>;
@@ -176,20 +180,21 @@ export function Neighbors({
   onSelectAddress: (a: bigint) => void;
   onContextMenu: (t: ContextMenuTarget) => void;
 }) {
-  const [update, setUpdate] = useState<NeighborsUpdate | null>(null);
+  const [update, setUpdate] = useState<NeighborsView | null>(null);
   const [frozen, setFrozen] = useState(false);
   const frozenRef = useRef(false);
-  const latestRef = useRef<NeighborsUpdate | null>(null);
+  const latestRef = useRef<NeighborsView | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     setUpdate(null);
     latestRef.current = null;
-    const [tx, rx] = channel<NeighborsUpdate>();
+    const [tx, rx] = channel<WireNeighborsUpdate>();
     client.subscribeNeighbors(address, viewParams(tid, filter), tx).catch(() => {});
     (async () => {
-      for await (const next of rx) {
+      for await (const wire of rx) {
         if (cancelled) break;
+        const next = hydrateNeighbors(wire);
         latestRef.current = next;
         if (!frozenRef.current) setUpdate(next);
       }

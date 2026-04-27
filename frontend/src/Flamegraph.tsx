@@ -1,11 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import { channel } from "@bearcove/vox-core";
 import type {
-  FlameNode,
-  FlamegraphUpdate,
+  FlamegraphUpdate as WireFlamegraphUpdate,
   LiveFilter,
   ProfilerClient,
 } from "./generated/profiler.generated.ts";
+import {
+  hydrateFlamegraph,
+  type FlamegraphView,
+  type FlameView,
+} from "./wire.ts";
 import {
   objKindOf,
   viewParams,
@@ -20,18 +24,18 @@ type Box = {
   x0: number;
   x1: number;
   depth: number;
-  node: FlameNode;
+  node: FlameView;
 };
 
 /// Class name for a flame box, picked from the node's kind. The
 /// matching `.flame-box.kind-*` rules in CSS hold the actual colors,
 /// so the boxes follow the active theme.
-function kindClassFor(node: FlameNode): string {
+function kindClassFor(node: FlameView): string {
   return `kind-${objKindOf(node)}`;
 }
 
 function nodeMatches(
-  n: FlameNode,
+  n: FlameView,
   matchText: ((t: string) => boolean) | null,
 ): boolean {
   if (!matchText) return false;
@@ -43,10 +47,10 @@ function nodeMatches(
 
 /// Find a node by its layout key (e.g. "r/2/1/0"). Mirrors the
 /// `${keyPrefix}/${i}` numbering in `layout`.
-function findByKey(node: FlameNode, target: string): FlameNode | null {
+function findByKey(node: FlameView, target: string): FlameView | null {
   if (target === "r") return node;
   const parts = target.split("/").slice(1); // drop the leading "r"
-  let cur: FlameNode = node;
+  let cur: FlameView = node;
   for (const p of parts) {
     const i = Number(p);
     if (!Number.isFinite(i) || i < 0 || i >= cur.children.length) return null;
@@ -61,13 +65,13 @@ function findByKey(node: FlameNode, target: string): FlameNode | null {
 /// box keeps its width and just gets fewer / no children stacked on
 /// top.
 function layout(
-  root: FlameNode,
+  root: FlameView,
   hiddenKinds: Set<ObjKind>,
 ): { boxes: Box[]; depth: number } {
   const boxes: Box[] = [];
   let maxDepth = 0;
   const walk = (
-    node: FlameNode,
+    node: FlameView,
     depth: number,
     x0: number,
     x1: number,
@@ -125,12 +129,12 @@ export function Flamegraph({
   onContextMenu: (t: ContextMenuTarget) => void;
   onDropSymbol: (s: { function_name: string | null; binary: string | null }) => void;
 }) {
-  const [update, setUpdate] = useState<FlamegraphUpdate | null>(null);
+  const [update, setUpdate] = useState<FlamegraphView | null>(null);
   const [hover, setHover] = useState<Box | null>(null);
   const [frozen, setFrozen] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const frozenRef = useRef(false);
-  const latestRef = useRef<FlamegraphUpdate | null>(null);
+  const latestRef = useRef<FlamegraphView | null>(null);
   const hoverRef = useRef<Box | null>(null);
 
   // Persist the resize-handle height across reloads. Apply on mount,
@@ -170,11 +174,12 @@ export function Flamegraph({
     setUpdate(null);
     latestRef.current = null;
     onFocusKeyChange(null);
-    const [tx, rx] = channel<FlamegraphUpdate>();
+    const [tx, rx] = channel<WireFlamegraphUpdate>();
     client.subscribeFlamegraph(viewParams(tid, filter), tx).catch(() => {});
     (async () => {
-      for await (const next of rx) {
+      for await (const wire of rx) {
         if (cancelled) break;
+        const next = hydrateFlamegraph(wire);
         latestRef.current = next;
         if (!frozenRef.current) setUpdate(next);
       }
@@ -228,23 +233,20 @@ export function Flamegraph({
     return () => window.removeEventListener("keydown", onKey);
   }, [frozen, onFocusKeyChange, onDropSymbol]);
 
-  if (!update) {
-    return <div className="flame placeholder">building flamegraph…</div>;
-  }
-
   // Pick the rendering root: focused subtree if set and findable,
-  // otherwise the live root.
-  const renderRoot = focusKey
-    ? findByKey(update.root, focusKey) ?? update.root
-    : update.root;
-  const { boxes, depth } = layout(renderRoot, hiddenKinds);
-  // Inner content height: enough rows for the deepest stack. The
-  // outer `.flame` element is sized by CSS (fixed `height: 30vh`)
-  // so the pane doesn't pop when stacks shrink; the inner sizer
-  // reserves vertical room for the absolutely-positioned boxes and
-  // lets the scroll container do its thing when stacks are deeper.
+  // otherwise the live root. When `update` is null we render an empty
+  // shell so the outer `.flame` keeps its user-resized height across
+  // filter changes (the ref + ResizeObserver stay attached).
+  const renderRoot = update
+    ? focusKey
+      ? findByKey(update.root, focusKey) ?? update.root
+      : update.root
+    : null;
+  const { boxes, depth } = renderRoot
+    ? layout(renderRoot, hiddenKinds)
+    : { boxes: [], depth: 0 };
   const innerHeight = (depth + 1) * ROW_H;
-  const total = update.total_samples;
+  const total = update?.total_samples ?? 0n;
 
   return (
     <div
@@ -256,11 +258,10 @@ export function Flamegraph({
       }}
     >
       <div ref={containerRef} className="flame">
-        {/* Inner sizer: tall enough for the deepest stack so the
-            absolute children can position freely. The outer .flame
-            stays at its CSS-fixed height; this just gives the
-            scroll container something to scroll. */}
         <div className="flame-inner" style={{ height: `${innerHeight}px` }} />
+        {!update && (
+          <div className="flame-placeholder">building flamegraph…</div>
+        )}
         {boxes.map((b) => {
           const widthPct = (b.x1 - b.x0) * 100;
           const isMatch = nodeMatches(b.node, matchText);
@@ -316,17 +317,19 @@ export function Flamegraph({
               {hover.node.binary ? ` · ${hover.node.binary}` : ""}
             </span>
           </>
-        ) : (
+        ) : update ? (
           <span className="flame-status-meta">
             {total.toString()} samples · click to open · right-click to focus
           </span>
+        ) : (
+          <span className="flame-status-meta">building flamegraph…</span>
         )}
       </div>
     </div>
   );
 }
 
-function labelFor(node: FlameNode): string {
+function labelFor(node: FlameView): string {
   if (node.function_name) return node.function_name;
   if (node.address === 0n) return "(all)";
   return `0x${node.address.toString(16)}`;
@@ -340,13 +343,13 @@ function pct(count: bigint, total: bigint): string {
 
 /// Inclusive IPC for a flame node, formatted to two decimals. `null`
 /// when the kperf backend didn't report PMU values for this run.
-function ipcFor(node: FlameNode): string | null {
+function ipcFor(node: FlameView): string | null {
   if (node.cycles === 0n) return null;
   const ipc = Number(node.instructions) / Number(node.cycles);
   return ipc.toFixed(2);
 }
 
-function tooltipFor(node: FlameNode, total: bigint): string {
+function tooltipFor(node: FlameView, total: bigint): string {
   const base = `${labelFor(node)} · ${node.count.toString()}/${total.toString()}`;
   const ipc = ipcFor(node);
   return ipc

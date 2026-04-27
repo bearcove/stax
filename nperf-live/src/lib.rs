@@ -864,6 +864,7 @@ fn compute_neighbors_update(
         sn: SymbolNode,
         key: SymbolKey,
         threshold: u64,
+        interner: &mut StringInterner,
     ) -> FlameNode {
         let SymbolNode {
             count,
@@ -876,16 +877,16 @@ fn compute_neighbors_update(
         let mut child_nodes: Vec<FlameNode> = children
             .into_iter()
             .filter(|(_, c)| c.count >= threshold)
-            .map(|(k, c)| to_flame_node(c, k, threshold))
+            .map(|(k, c)| to_flame_node(c, k, threshold, interner))
             .collect();
         child_nodes.sort_by(|a, b| b.count.cmp(&a.count));
         FlameNode {
             address: rep_address,
             count,
-            function_name: key.0,
-            binary: key.1,
+            function_name: interner.intern_opt(key.0),
+            binary: interner.intern_opt(key.1),
             is_main,
-            language: language.as_str().to_owned(),
+            language: interner.intern_str(language.as_str()),
             // PMC values aren't currently propagated through the
             // SymbolNode-based callers/callees trees -- the neighbors
             // view shows counts only.
@@ -937,17 +938,70 @@ fn compute_neighbors_update(
     // Same lenient 0.05% threshold as the main flamegraph so the
     // family tree shows small but non-trivial neighbours.
     let threshold = (own_count / 2000).max(1);
-    let callers_tree = to_flame_node(callers, target_key.clone(), threshold);
-    let callees_tree = to_flame_node(callees, target_key.clone(), threshold);
+    let mut interner = StringInterner::new();
+    let target_fname = interner.intern_opt(target_key.0.clone());
+    let target_bin = interner.intern_opt(target_key.1.clone());
+    let target_lang = interner.intern_str(target_language.as_str());
+    let callers_tree = to_flame_node(callers, target_key.clone(), threshold, &mut interner);
+    let callees_tree = to_flame_node(callees, target_key, threshold, &mut interner);
 
     NeighborsUpdate {
-        function_name: target_key.0,
-        binary: target_key.1,
+        strings: interner.into_strings(),
+        function_name: target_fname,
+        binary: target_bin,
         is_main: target_resolved.as_ref().map(|r| r.is_main).unwrap_or(false),
-        language: target_language.as_str().to_owned(),
+        language: target_lang,
         own_count,
         callers_tree,
         callees_tree,
+    }
+}
+
+/// Tiny string-table builder shared between `compute_flame_update` and
+/// `compute_neighbors_update`. Frees us from sending the same
+/// `function_name` / `binary` / `language` strings for every node in
+/// the tree -- a typical session has on the order of ~50 unique pairs
+/// repeated across thousands of nodes.
+struct StringInterner {
+    strings: Vec<String>,
+    index: std::collections::HashMap<String, u32>,
+}
+
+impl StringInterner {
+    fn new() -> Self {
+        Self {
+            strings: Vec::new(),
+            index: std::collections::HashMap::new(),
+        }
+    }
+
+    fn intern_str(&mut self, s: &str) -> u32 {
+        if let Some(&i) = self.index.get(s) {
+            return i;
+        }
+        let i = self.strings.len() as u32;
+        let owned = s.to_owned();
+        self.index.insert(owned.clone(), i);
+        self.strings.push(owned);
+        i
+    }
+
+    fn intern(&mut self, s: String) -> u32 {
+        if let Some(&i) = self.index.get(&s) {
+            return i;
+        }
+        let i = self.strings.len() as u32;
+        self.index.insert(s.clone(), i);
+        self.strings.push(s);
+        i
+    }
+
+    fn intern_opt(&mut self, s: Option<String>) -> Option<u32> {
+        s.map(|s| self.intern(s))
+    }
+
+    fn into_strings(self) -> Vec<String> {
+        self.strings
     }
 }
 
@@ -963,8 +1017,9 @@ fn compute_flame_update(
     // 5-10x but the live UI handles it; the residue cell still
     // catches the truly-tiny tail.
     let threshold = (total / 2000).max(1);
+    let mut interner = StringInterner::new();
     let (mut children, residue) =
-        build_children_with_residue(&[flame_root], threshold, binaries);
+        build_children_with_residue(&[flame_root], threshold, binaries, &mut interner);
     for c in &mut children {
         fold_recursion(c);
     }
@@ -972,6 +1027,8 @@ fn compute_flame_update(
     if let Some(extra) = residue {
         children.push(extra);
     }
+
+    let unknown_lang = interner.intern_str(nperf_demangle::Language::Unknown.as_str());
 
     // Samples whose user-stack walk returned zero frames (kernel-only
     // samples, walk failures, etc.) increment `total_samples` but
@@ -982,13 +1039,16 @@ fn compute_flame_update(
     let visible_sum: u64 = children.iter().map(|c| c.count).sum();
     if total > visible_sum {
         let missing = total - visible_sum;
+        let label = interner.intern(format!(
+            "(in-kernel / no user stack: {missing} samples)"
+        ));
         children.push(FlameNode {
             address: u64::MAX - 1,
             count: missing,
-            function_name: Some(format!("(in-kernel / no user stack: {missing} samples)")),
+            function_name: Some(label),
             binary: None,
             is_main: false,
-            language: nperf_demangle::Language::Unknown.as_str().to_owned(),
+            language: unknown_lang,
             cycles: 0,
             instructions: 0,
             l1d_misses: 0,
@@ -1004,13 +1064,14 @@ fn compute_flame_update(
     let total_l1d_misses: u64 = children.iter().map(|c| c.l1d_misses).sum();
     let total_branch_mispreds: u64 = children.iter().map(|c| c.branch_mispreds).sum();
 
+    let all_label = interner.intern_str("(all)");
     let root = FlameNode {
         address: 0,
         count: total,
-        function_name: Some("(all)".into()),
+        function_name: Some(all_label),
         binary: None,
         is_main: false,
-        language: nperf_demangle::Language::Unknown.as_str().to_owned(),
+        language: unknown_lang,
         cycles: total_cycles,
         instructions: total_instructions,
         l1d_misses: total_l1d_misses,
@@ -1019,6 +1080,7 @@ fn compute_flame_update(
     };
     FlamegraphUpdate {
         total_samples: total,
+        strings: interner.into_strings(),
         root,
     }
 }
@@ -1062,6 +1124,7 @@ fn build_children_with_residue(
     sources: &[&aggregator::StackNode],
     threshold: u64,
     binaries: &BinaryRegistry,
+    interner: &mut StringInterner,
 ) -> (Vec<FlameNode>, Option<FlameNode>) {
     use std::collections::HashMap;
 
@@ -1126,7 +1189,7 @@ fn build_children_with_residue(
     for ((fname, bin), acc) in groups {
         if acc.count >= threshold {
             let (mut grandchildren, gres) =
-                build_children_with_residue(&acc.sub_sources, threshold, binaries);
+                build_children_with_residue(&acc.sub_sources, threshold, binaries, interner);
             grandchildren.sort_by(|a, b| b.count.cmp(&a.count));
             if let Some(extra) = gres {
                 grandchildren.push(extra);
@@ -1134,10 +1197,10 @@ fn build_children_with_residue(
             visible.push(FlameNode {
                 address: acc.rep_addr,
                 count: acc.count,
-                function_name: fname,
-                binary: bin,
+                function_name: interner.intern_opt(fname),
+                binary: interner.intern_opt(bin),
                 is_main: acc.is_main,
-                language: acc.language.as_str().to_owned(),
+                language: interner.intern_str(acc.language.as_str()),
                 cycles: acc.pmc.cycles,
                 instructions: acc.pmc.instructions,
                 l1d_misses: acc.pmc.l1d_misses,
@@ -1150,6 +1213,8 @@ fn build_children_with_residue(
         }
     }
     let residue = if residue_count > 0 && residue_dropped > 0 {
+        let label = interner.intern(format!("({} small frames)", residue_dropped));
+        let unknown_lang = interner.intern_str(nperf_demangle::Language::Unknown.as_str());
         Some(FlameNode {
             // Sentinel address: the frontend treats any node with
             // address == 0 as the root "(all)" otherwise; we set
@@ -1158,10 +1223,10 @@ fn build_children_with_residue(
             // in case future renderers fall back to address.
             address: u64::MAX,
             count: residue_count,
-            function_name: Some(format!("({} small frames)", residue_dropped)),
+            function_name: Some(label),
             binary: None,
             is_main: false,
-            language: nperf_demangle::Language::Unknown.as_str().to_owned(),
+            language: unknown_lang,
             cycles: 0,
             instructions: 0,
             l1d_misses: 0,
