@@ -93,6 +93,20 @@
   --lang-swift: #f05138;
   --lang-asm: #8a909a;
 
+  /* Off-CPU reason palette. Saturated enough to read as 1-2px stripes
+     under flame boxes, distinct enough that the eye picks reason
+     mixes apart at a glance. */
+  --reason-idle: #4b5563;
+  --reason-lock: #e0625a;
+  --reason-semaphore: #d4751f;
+  --reason-ipc: #a777e3;
+  --reason-io_read: #61afef;
+  --reason-io_write: #2563eb;
+  --reason-readiness: #14b8a6;
+  --reason-sleep: #6b7280;
+  --reason-connect: #f59e0b;
+  --reason-other: #98c379;
+
   font-family: var(--font-ui);
   color-scheme: dark;
   background: var(--bg-base);
@@ -146,6 +160,17 @@
   --lang-cpp: #8a3aa8;
   --lang-swift: #d4441f;
   --lang-asm: #5a626c;
+
+  --reason-idle: #6b7280;
+  --reason-lock: #c2483f;
+  --reason-semaphore: #b65a14;
+  --reason-ipc: #7c3aed;
+  --reason-io_read: #2f6fb8;
+  --reason-io_write: #1e40af;
+  --reason-readiness: #0d9488;
+  --reason-sleep: #94a3b8;
+  --reason-connect: #d97706;
+  --reason-other: #4a7d35;
 
   color-scheme: light;
 }
@@ -1496,4 +1521,263 @@ table.asm td.src-snip {
    right of — the source banner. */
 table.asm tr:not(.src-header) td.asm-line {
   padding-left: 28px;
+}
+
+/* === Off-CPU reason visualization ============================== */
+
+/* A flame box may carry a horizontal stripe at its bottom edge that
+   shows how its off-CPU time decomposes into reasons. Each segment
+   is a coloured rectangle whose width is proportional to that
+   reason's share of the box's total off-CPU time. The stripe stays
+   thin (3px) so it doesn't fight the box's main fill colour for
+   attention. Boxes with zero off-CPU time render no stripe. */
+.flame-box {
+  position: absolute;
+}
+
+.flame-box-stripe {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3px;
+  display: flex;
+  pointer-events: none;
+}
+
+.flame-box-stripe-seg {
+  height: 100%;
+}
+
+/* Reason colours used by the stripe + chips + intervals table. */
+.reason-idle {
+  background: var(--reason-idle);
+}
+.reason-lock {
+  background: var(--reason-lock);
+}
+.reason-semaphore {
+  background: var(--reason-semaphore);
+}
+.reason-ipc {
+  background: var(--reason-ipc);
+}
+.reason-io_read {
+  background: var(--reason-io_read);
+}
+.reason-io_write {
+  background: var(--reason-io_write);
+}
+.reason-readiness {
+  background: var(--reason-readiness);
+}
+.reason-sleep {
+  background: var(--reason-sleep);
+}
+.reason-connect {
+  background: var(--reason-connect);
+}
+.reason-other {
+  background: var(--reason-other);
+}
+
+/* Outline variant used by the topbar legend chips: reason colour as
+   border, transparent fill, label inside in the same colour. */
+.reason-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  border: 1px solid var(--reason-color, var(--border-soft));
+  color: var(--reason-color, var(--text-secondary));
+  background: color-mix(
+    in srgb,
+    var(--reason-color, var(--text-secondary)) 14%,
+    transparent
+  );
+  white-space: nowrap;
+}
+.reason-chip--idle {
+  --reason-color: var(--reason-idle);
+}
+.reason-chip--lock {
+  --reason-color: var(--reason-lock);
+}
+.reason-chip--semaphore {
+  --reason-color: var(--reason-semaphore);
+}
+.reason-chip--ipc {
+  --reason-color: var(--reason-ipc);
+}
+.reason-chip--io_read {
+  --reason-color: var(--reason-io_read);
+}
+.reason-chip--io_write {
+  --reason-color: var(--reason-io_write);
+}
+.reason-chip--readiness {
+  --reason-color: var(--reason-readiness);
+}
+.reason-chip--sleep {
+  --reason-color: var(--reason-sleep);
+}
+.reason-chip--connect {
+  --reason-color: var(--reason-connect);
+}
+.reason-chip--other {
+  --reason-color: var(--reason-other);
+}
+
+.reason-chip-name {
+  font-weight: 600;
+}
+
+.reason-chip-value {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+}
+
+.reason-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 12px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.reason-legend-empty {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+/* === Display-mode pill (on-CPU / off-CPU / wall) =============== */
+.kind-pill.mode-on_cpu {
+  color: var(--kind-main-color);
+  border-color: color-mix(in srgb, var(--kind-main-color) 35%, transparent);
+}
+.kind-pill.mode-off_cpu {
+  color: var(--reason-lock);
+  border-color: color-mix(in srgb, var(--reason-lock) 35%, transparent);
+}
+.kind-pill.mode-wall {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+/* === Intervals drill-down panel ================================ */
+.intervals-pane {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  overflow: hidden;
+}
+
+.intervals-header {
+  flex: 0 0 auto;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  color: var(--text-secondary);
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.intervals-header-meta {
+  color: var(--text-muted);
+}
+
+.intervals-body {
+  flex: 1 1 auto;
+  overflow: auto;
+}
+
+table.intervals-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+table.intervals-table th,
+table.intervals-table td {
+  padding: 2px 8px;
+  text-align: left;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+table.intervals-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border-soft);
+  color: var(--text-tertiary);
+  font-weight: 500;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  z-index: 1;
+}
+
+table.intervals-table tbody tr:nth-child(odd) {
+  background: var(--row-divider-faint);
+}
+
+table.intervals-table tbody tr:hover {
+  background: var(--bg-hover);
+}
+
+table.intervals-table td.col-reason {
+  color: var(--reason-color, var(--text-primary));
+  font-weight: 600;
+}
+
+table.intervals-table td.col-duration {
+  text-align: right;
+  color: var(--text-primary);
+}
+
+table.intervals-table td.col-tid {
+  color: var(--text-tertiary);
+}
+
+table.intervals-table td.col-waker {
+  color: var(--text-secondary);
+  max-width: 32em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+table.intervals-table td.col-waker.empty {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+button.waker-link {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  font-family: var(--font-mono);
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+button.waker-link:hover {
+  color: var(--accent);
+}
+
+.waker-tid {
+  color: var(--text-tertiary);
+  font-style: italic;
 }

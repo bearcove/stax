@@ -29,9 +29,15 @@ import {
   type WakersUpdate,
 } from "./generated/profiler.generated.ts";
 import { Flamegraph } from "./Flamegraph.tsx";
+import { IntervalsPanel } from "./Intervals.tsx";
 import { Neighbors } from "./Neighbors.tsx";
 import { Timeline } from "./Timeline.tsx";
-import { formatDuration, offCpuTotal } from "./wire.ts";
+import {
+  formatDuration,
+  offCpuTotal,
+  reasonSegments,
+  REASON_LABEL,
+} from "./wire.ts";
 
 type Status = "pending" | "ok" | "err";
 type Theme = "dark" | "light";
@@ -141,6 +147,7 @@ export function App() {
     [filter, drillExcludes],
   );
   const [pmuMetric, setPmuMetric] = useState<PmuMetric>("ipc");
+  const [displayMode, setDisplayMode] = useState<DisplayMode>("on_cpu");
   const [theme, setTheme] = useState<Theme>(initialTheme);
   const [paused, setPaused] = useState(false);
 
@@ -406,10 +413,7 @@ export function App() {
               .*
             </button>
           </span>
-          {/* On/off-CPU toggle removed for now: every flame node
-              now carries both kinds (and per-reason off-CPU) on the
-              wire, so this becomes a pure display preference. Re-add
-              when the new schema's per-reason rendering lands. */}
+          <DisplayModeFilter mode={displayMode} onChange={setDisplayMode} />
           <PmuMetricFilter metric={pmuMetric} onChange={setPmuMetric} />
           <KindFilter hidden={hiddenKinds} onChange={setHiddenKinds} />
           <button
@@ -479,6 +483,12 @@ export function App() {
           ))}
         </section>
       )}
+      {displayed && (
+        <ReasonLegend
+          breakdown={displayed.total_off_cpu}
+          totalOnCpuNs={displayed.total_on_cpu_ns}
+        />
+      )}
       {wakers && wakers.entries.length > 0 && (
         <WakersPanel
           wakers={wakers}
@@ -494,6 +504,7 @@ export function App() {
             filter={effectiveFilter}
             matchText={matchText}
             hiddenKinds={hiddenKinds}
+            displayMode={displayMode}
             currentAbsKey={flameFocusAbsKey}
             onPushFocus={pushFocus}
             onPopDrill={popDrill}
@@ -524,36 +535,58 @@ export function App() {
           />
         </section>
         <section className="pane ann-pane">
-          {client && selected !== null ? (
-            <div className="ann-tabs" key={String(selected)}>
+          {client ? (
+            <div className="ann-tabs">
               <div className="tab-strip" role="tablist">
                 <button
                   className={`tab${paneTab === "asm" ? " active" : ""}`}
                   onClick={() => setPaneTab("asm")}
+                  disabled={selected === null}
                   role="tab"
                   aria-selected={paneTab === "asm"}
+                  title={
+                    selected === null
+                      ? "click a row or flame box to enable"
+                      : undefined
+                  }
                 >
                   disassembly
                 </button>
                 <button
                   className={`tab${paneTab === "neighbors" ? " active" : ""}`}
                   onClick={() => setPaneTab("neighbors")}
+                  disabled={selected === null}
                   role="tab"
                   aria-selected={paneTab === "neighbors"}
+                  title={
+                    selected === null
+                      ? "click a row or flame box to enable"
+                      : undefined
+                  }
                 >
                   family tree
                 </button>
+                <button
+                  className={`tab${paneTab === "intervals" ? " active" : ""}`}
+                  onClick={() => setPaneTab("intervals")}
+                  role="tab"
+                  aria-selected={paneTab === "intervals"}
+                >
+                  intervals
+                </button>
               </div>
               <div className="tab-body">
-                {paneTab === "asm" ? (
+                {paneTab === "asm" && selected !== null ? (
                   <Annotation
+                    key={String(selected)}
                     client={client}
                     address={selected}
                     tid={selectedTid}
                     filter={effectiveFilter}
                   />
-                ) : (
+                ) : paneTab === "neighbors" && selected !== null ? (
                   <Neighbors
+                    key={String(selected)}
                     client={client}
                     address={selected}
                     tid={selectedTid}
@@ -563,12 +596,23 @@ export function App() {
                     onSelectAddress={setSelected}
                     onContextMenu={openMenu}
                   />
+                ) : paneTab === "intervals" ? (
+                  <IntervalsPanel
+                    client={client}
+                    flameKey={flameFocusAbsKey ?? "r"}
+                    tid={selectedTid}
+                    filter={effectiveFilter}
+                    threads={threads}
+                    onSelectTid={setSelectedTid}
+                  />
+                ) : (
+                  <div className="placeholder">
+                    click a row or flame box to see disassembly
+                  </div>
                 )}
               </div>
             </div>
-          ) : (
-            <div className="placeholder">click a row to see disassembly</div>
-          )}
+          ) : null}
         </section>
       </main>
       {menu && (
@@ -691,7 +735,12 @@ function escapeRegex(s: string): string {
 
 export type LangKind = "rust" | "c" | "cpp" | "swift" | "asm" | "unknown";
 export type ObjKind = "main" | "system" | "dylib" | "unknown";
-type PaneTab = "asm" | "neighbors";
+type PaneTab = "asm" | "neighbors" | "intervals";
+
+/// What flame-box widths represent: real CPU time, off-CPU waiting
+/// time, or wall (on + off). Display-only; the wire carries both
+/// dimensions on every node.
+export type DisplayMode = "on_cpu" | "off_cpu" | "wall";
 
 /// Pick a language icon for a row. Prefers the server-side demangler
 /// classification (carried on every TopEntry / FlameNode); only falls
@@ -797,6 +846,90 @@ function WakersPanel({
         })}
       </div>
     </section>
+  );
+}
+
+/// Pill row that picks what flame-box widths represent. UI-only:
+/// every flame node carries both on_cpu_ns and a per-reason off-CPU
+/// breakdown, so flipping the mode just changes which dimension
+/// drives layout (and the flame-status footer).
+function DisplayModeFilter({
+  mode,
+  onChange,
+}: {
+  mode: DisplayMode;
+  onChange: (m: DisplayMode) => void;
+}) {
+  const options: { id: DisplayMode; label: string; title: string }[] = [
+    {
+      id: "on_cpu",
+      label: "on-cpu",
+      title: "flame width = real CPU time (default)",
+    },
+    {
+      id: "off_cpu",
+      label: "off-cpu",
+      title: "flame width = off-CPU waiting time (sum across reasons)",
+    },
+    {
+      id: "wall",
+      label: "wall",
+      title: "flame width = on-CPU + off-CPU (total time stack was active)",
+    },
+  ];
+  return (
+    <span className="kind-filter" title="flame width metric">
+      {options.map((o) => {
+        const active = mode === o.id;
+        return (
+          <button
+            key={o.id}
+            type="button"
+            className={`kind-pill mode-${o.id}${active ? "" : " off"}`}
+            onClick={() => onChange(o.id)}
+            title={o.title}
+          >
+            {o.label}
+          </button>
+        );
+      })}
+    </span>
+  );
+}
+
+/// Strip under the timeline that lists each non-zero off-CPU reason
+/// with its share of total off-CPU time, plus the on-CPU/off-CPU
+/// totals. Renders nothing when there is no off-CPU time.
+function ReasonLegend({
+  breakdown,
+  totalOnCpuNs,
+}: {
+  breakdown: import("./wire.ts").OffCpuBreakdown;
+  totalOnCpuNs: bigint;
+}) {
+  void totalOnCpuNs;
+  const segs = reasonSegments(breakdown);
+  if (segs.length === 0) return null;
+  const offTotal = offCpuTotal(breakdown);
+  return (
+    <div className="reason-legend" aria-label="off-CPU reasons">
+      {segs.map((s) => {
+        const pct =
+          offTotal === 0n
+            ? 0
+            : Math.round((Number(s.ns) / Number(offTotal)) * 1000) / 10;
+        return (
+          <span
+            key={s.reason}
+            className={`reason-chip reason-chip--${s.reason}`}
+            title={`${REASON_LABEL[s.reason]} · ${formatDuration(s.ns)} · ${pct.toFixed(1)}% of off-CPU`}
+          >
+            <span className="reason-chip-name">{REASON_LABEL[s.reason]}</span>
+            <span className="reason-chip-value">{formatDuration(s.ns)}</span>
+          </span>
+        );
+      })}
+    </div>
   );
 }
 

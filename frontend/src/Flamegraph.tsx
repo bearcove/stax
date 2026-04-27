@@ -8,6 +8,8 @@ import type {
 import {
   formatDuration,
   hydrateFlamegraph,
+  offCpuTotal,
+  reasonSegments,
   type FlamegraphView,
   type FlameView,
 } from "./wire.ts";
@@ -17,6 +19,7 @@ import {
   objKindOf,
   viewParams,
   type ContextMenuTarget,
+  type DisplayMode,
   type ObjKind,
 } from "./App.tsx";
 
@@ -74,6 +77,21 @@ function findByKey(node: FlameView, target: string): FlameView | null {
   return cur;
 }
 
+/// Pick the metric that drives flame box width for the active
+/// display mode. on-CPU = real CPU time (excitement, hot loops);
+/// off-CPU = waiting time, broken down further by reason stripes;
+/// wall = on + off, the whole time the stack was active.
+export function widthOf(node: FlameView, mode: DisplayMode): bigint {
+  switch (mode) {
+    case "on_cpu":
+      return node.on_cpu_ns;
+    case "off_cpu":
+      return offCpuTotal(node.off_cpu);
+    case "wall":
+      return node.on_cpu_ns + offCpuTotal(node.off_cpu);
+  }
+}
+
 /// Layout the tree into [0,1] horizontal coordinate space. Subtrees
 /// rooted at a node whose kind is in `hiddenKinds` are pruned (their
 /// box is omitted *and* their descendants are skipped); the parent's
@@ -82,6 +100,7 @@ function findByKey(node: FlameView, target: string): FlameView | null {
 function layout(
   root: FlameView,
   hiddenKinds: Set<ObjKind>,
+  mode: DisplayMode,
 ): { boxes: Box[]; depth: number } {
   const boxes: Box[] = [];
   let maxDepth = 0;
@@ -102,10 +121,11 @@ function layout(
     });
     if (depth > maxDepth) maxDepth = depth;
     const span = x1 - x0;
-    const denom = node.on_cpu_ns > 0n ? Number(node.on_cpu_ns) : 1;
+    const own = widthOf(node, mode);
+    const denom = own > 0n ? Number(own) : 1;
     let cursor = x0;
     node.children.forEach((c, i) => {
-      const cw = (Number(c.on_cpu_ns) / denom) * span;
+      const cw = (Number(widthOf(c, mode)) / denom) * span;
       // Address 0 = synthetic root marker; never filter that out.
       if (c.address !== 0n && hiddenKinds.has(objKindOf(c))) {
         cursor += cw;
@@ -125,6 +145,7 @@ export function Flamegraph({
   filter,
   matchText,
   hiddenKinds,
+  displayMode,
   currentAbsKey,
   onPushFocus,
   onPopDrill,
@@ -138,6 +159,8 @@ export function Flamegraph({
   filter: LiveFilter;
   matchText: ((t: string) => boolean) | null;
   hiddenKinds: Set<ObjKind>;
+  /// Drives flame box widths: on-CPU only, off-CPU only, or wall.
+  displayMode: DisplayMode;
   /// Absolute flame key (relative to `update.root`) of the currently
   /// focused subtree, or null when there's no focus.
   currentAbsKey: string | null;
@@ -280,10 +303,17 @@ export function Flamegraph({
       : update.root
     : null;
   const { boxes, depth } = renderRoot
-    ? layout(renderRoot, hiddenKinds)
+    ? layout(renderRoot, hiddenKinds, displayMode)
     : { boxes: [], depth: 0 };
   const innerHeight = (depth + 1) * ROW_H;
-  const total = update?.total_on_cpu_ns ?? 0n;
+  const totalOn = update?.total_on_cpu_ns ?? 0n;
+  const totalOff = update ? offCpuTotal(update.total_off_cpu) : 0n;
+  const total =
+    displayMode === "on_cpu"
+      ? totalOn
+      : displayMode === "off_cpu"
+        ? totalOff
+        : totalOn + totalOff;
 
   return (
     <div
@@ -327,9 +357,10 @@ export function Flamegraph({
                   flameKey: combineKey(currentAbsKey, b.key),
                 });
               }}
-              title={tooltipFor(b.node, total)}
+              title={tooltipFor(b.node, total, displayMode)}
             >
               {widthPct > 2 ? <FlameBoxLabel node={b.node} /> : null}
+              <OffCpuStripe node={b.node} />
             </div>
           );
         })}
@@ -339,16 +370,19 @@ export function Flamegraph({
           <>
             <span className="flame-status-label">{labelFor(hover.node)}</span>
             <span className="flame-status-meta">
-              {formatDuration(hover.node.on_cpu_ns)} / {formatDuration(total)} ·{" "}
-              {pct(hover.node.on_cpu_ns, total)}
+              {formatDuration(widthOf(hover.node, displayMode))} /{" "}
+              {formatDuration(total)} ·{" "}
+              {pct(widthOf(hover.node, displayMode), total)}
+              {" · "}on {formatDuration(hover.node.on_cpu_ns)} · off{" "}
+              {formatDuration(offCpuTotal(hover.node.off_cpu))}
               {ipcFor(hover.node) ? ` · ${ipcFor(hover.node)} ipc` : ""}
               {hover.node.binary ? ` · ${hover.node.binary}` : ""}
             </span>
           </>
         ) : update ? (
           <span className="flame-status-meta">
-            {formatDuration(total)} of activity · click to open · right-click
-            to focus
+            {formatDuration(total)} of {modeLabel(displayMode)} · click to open
+            · right-click to focus
           </span>
         ) : (
           <span className="flame-status-meta">building flamegraph…</span>
@@ -396,10 +430,54 @@ function ipcFor(node: FlameView): string | null {
   return ipc.toFixed(2);
 }
 
-function tooltipFor(node: FlameView, total: bigint): string {
-  const base = `${labelFor(node)} · ${formatDuration(node.on_cpu_ns)} / ${formatDuration(total)} (${pct(node.on_cpu_ns, total)})`;
+function tooltipFor(
+  node: FlameView,
+  total: bigint,
+  mode: DisplayMode,
+): string {
+  const w = widthOf(node, mode);
+  const offTotal = offCpuTotal(node.off_cpu);
+  const head = `${labelFor(node)} · ${formatDuration(w)} / ${formatDuration(total)} (${pct(w, total)})`;
+  const split = `on ${formatDuration(node.on_cpu_ns)} · off ${formatDuration(offTotal)}`;
+  const segs = reasonSegments(node.off_cpu);
+  const reasonLine = segs.length
+    ? "\n" +
+      segs.map((s) => `${s.reason}: ${formatDuration(s.ns)}`).join(" · ")
+    : "";
   const ipc = ipcFor(node);
-  return ipc
-    ? `${base} · ${ipc} ipc (${node.instructions.toString()} insns / ${node.cycles.toString()} cycles)`
-    : base;
+  const ipcLine = ipc
+    ? ` · ${ipc} ipc (${node.instructions.toString()} insns / ${node.cycles.toString()} cycles)`
+    : "";
+  return `${head}\n${split}${ipcLine}${reasonLine}`;
+}
+
+function modeLabel(mode: DisplayMode): string {
+  switch (mode) {
+    case "on_cpu":
+      return "on-CPU activity";
+    case "off_cpu":
+      return "off-CPU time";
+    case "wall":
+      return "wall time";
+  }
+}
+
+/// 3px coloured stripe under the box content showing how off-CPU
+/// time decomposes into reasons. No-op when off_cpu is all zeros.
+function OffCpuStripe({ node }: { node: FlameView }) {
+  const total = offCpuTotal(node.off_cpu);
+  if (total === 0n) return null;
+  const segs = reasonSegments(node.off_cpu);
+  const totalF = Number(total);
+  return (
+    <div className="flame-box-stripe">
+      {segs.map((s) => (
+        <div
+          key={s.reason}
+          className={`flame-box-stripe-seg reason-${s.reason}`}
+          style={{ width: `${(Number(s.ns) / totalF) * 100}%` }}
+        />
+      ))}
+    </div>
+  );
 }

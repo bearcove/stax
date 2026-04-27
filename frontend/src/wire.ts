@@ -121,6 +121,121 @@ export function offCpuTotal(b: OffCpuBreakdown): bigint {
   );
 }
 
+/// One entry per reason that is non-zero, in display order.
+export type ReasonKey =
+  | "idle"
+  | "lock"
+  | "semaphore"
+  | "ipc"
+  | "io_read"
+  | "io_write"
+  | "readiness"
+  | "sleep"
+  | "connect"
+  | "other";
+
+export const REASON_ORDER: ReasonKey[] = [
+  "lock",
+  "semaphore",
+  "ipc",
+  "io_read",
+  "io_write",
+  "readiness",
+  "connect",
+  "sleep",
+  "idle",
+  "other",
+];
+
+export const REASON_LABEL: Record<ReasonKey, string> = {
+  idle: "idle",
+  lock: "lock",
+  semaphore: "sema",
+  ipc: "ipc",
+  io_read: "read",
+  io_write: "write",
+  readiness: "ready",
+  sleep: "sleep",
+  connect: "connect",
+  other: "other",
+};
+
+export function reasonNs(b: OffCpuBreakdown, k: ReasonKey): bigint {
+  switch (k) {
+    case "idle":
+      return b.idle_ns;
+    case "lock":
+      return b.lock_ns;
+    case "semaphore":
+      return b.semaphore_ns;
+    case "ipc":
+      return b.ipc_ns;
+    case "io_read":
+      return b.io_read_ns;
+    case "io_write":
+      return b.io_write_ns;
+    case "readiness":
+      return b.readiness_ns;
+    case "sleep":
+      return b.sleep_ns;
+    case "connect":
+      return b.connect_ns;
+    case "other":
+      return b.other_ns;
+  }
+}
+
+/// Extract non-zero reasons in display order. Used by flame box
+/// stripes, the topbar legend, and any per-row breakdown rendering.
+export function reasonSegments(
+  b: OffCpuBreakdown,
+): { reason: ReasonKey; ns: bigint }[] {
+  const out: { reason: ReasonKey; ns: bigint }[] = [];
+  for (const k of REASON_ORDER) {
+    const ns = reasonNs(b, k);
+    if (ns > 0n) out.push({ reason: k, ns });
+  }
+  return out;
+}
+
+/// Map a wire `OffCpuReason` tag to the local `ReasonKey`.
+export function reasonKeyOfTag(
+  tag:
+    | "Idle"
+    | "LockWait"
+    | "SemaphoreWait"
+    | "IpcWait"
+    | "IoRead"
+    | "IoWrite"
+    | "Readiness"
+    | "Sleep"
+    | "ConnectionSetup"
+    | "Other",
+): ReasonKey {
+  switch (tag) {
+    case "Idle":
+      return "idle";
+    case "LockWait":
+      return "lock";
+    case "SemaphoreWait":
+      return "semaphore";
+    case "IpcWait":
+      return "ipc";
+    case "IoRead":
+      return "io_read";
+    case "IoWrite":
+      return "io_write";
+    case "Readiness":
+      return "readiness";
+    case "Sleep":
+      return "sleep";
+    case "ConnectionSetup":
+      return "connect";
+    case "Other":
+      return "other";
+  }
+}
+
 /// Format a nanosecond duration as a human-readable string.
 export function formatDuration(ns: bigint): string {
   if (ns === 0n) return "0";
