@@ -1,108 +1,46 @@
-#[macro_use]
-extern crate log;
-
 use std::env;
 use std::error::Error;
 use std::process::exit;
 use structopt::StructOpt;
 
-use nperf_core::{
-    args,
-    cmd_annotate,
-    cmd_collate,
-    cmd_csv,
-    cmd_metadata,
-    cmd_perfetto,
-    cmd_trace_events
-};
+use nperf_core::{args, cmd_record_mac, cmd_setup_mac};
 
-#[cfg(target_os = "macos")]
-use nperf_core::{cmd_record_mac, cmd_setup_mac};
-#[cfg(not(target_os = "macos"))]
-use nperf_core::cmd_record;
-
-#[cfg(feature = "inferno")]
-use nperf_core::cmd_flamegraph;
-
-fn main_impl() -> Result< (), Box< dyn Error > > {
-    if env::var( "RUST_LOG" ).is_err() {
+fn main_impl() -> Result<(), Box<dyn Error>> {
+    if env::var("RUST_LOG").is_err() {
         // cranelift_jit/cranelift_codegen log every JIT'd function at info,
         // which floods the terminal once we start the live RPC server.
-        env::set_var( "RUST_LOG", "info,cranelift_jit=warn,cranelift_codegen=warn" );
+        env::set_var("RUST_LOG", "info,cranelift_jit=warn,cranelift_codegen=warn");
     }
 
-    #[cfg(feature = "env_logger")]
     env_logger::init();
 
     let opt = args::Opt::from_args();
     match opt {
-        args::Opt::Record( args ) => {
-            if args.profiler_args.panic_on_partial_backtrace {
-                warn!( "Will panic on partial backtraces!" );
-                if env::var( "RUST_BACKTRACE" ).is_err() {
-                    env::set_var( "RUST_BACKTRACE", "1" );
-                }
-            }
-
-            run_record( args )?;
-        },
-        #[cfg(feature = "inferno")]
-        args::Opt::Flamegraph( args ) => {
-            cmd_flamegraph::main( args )?;
-        },
-        args::Opt::Csv( args ) => {
-            cmd_csv::main( args )?;
-        },
-        args::Opt::Collate( args ) => {
-            cmd_collate::main( args )?;
-        },
-        args::Opt::Annotate( args ) => {
-            cmd_annotate::main( args )?;
-        },
-        args::Opt::Metadata( args ) => {
-            cmd_metadata::main( args )?;
-        },
-        args::Opt::Perfetto( args ) => {
-            cmd_perfetto::main( args )?;
-        },
-        args::Opt::TraceEvents( args ) => {
-            cmd_trace_events::main( args )?;
-        },
-        #[cfg(target_os = "macos")]
-        args::Opt::Setup( args ) => {
-            cmd_setup_mac::main( args )?;
-        }
+        args::Opt::Record(args) => run_record(args)?,
+        args::Opt::Setup(args) => cmd_setup_mac::main(args)?,
     }
 
     Ok(())
 }
 
 fn main() {
-    if let Err( error ) = main_impl() {
-        eprintln!( "error: {}", error );
-        exit( 1 );
+    if let Err(error) = main_impl() {
+        eprintln!("error: {}", error);
+        exit(1);
     }
 }
 
-fn run_record( args: args::RecordArgs ) -> Result< (), Box< dyn Error > > {
+fn run_record(args: args::RecordArgs) -> Result<(), Box<dyn Error>> {
     let (live_sink, _runtime): (Option<Box<dyn nperf_core::live_sink::LiveSink>>, _) =
-        if let Some( ref addr ) = args.serve {
+        if let Some(ref addr) = args.serve {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
-            let (sink, _server_handle) = runtime.block_on( nperf_live::start( addr ) )?;
-            (Some( Box::new( sink ) ), Some( runtime ))
+            let (sink, _server_handle) = runtime.block_on(nperf_live::start(addr))?;
+            (Some(Box::new(sink)), Some(runtime))
         } else {
             (None, None)
         };
 
-    #[cfg(target_os = "macos")]
-    {
-        cmd_record_mac::main_with_live_sink( args, live_sink )
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        cmd_record::main_with_live_sink( args, live_sink )
-    }
-    // runtime drops here when this function returns, aborting the server task
+    cmd_record_mac::main_with_live_sink(args, live_sink)
 }

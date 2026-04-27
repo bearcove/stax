@@ -13,7 +13,7 @@ doesn't, but it also has more moving pieces:
   - a privileged launchd service for kdebug/kperf attachment
   - a non-prileged (same-user) helper to obtain the task port, read/write inferior memory etc.
   
-![](https://github.com/user-attachments/assets/929b4b42-cdd9-4e35-8a91-ee7b029e94e2)
+![A screenshot of stax showing a flamegraph on top, top-N functions bottom-left, and annotated disassembly bottom-right](https://github.com/user-attachments/assets/929b4b42-cdd9-4e35-8a91-ee7b029e94e2)
   
 ## License
 
