@@ -18,7 +18,7 @@ use stax_mac_capture::SampleSink;
 use stax_mac_kperf_parse::pipeline::{Pipeline, PipelineConfig};
 use stax_mac_kperf_sys::bindings::sampler;
 use stax_mac_kperf_sys::kdebug::{self, KdBuf, DBG_MACH, DBG_MACH_SCHED, DBG_PERF};
-use staxd_proto::{KdBufBatch, KdBufWire, NperfdClient, SessionConfig};
+use staxd_proto::{KdBufBatch, KdBufWire, StaxdClient, SessionConfig};
 use log::{info, warn};
 
 /// User-facing options. Mirrors the shape of
@@ -86,7 +86,7 @@ pub async fn drive_session<S: SampleSink>(
     };
 
     info!("staxd-client: connecting to {url}");
-    let client: NperfdClient = match vox::connect(&url).await {
+    let client: StaxdClient = match vox::connect(&url).await {
         Ok(c) => c,
         Err(e) => {
             // The "no such file" case dominates — the user forgot to

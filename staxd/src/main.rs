@@ -30,7 +30,7 @@ use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 use staxd_proto::{
-    DaemonStatus, KdBufBatch, Nperfd, NperfdDispatcher, RecordError, RecordSummary,
+    DaemonStatus, KdBufBatch, Staxd, StaxdDispatcher, RecordError, RecordSummary,
     SessionConfig, SessionState,
 };
 
@@ -56,7 +56,7 @@ async fn main() -> Result<()> {
             .with_context(|| format!("removing stale socket {}", socket_path.display()))?;
     }
 
-    let server = NperfdServer::new();
+    let server = StaxdServer::new();
 
     let listener = vox::transport::local::LocalLinkAcceptor::bind(
         socket_path.to_string_lossy().into_owned(),
@@ -93,7 +93,7 @@ async fn main() -> Result<()> {
             };
             let server = server.clone();
             tokio::spawn(async move {
-                let dispatcher = NperfdDispatcher::new(server);
+                let dispatcher = StaxdDispatcher::new(server);
                 let result = vox::acceptor_on(link)
                     .non_resumable()
                     .on_connection(dispatcher)
@@ -142,7 +142,7 @@ fn parse_socket_arg() -> PathBuf {
 /// the whole `record()` body so a second caller can't sneak in even
 /// during teardown.
 #[derive(Clone)]
-struct NperfdServer {
+struct StaxdServer {
     session: Arc<Mutex<Option<SessionInfo>>>,
 }
 
@@ -152,13 +152,13 @@ struct SessionInfo {
     started_at_unix_ns: u64,
 }
 
-impl NperfdServer {
+impl StaxdServer {
     fn new() -> Self {
         Self { session: Arc::new(Mutex::new(None)) }
     }
 }
 
-impl Nperfd for NperfdServer {
+impl Staxd for StaxdServer {
     async fn status(&self) -> DaemonStatus {
         let state = match self.session.lock().await.as_ref() {
             None => SessionState::Idle,

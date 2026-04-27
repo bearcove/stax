@@ -158,7 +158,7 @@ pub enum SessionState {
 /// (`status`); deliberately kept small so the daemon's surface stays
 /// auditable.
 #[vox::service]
-pub trait Nperfd {
+pub trait Staxd {
     /// Configure kperf+kdebug for `config.target_pid` and stream the
     /// kdebug ringbuffer over `records`. Returns when the client
     /// closes `records` (clean shutdown), the recorder errors out
