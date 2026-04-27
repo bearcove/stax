@@ -98,7 +98,10 @@ fn install() -> Result<(), Box<dyn Error>> {
     println!();
     println!(":: stax-server (the unprivileged daemon agents talk to)");
     println!(":: was just bootstrapped under your user via launchctl.");
-    println!(":: Logs at ~/Library/Logs/stax-server.log.");
+    println!(":: Logs:");
+    println!(
+        "::   log stream --predicate 'subsystem == \"eu.bearcove.stax-server\"'"
+    );
     Ok(())
 }
 
@@ -112,13 +115,7 @@ fn install_server_launch_agent(cargo_bin: &Path) -> Result<(), Box<dyn Error>> {
     let plist_text = fs::read_to_string(&template)?;
 
     let bin_path = cargo_bin.join(SERVER_BIN);
-    let logs_dir = home_dir().join("Library").join("Logs");
-    fs::create_dir_all(&logs_dir)?;
-    let log_path = logs_dir.join("stax-server.log");
-
-    let resolved = plist_text
-        .replace("__BIN__", &bin_path.to_string_lossy())
-        .replace("__LOG__", &log_path.to_string_lossy());
+    let resolved = plist_text.replace("__BIN__", &bin_path.to_string_lossy());
 
     let agents_dir = home_dir().join("Library").join("LaunchAgents");
     fs::create_dir_all(&agents_dir)?;

@@ -34,15 +34,16 @@
         <string>/var/run/staxd.sock</string>
     </array>
 
-    <key>StandardOutPath</key>
-    <string>/var/log/staxd.log</string>
-    <key>StandardErrorPath</key>
-    <string>/var/log/staxd.log</string>
-
     <key>EnvironmentVariables</key>
     <dict>
         <key>RUST_LOG</key>
         <string>staxd=info,stax_mac_kperf_sys=info</string>
     </dict>
+
+    <!-- No StandardOutPath / StandardErrorPath: staxd logs
+         exclusively via os_log under subsystem eu.bearcove.staxd.
+         View with:
+           sudo log stream --predicate 'subsystem == "eu.bearcove.staxd"'
+         or Console.app. -->
 </dict>
 </plist>

@@ -41,8 +41,20 @@ with `STAX_SERVER_WS_BIND=host:port` (set in the LaunchAgent plist's
 
 ### Logs
 
-- `staxd`        → `/var/log/staxd.log`
-- `stax-server`  → `~/Library/Logs/stax-server.log`
+Both daemons log via macOS unified logging (`os_log`). No files on
+disk — view live with:
+
+```
+# stax-server (your user, no sudo)
+log stream --predicate 'subsystem == "eu.bearcove.stax-server"'
+
+# staxd (root LaunchDaemon — needs sudo)
+sudo log stream --predicate 'subsystem == "eu.bearcove.staxd"'
+```
+
+Or open **Console.app** → Action menu → *Include Info Messages* /
+*Include Debug Messages*, then filter by subsystem. Past events are
+queryable with `log show --last 10m --predicate '…'`.
 
 ### Verifying the install
 

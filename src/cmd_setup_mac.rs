@@ -63,16 +63,16 @@ const NPERFD_LAUNCHD_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
         <string>/var/run/staxd.sock</string>
     </array>
 
-    <key>StandardOutPath</key>
-    <string>/var/log/staxd.log</string>
-    <key>StandardErrorPath</key>
-    <string>/var/log/staxd.log</string>
-
     <key>EnvironmentVariables</key>
     <dict>
         <key>RUST_LOG</key>
         <string>staxd=info,stax_mac_kperf_sys=info</string>
     </dict>
+
+    <!-- No StandardOutPath / StandardErrorPath: staxd logs via
+         os_log under subsystem eu.bearcove.staxd. View with
+         `sudo log stream --predicate 'subsystem == "eu.bearcove.staxd"'`
+         or Console.app. -->
 </dict>
 </plist>
 "#;
@@ -222,7 +222,9 @@ Press Enter to continue, or Ctrl-C to cancel."#,
     println!();
     println!(":: staxd installed and running.");
     println!(":: socket    : /var/run/staxd.sock");
-    println!(":: logs      : /var/log/staxd.log");
+    println!(
+        ":: logs      : sudo log stream --predicate 'subsystem == \"eu.bearcove.staxd\"'"
+    );
     println!(":: now: stax record --serve 127.0.0.1:8080 -- /bin/foo");
     Ok(())
 }

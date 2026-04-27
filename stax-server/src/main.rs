@@ -30,12 +30,7 @@ const DEFAULT_WS_BIND: &str = "127.0.0.1:8080";
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
-    if std::env::var("RUST_LOG").is_err() {
-        unsafe {
-            std::env::set_var("RUST_LOG", "info,stax_server=info");
-        }
-    }
-    env_logger::init();
+    init_logging();
 
     let socket = resolve_socket_path();
     if socket.exists() {
@@ -47,7 +42,7 @@ async fn main() -> eyre::Result<()> {
     let local_listener = vox::transport::local::LocalLinkAcceptor::bind(
         socket.to_string_lossy().into_owned(),
     )?;
-    log::info!("stax-server listening on local://{}", socket.display());
+    tracing::info!("stax-server listening on local://{}", socket.display());
 
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600));
@@ -56,7 +51,7 @@ async fn main() -> eyre::Result<()> {
         .unwrap_or_else(|_| DEFAULT_WS_BIND.to_owned());
     let ws_listener = vox::WsListener::bind(&ws_addr).await?;
     let ws_local = ws_listener.local_addr()?;
-    log::info!("stax-server listening on ws://{ws_local}");
+    tracing::info!("stax-server listening on ws://{ws_local}");
 
     let local_loop = tokio::spawn({
         let server = server.clone();
@@ -65,7 +60,7 @@ async fn main() -> eyre::Result<()> {
                 let link = match local_listener.accept().await {
                     Ok(l) => l,
                     Err(e) => {
-                        log::warn!("stax-server: local accept failed: {e}");
+                        tracing::warn!("stax-server: local accept failed: {e}");
                         continue;
                     }
                 };
@@ -77,7 +72,7 @@ async fn main() -> eyre::Result<()> {
         let server = server.clone();
         async move {
             if let Err(e) = vox::serve_listener(ws_listener, factory(server)).await {
-                log::error!("stax-server: ws serve exited: {e}");
+                tracing::error!("stax-server: ws serve exited: {e}");
             }
         }
     });
@@ -86,7 +81,7 @@ async fn main() -> eyre::Result<()> {
         _ = local_loop => {},
         _ = ws_loop => {},
         _ = tokio::signal::ctrl_c() => {
-            log::info!("stax-server: SIGINT, shutting down");
+            tracing::info!("stax-server: SIGINT, shutting down");
         }
     }
     Ok(())
@@ -111,7 +106,7 @@ fn factory(server: ServerState) -> impl vox::ConnectionAcceptor + 'static {
                 Ok(())
             }
             other => {
-                log::warn!("stax-server: rejecting unknown service {other:?}");
+                tracing::warn!("stax-server: rejecting unknown service {other:?}");
                 Err(vec![])
             }
         }
@@ -131,7 +126,7 @@ fn spawn_session_local(server: ServerState, link: vox::transport::local::LocalLi
             .await;
         match result {
             Ok(client) => client.caller.closed().await,
-            Err(e) => log::warn!("stax-server: local session establish failed: {e:?}"),
+            Err(e) => tracing::warn!("stax-server: local session establish failed: {e:?}"),
         }
     });
 }
@@ -192,6 +187,33 @@ impl ServerState {
             paused: self.paused.clone(),
         }
     }
+}
+
+/// Fan tracing out to two sinks:
+///
+/// 1. `os_log` under subsystem `eu.bearcove.stax-server` so events
+///    are visible from `log stream --predicate 'subsystem ==
+///    "eu.bearcove.stax-server"'` (or Console.app) without root,
+///    even when the daemon was started by launchd. This is the
+///    always-on production path; we deliberately don't write a
+///    log file to disk.
+/// 2. The standard `fmt` layer (stderr), useful when running in
+///    foreground for development.
+fn init_logging() {
+    use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,stax_server=info"));
+
+    let oslog = tracing_oslog::OsLogger::new("eu.bearcove.stax-server", "default");
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer())
+        .with(oslog)
+        .init();
 }
 
 fn now_unix_ns() -> u64 {
@@ -319,7 +341,7 @@ impl RunIngest for ServerState {
         *self.aggregator.write() = Aggregator::default();
         *self.binaries.write() = BinaryRegistry::new();
 
-        log::info!(
+        tracing::info!(
             "stax-server: run {} started (frequency_hz={})",
             id.0,
             config.frequency_hz
@@ -449,7 +471,7 @@ impl ServerState {
         summary.state = RunState::Stopped;
         summary.stop_reason = Some(reason);
         summary.stopped_at_unix_ns = Some(now_unix_ns());
-        log::info!(
+        tracing::info!(
             "stax-server: run {} stopped after {} samples / {} intervals",
             summary.id.0,
             summary.pet_samples,

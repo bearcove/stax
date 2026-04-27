@@ -2119,7 +2119,6 @@ dependencies = [
 name = "stax-server"
 version = "0.1.0"
 dependencies = [
- "env_logger",
  "eyre",
  "libc",
  "log",
@@ -2127,6 +2126,9 @@ dependencies = [
  "stax-live",
  "stax-live-proto",
  "tokio",
+ "tracing",
+ "tracing-oslog",
+ "tracing-subscriber",
  "vox",
 ]
 

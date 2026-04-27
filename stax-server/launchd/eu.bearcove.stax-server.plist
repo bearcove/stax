@@ -38,9 +38,10 @@
         <string>info,stax_server=info</string>
     </dict>
 
-    <key>StandardOutPath</key>
-    <string>__LOG__</string>
-    <key>StandardErrorPath</key>
-    <string>__LOG__</string>
+    <!-- No StandardOutPath / StandardErrorPath: stax-server logs
+         exclusively via os_log under subsystem
+         eu.bearcove.stax-server. View with:
+           log stream --predicate 'subsystem == "eu.bearcove.stax-server"'
+         or Console.app. -->
 </dict>
 </plist>
