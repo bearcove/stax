@@ -1959,6 +1959,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nperf-task-broker"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "mach2 0.4.3",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "nperfd"
 version = "0.1.0"
 dependencies = [

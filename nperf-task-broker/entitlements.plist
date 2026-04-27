@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+        Routes around the AMFI restriction that blocks task_for_pid on
+        anything but our own children. With this entitlement (and an
+        ad-hoc codesign), the broker can call task_for_pid against any
+        same-uid (same-team) pid — exactly what we need for the trinity.
+
+        The kernel still enforces same-uid + same-team-id; the
+        entitlement only widens task_for_pid past "must be a child."
+        It does NOT grant cross-uid task ports.
+    -->
+    <key>com.apple.security.cs.debugger</key>
+    <true/>
+    <!--
+        Lets clients with their own task_for_pid privileges acquire the
+        broker's task port if they want to. Doesn't matter for our flow
+        but is conventional alongside cs.debugger.
+    -->
+    <key>com.apple.security.get-task-allow</key>
+    <true/>
+</dict>
+</plist>
