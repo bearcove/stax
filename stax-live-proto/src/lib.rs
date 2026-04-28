@@ -849,6 +849,12 @@ pub struct WireBinaryLoaded {
 }
 
 #[derive(Clone, Debug, Facet)]
+pub struct WireBinaryUnloaded {
+    pub path: String,
+    pub base_avma: u64,
+}
+
+#[derive(Clone, Debug, Facet)]
 pub struct WireSampleEvent {
     pub timestamp_ns: u64,
     pub pid: u32,
@@ -935,10 +941,7 @@ pub enum IngestEvent {
     OnCpuInterval(WireOnCpuInterval),
     OffCpuInterval(WireOffCpuInterval),
     BinaryLoaded(WireBinaryLoaded),
-    BinaryUnloaded {
-        path: String,
-        base_avma: u64,
-    },
+    BinaryUnloaded(WireBinaryUnloaded),
     ThreadName {
         pid: u32,
         tid: u32,
@@ -1025,6 +1028,35 @@ pub trait RunIngest {
     /// server-orchestrated path: the server owns lifecycle and shade
     /// owns recording + ingest.
     async fn attach_run(&self, run_id: RunId, events: vox::Rx<IngestEvent>) -> Result<(), String>;
+
+    /// Reliable, request/response target attachment notification.
+    /// Channel sends are not a durability boundary; this method
+    /// returns only after stax-server has applied the target state.
+    async fn publish_target_attached(
+        &self,
+        run_id: RunId,
+        pid: u32,
+        task_port: u64,
+    ) -> Result<(), String>;
+
+    /// Reliable, request/response image-load ingest. Binaries define
+    /// the address space used by all later symbolication, so they
+    /// must not ride on the lossy/high-volume event channel.
+    async fn publish_binaries_loaded(
+        &self,
+        run_id: RunId,
+        binaries: Vec<WireBinaryLoaded>,
+    ) -> Result<(), String>;
+
+    /// Reliable, request/response image-unload ingest. The current
+    /// server retains mappings for historical samples, but keep the
+    /// lifecycle event on the reliable plane so future timestamped
+    /// image lifetimes don't inherit channel-loss semantics.
+    async fn publish_binaries_unloaded(
+        &self,
+        run_id: RunId,
+        binaries: Vec<WireBinaryUnloaded>,
+    ) -> Result<(), String>;
 }
 
 /// Shade-facing terminal broker. The CLI/native UI provides its

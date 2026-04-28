@@ -23,7 +23,7 @@ use stax_live_proto::{
     IngestEvent, LaunchEnvVar, LaunchRequest, ProfilerDispatcher, RunConfig, RunControl,
     RunControlDispatcher, RunId, RunIngest, RunIngestDispatcher, RunState, RunSummary,
     ServerStatus, StopReason, TerminalBroker, TerminalBrokerDispatcher, TerminalInput,
-    TerminalOutput, WaitCondition, WaitOutcome,
+    TerminalOutput, WaitCondition, WaitOutcome, WireBinaryLoaded, WireBinaryUnloaded,
 };
 use stax_shade_proto::{ShadeAck, ShadeInfo, ShadeRegistry, ShadeRegistryDispatcher};
 use vox::VoxListener;
@@ -121,7 +121,10 @@ fn build_factory(
                     Ok(())
                 }
                 "RunIngest" => {
-                    connection.handle_with(RunIngestDispatcher::new(server.clone()));
+                    connection.handle_with(
+                        RunIngestDispatcher::new(server.clone())
+                            .with_middleware(vox::ServerLogging::default()),
+                    );
                     Ok(())
                 }
                 "TerminalBroker" => {
@@ -927,7 +930,7 @@ fn init_logging() {
     use tracing_subscriber::util::SubscriberInitExt;
 
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,stax_server=info"));
+        .unwrap_or_else(|_| EnvFilter::new("info,stax_server=info,vox::server=debug"));
 
     let oslog = tracing_oslog::OsLogger::new("eu.bearcove.stax-server", "default");
 
@@ -1149,9 +1152,128 @@ impl RunIngest for ServerState {
         self.spawn_ingest_drainer(run_id, cancel, events);
         Ok(())
     }
+
+    async fn publish_target_attached(
+        &self,
+        run_id: RunId,
+        pid: u32,
+        task_port: u64,
+    ) -> Result<(), String> {
+        self.apply_target_attached(run_id, pid, task_port)
+    }
+
+    async fn publish_binaries_loaded(
+        &self,
+        run_id: RunId,
+        binaries: Vec<WireBinaryLoaded>,
+    ) -> Result<(), String> {
+        for binary in binaries {
+            self.apply_binary_loaded(run_id, binary)?;
+        }
+        Ok(())
+    }
+
+    async fn publish_binaries_unloaded(
+        &self,
+        run_id: RunId,
+        binaries: Vec<WireBinaryUnloaded>,
+    ) -> Result<(), String> {
+        for binary in binaries {
+            self.apply_binary_unloaded(run_id, binary)?;
+        }
+        Ok(())
+    }
 }
 
 impl ServerState {
+    fn ensure_active_run(&self, run_id: RunId) -> Result<(), String> {
+        let inner = self.inner.lock();
+        let Some(active) = inner.active.as_ref() else {
+            return Err("no active run".to_owned());
+        };
+        if active.id != run_id {
+            return Err(format!(
+                "run id mismatch: ingest for {}, active run is {}",
+                run_id.0, active.id.0
+            ));
+        }
+        Ok(())
+    }
+
+    fn apply_target_attached(&self, run_id: RunId, pid: u32, task_port: u64) -> Result<(), String> {
+        {
+            let mut inner = self.inner.lock();
+            let Some(active) = inner.active.as_mut() else {
+                return Err("no active run".to_owned());
+            };
+            if active.id != run_id {
+                return Err(format!(
+                    "run id mismatch: ingest for {}, active run is {}",
+                    run_id.0, active.id.0
+                ));
+            }
+            active.target_pid = Some(pid);
+        }
+        self.binaries.write().set_target(pid, task_port);
+        Ok(())
+    }
+
+    fn apply_binary_loaded(&self, run_id: RunId, b: WireBinaryLoaded) -> Result<(), String> {
+        self.ensure_active_run(run_id)?;
+        let path = b.path.clone();
+        let base_avma = b.base_avma;
+        let vmsize = b.vmsize;
+        let is_executable = b.is_executable;
+        let symbol_count = b.symbols.len();
+        let symbols = b
+            .symbols
+            .into_iter()
+            .map(|s| LiveSymbolOwned {
+                start_svma: s.start_svma,
+                end_svma: s.end_svma,
+                name: s.name,
+            })
+            .collect();
+        self.binaries.write().insert(LoadedBinary {
+            path: b.path,
+            base_avma: b.base_avma,
+            avma_end: b.base_avma.saturating_add(b.vmsize),
+            text_svma: b.text_svma,
+            arch: b.arch,
+            is_executable: b.is_executable,
+            symbols,
+            text_bytes: b.text_bytes,
+        });
+        if is_executable {
+            tracing::info!(
+                path = %path,
+                base_avma = format_args!("{base_avma:#x}"),
+                end = format_args!("{:#x}", base_avma.saturating_add(vmsize)),
+                symbols = symbol_count,
+                "stax-server: registered executable binary"
+            );
+        } else {
+            tracing::debug!(
+                path = %path,
+                base_avma = format_args!("{base_avma:#x}"),
+                end = format_args!("{:#x}", base_avma.saturating_add(vmsize)),
+                symbols = symbol_count,
+                "stax-server: registered binary"
+            );
+        }
+        Ok(())
+    }
+
+    fn apply_binary_unloaded(&self, run_id: RunId, b: WireBinaryUnloaded) -> Result<(), String> {
+        self.ensure_active_run(run_id)?;
+        tracing::debug!(
+            path = %b.path,
+            base_avma = format_args!("{:#x}", b.base_avma),
+            "retaining unloaded binary mapping for historical samples"
+        );
+        Ok(())
+    }
+
     /// Translate one ingest event into aggregator / binary-registry
     /// updates. Mirrors the in-process drainer in `stax-live::start`.
     fn apply_event(&self, run_id: RunId, event: IngestEvent) {
@@ -1223,31 +1345,19 @@ impl ServerState {
                 self.aggregator.write().set_thread_name(tid, name);
             }
             IngestEvent::BinaryLoaded(b) => {
-                let symbols = b
-                    .symbols
-                    .into_iter()
-                    .map(|s| LiveSymbolOwned {
-                        start_svma: s.start_svma,
-                        end_svma: s.end_svma,
-                        name: s.name,
-                    })
-                    .collect();
-                self.binaries.write().insert(LoadedBinary {
-                    path: b.path,
-                    base_avma: b.base_avma,
-                    avma_end: b.base_avma.saturating_add(b.vmsize),
-                    text_svma: b.text_svma,
-                    arch: b.arch,
-                    is_executable: b.is_executable,
-                    symbols,
-                    text_bytes: b.text_bytes,
-                });
+                if let Err(e) = self.apply_binary_loaded(run_id, b) {
+                    tracing::warn!("channel BinaryLoaded ignored: {e}");
+                }
             }
-            IngestEvent::BinaryUnloaded { base_avma, .. } => {
-                self.binaries.write().remove(base_avma);
+            IngestEvent::BinaryUnloaded(b) => {
+                if let Err(e) = self.apply_binary_unloaded(run_id, b) {
+                    tracing::warn!("channel BinaryUnloaded ignored: {e}");
+                }
             }
             IngestEvent::TargetAttached { pid, task_port } => {
-                self.binaries.write().set_target(pid, task_port);
+                if let Err(e) = self.apply_target_attached(run_id, pid, task_port) {
+                    tracing::warn!("channel TargetAttached ignored: {e}");
+                }
             }
             IngestEvent::ProbeResult(p) => {
                 self.aggregator

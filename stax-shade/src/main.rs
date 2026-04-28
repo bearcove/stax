@@ -863,7 +863,7 @@ fn init_logging() {
     use tracing_subscriber::util::SubscriberInitExt;
 
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,stax_shade=info"));
+        .unwrap_or_else(|_| EnvFilter::new("info,stax_shade=info,vox::client=debug"));
 
     let oslog = tracing_oslog::OsLogger::new("eu.bearcove.stax-shade", "default");
 
