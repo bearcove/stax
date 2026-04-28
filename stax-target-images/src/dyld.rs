@@ -15,9 +15,8 @@ use mach2::task_info::{TASK_DYLD_INFO, task_info_t};
 use mach2::vm::mach_vm_read_overwrite;
 use mach2::vm_types::{mach_vm_address_t, mach_vm_size_t};
 
-/// One loaded image as exposed by dyld. Currently a thin record
-/// — the unwind-section parsing layer will hang off this in a
-/// follow-up commit.
+/// One loaded image as exposed by dyld, optionally enriched
+/// with the Mach-O sections framehop needs to walk through it.
 #[derive(Clone, Debug)]
 pub struct ImageEntry {
     /// Install path or filesystem path the dynamic loader resolved
@@ -29,6 +28,13 @@ pub struct ImageEntry {
     /// image. Useful as a poor-man's cache key — pairs of
     /// (path, mtime) are stable across a single run.
     pub file_mod_date: u64,
+    /// Mach-O parse results: UUID, slide, __TEXT range,
+    /// __unwind_info / __compact_unwind / __eh_frame[_hdr]
+    /// bytes. `None` if header parsing failed (corrupt image,
+    /// non-Mach-O magic, etc); the caller can still use the
+    /// path + load_address for symbol-name lookup, just not for
+    /// stack walking.
+    pub sections: Option<crate::macho::MachoSections>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -118,10 +124,12 @@ impl TargetImageWalker {
                     continue;
                 }
             };
+            let sections = crate::macho::parse_image(self.task, img.image_load_address);
             out.push(ImageEntry {
                 path,
                 load_address: img.image_load_address,
                 file_mod_date: img.image_file_mod_date,
+                sections,
             });
         }
         Ok(out)

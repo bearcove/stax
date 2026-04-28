@@ -49,5 +49,7 @@
 #![cfg(target_os = "macos")]
 
 mod dyld;
+mod macho;
 
 pub use dyld::{ImageEntry, TargetImageWalker, WalkError};
+pub use macho::MachoSections;

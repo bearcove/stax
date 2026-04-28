@@ -224,8 +224,32 @@ fn log_loaded_images(task: mach2::port::mach_port_t) {
     let walker = stax_target_images::TargetImageWalker::new(task);
     match walker.enumerate() {
         Ok(images) => {
+            // Coverage stats — tells us at a glance how much of
+            // the loaded image set actually has unwind tables we
+            // can feed framehop.
+            let mut with_sections = 0usize;
+            let mut with_unwind_info = 0usize;
+            let mut with_eh_frame = 0usize;
+            let mut unwind_bytes_total = 0usize;
+            for img in &images {
+                if let Some(s) = img.sections.as_ref() {
+                    with_sections += 1;
+                    if let Some(b) = s.unwind_info.as_ref() {
+                        with_unwind_info += 1;
+                        unwind_bytes_total += b.len();
+                    }
+                    if let Some(b) = s.eh_frame.as_ref() {
+                        with_eh_frame += 1;
+                        unwind_bytes_total += b.len();
+                    }
+                }
+            }
             tracing::info!(
                 count = images.len(),
+                with_sections,
+                with_unwind_info,
+                with_eh_frame,
+                unwind_bytes = unwind_bytes_total,
                 "dyld walk: enumerated loaded images"
             );
             for img in images.iter().take(8) {
