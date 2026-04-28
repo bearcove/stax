@@ -464,6 +464,84 @@ pub struct PetSampleListUpdate {
     pub entries: Vec<PetSampleEntry>,
 }
 
+/// One symbolicated address — what the server's BinaryRegistry
+/// resolved an address to. Used by the probe-vs-kperf diff view
+/// to render frame chains side-by-side.
+#[derive(Clone, Debug, Facet)]
+pub struct ResolvedFrame {
+    pub address: u64,
+    /// Human-readable rendering: `module!symbol+offset`,
+    /// `module+0xoffset` if the address is in a known module but
+    /// no enclosing symbol was found, or `<unmapped:0xaddr>` if
+    /// no module covers it.
+    pub display: String,
+    /// Module basename (or empty if unmapped).
+    pub binary: String,
+    /// Demangled function name (or empty if no enclosing symbol).
+    pub function: String,
+}
+
+/// One row of the kperf-vs-probe diff: a kperf PET sample paired
+/// with the matching race-against-return probe result by
+/// `(tid, kperf_ts)`.
+#[derive(Clone, Debug, Facet)]
+pub struct ProbeDiffEntry {
+    pub tid: u32,
+    /// Recording-relative ns of the kperf sample.
+    pub timestamp_ns: u64,
+    /// Drift between kperf sample timestamp and probe completion,
+    /// in mach ticks (raw — UI converts via the host's timebase
+    /// or just uses it as a relative ordering).
+    pub drift_mach: i64,
+    /// kperf's user backtrace, leaf-most first.
+    pub kperf_stack: Vec<ResolvedFrame>,
+    /// Suspended-thread leaf PC + walked return addresses,
+    /// leaf-most first (probe_stack[0] = mach_pc).
+    pub probe_stack: Vec<ResolvedFrame>,
+    /// How many trailing frames of kperf and probe matched after
+    /// PAC-strip, comparing only the FP-walked portions.
+    pub common_suffix: u32,
+    /// `true` if the PAC-stripped leaf PC matched between the
+    /// two views.
+    pub pc_match: bool,
+    /// `true` if the PAC-stripped LR matched.
+    pub lr_match: bool,
+    /// `true` if the probe walked via framehop, `false` for the
+    /// FP-walk fallback.
+    pub used_framehop: bool,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct ProbeDiffBucket {
+    /// Inclusive upper bound of the bucket (mach ticks). Last
+    /// bucket has `u64::MAX` to mean "everything above".
+    pub upper_mach: u64,
+    pub samples: u64,
+    pub pc_match: u64,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct ProbeDiffUpdate {
+    pub total_kperf_samples: u64,
+    pub total_probes: u64,
+    /// Number of (tid, kperf_ts) pairs where both a kperf sample
+    /// and a probe result exist.
+    pub paired: u64,
+    /// Distribution of common-suffix lengths across paired
+    /// samples. Index = exact suffix length (0..=32).
+    pub common_suffix_hist: Vec<u64>,
+    /// Drift histogram bucketed by mach-tick distance between
+    /// kperf_ts and probe_done.
+    pub drift_buckets: Vec<ProbeDiffBucket>,
+    pub pc_match: u64,
+    pub lr_match: u64,
+    pub framehop_used: u64,
+    pub fp_walk_used: u64,
+    /// The N most recent paired entries for drill-down. Ordered
+    /// oldest → newest.
+    pub recent: Vec<ProbeDiffEntry>,
+}
+
 #[derive(Clone, Debug, Facet)]
 pub struct AnnotatedView {
     /// Best-effort symbol name (or hex string fallback).
@@ -573,6 +651,19 @@ pub trait Profiler {
     /// continue to work against the existing (frozen) data.
     async fn set_paused(&self, paused: bool);
     async fn is_paused(&self) -> bool;
+
+    /// Stream periodic snapshots of the kperf-vs-probe diff:
+    /// per-thread pairing of kperf PET samples with their
+    /// race-against-return probe results, common-suffix histogram,
+    /// drift histogram, and the most recent N entries with both
+    /// stacks symbolicated through the live BinaryRegistry. Pass
+    /// `tid = Some(_)` to scope to a single thread, or `None` for
+    /// all threads.
+    async fn subscribe_probe_diff(
+        &self,
+        tid: Option<u32>,
+        output: vox::Tx<ProbeDiffUpdate>,
+    );
 }
 
 /// Stable handle for one run hosted by the server. Returned by

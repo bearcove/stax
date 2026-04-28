@@ -9,8 +9,9 @@ use parking_lot::RwLock;
 
 use stax_live_proto::{
     AnnotatedLine, AnnotatedView, FlameNode, FlamegraphUpdate, IntervalEntry, IntervalListUpdate,
-    LiveFilter, NeighborsUpdate, PetSampleEntry, PetSampleListUpdate, Profiler, ThreadInfo,
-    ThreadsUpdate, TimelineBucket, TimelineUpdate, TopEntry, TopSort, TopUpdate, ViewParams,
+    LiveFilter, NeighborsUpdate, PetSampleEntry, PetSampleListUpdate, ProbeDiffBucket,
+    ProbeDiffEntry, ProbeDiffUpdate, Profiler, ResolvedFrame, ThreadInfo, ThreadsUpdate,
+    TimelineBucket, TimelineUpdate, TopEntry, TopSort, TopUpdate, ViewParams,
 };
 
 pub use crate::aggregator::{IntervalKind, PmuSample};
@@ -300,6 +301,31 @@ impl Profiler for LiveServer {
         self.paused.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    async fn subscribe_probe_diff(
+        &self,
+        tid: Option<u32>,
+        output: vox::Tx<ProbeDiffUpdate>,
+    ) {
+        tracing::info!(?tid, "subscribe_probe_diff: starting stream");
+        let aggregator = self.aggregator.clone();
+        let binaries = self.binaries.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+            loop {
+                interval.tick().await;
+                let update = {
+                    let agg = aggregator.read();
+                    let bins = binaries.read();
+                    build_probe_diff_update(&agg, &bins, tid)
+                };
+                if let Err(e) = output.send(update).await {
+                    tracing::info!("subscribe_probe_diff: stream ended: {e:?}");
+                    break;
+                }
+            }
+        });
+    }
+
     async fn subscribe_threads(&self, output: vox::Tx<ThreadsUpdate>) {
         tracing::info!("subscribe_threads: starting stream");
         let aggregator = self.aggregator.clone();
@@ -544,6 +570,224 @@ fn build_pet_samples_update(
     PetSampleListUpdate {
         total_samples,
         entries,
+    }
+}
+
+/// Bucket boundaries for the probe drift histogram, in mach
+/// ticks (numer/denom of mach_timebase). Apple Silicon's
+/// timebase is 1:1 ns by default so a tick ≈ a nanosecond, but
+/// we keep the unit honest in the wire shape and let the UI
+/// convert if it wants. Edges chosen to span sub-ms (sampling
+/// loop hot path) through "client behind, drain backpressure"
+/// territory.
+const PROBE_DRIFT_BUCKETS_NS: &[u64] =
+    &[1_000, 10_000, 100_000, 1_000_000, 10_000_000, 100_000_000];
+
+const PROBE_RECENT_CAP: usize = 64;
+
+/// Pair each kperf PET sample with its matching race-against-return
+/// probe result by `(tid, timestamp_ns == kperf_ts)`. Walks both
+/// per-thread queues with a two-pointer merge: both queues are
+/// append-only ordered by timestamp, so a single linear scan finds
+/// every pair. Resolves both sides through the live `BinaryRegistry`
+/// at snapshot time so the UI sees stable strings even if a binary
+/// gets unloaded between snapshots.
+fn build_probe_diff_update(
+    agg: &Aggregator,
+    bins: &BinaryRegistry,
+    only_tid: Option<u32>,
+) -> ProbeDiffUpdate {
+    let session_start = agg.session_start_ns().unwrap_or(0);
+    let mut hist = vec![0u64; 33];
+    let mut bucket_count = vec![0u64; PROBE_DRIFT_BUCKETS_NS.len() + 1];
+    let mut bucket_pc_match = vec![0u64; PROBE_DRIFT_BUCKETS_NS.len() + 1];
+
+    let mut total_kperf: u64 = 0;
+    let mut total_probes: u64 = 0;
+    let mut paired: u64 = 0;
+    let mut pc_match_n: u64 = 0;
+    let mut lr_match_n: u64 = 0;
+    let mut framehop_n: u64 = 0;
+    let mut fp_walk_n: u64 = 0;
+
+    // Recent entries collected oldest→newest as we sweep, kept
+    // bounded with a tail-keeping ring (drop oldest when past cap).
+    let mut recent: std::collections::VecDeque<ProbeDiffEntry> =
+        std::collections::VecDeque::with_capacity(PROBE_RECENT_CAP);
+
+    for thread_tid in agg.iter_threads() {
+        if let Some(want) = only_tid {
+            if thread_tid != want {
+                continue;
+            }
+        }
+        let Some(stats) = agg.thread_stats(thread_tid) else {
+            continue;
+        };
+        total_kperf = total_kperf.saturating_add(stats.pet_samples.len() as u64);
+        total_probes = total_probes.saturating_add(stats.probe_results.len() as u64);
+
+        let mut pet_iter = stats.pet_samples.iter();
+        let mut current_pet = pet_iter.next();
+        for probe in &stats.probe_results {
+            // Advance pet_iter until its timestamp >= probe.kperf_ts.
+            // Both queues are append-ordered so no rewinding.
+            while let Some(p) = current_pet {
+                if p.timestamp_ns < probe.kperf_ts {
+                    current_pet = pet_iter.next();
+                } else {
+                    break;
+                }
+            }
+            let Some(pet) = current_pet else { break };
+            if pet.timestamp_ns != probe.kperf_ts {
+                continue;
+            }
+
+            paired += 1;
+            if probe.used_framehop {
+                framehop_n += 1;
+            } else {
+                fp_walk_n += 1;
+            }
+
+            // Compare the FP-walked portion of kperf's stack
+            // against the probe's walked stack (both are leaf-
+            // first, return addresses; kperf's leaf is at [0],
+            // probe's leaf-PC isn't included). Skip kperf[0]
+            // (leaf PC) and kperf's last frame (appended LR) for
+            // the suffix comparison.
+            let kperf_walk: &[u64] = if pet.stack.len() >= 2 {
+                &pet.stack[1..pet.stack.len() - 1]
+            } else {
+                &[]
+            };
+            let probe_walk = &probe.mach_walked[..];
+            let common = longest_common_suffix(kperf_walk, probe_walk);
+            let bucket = (common as usize).min(hist.len() - 1);
+            hist[bucket] += 1;
+
+            let drift_mach = (probe.probe_done_ns as i128) - (probe.kperf_ts as i128);
+            let drift_abs_ns = drift_mach.unsigned_abs() as u64;
+            let bucket_idx = PROBE_DRIFT_BUCKETS_NS
+                .iter()
+                .position(|&edge| drift_abs_ns < edge)
+                .unwrap_or(PROBE_DRIFT_BUCKETS_NS.len());
+            bucket_count[bucket_idx] += 1;
+
+            let kperf_leaf = pet.stack.first().copied().unwrap_or(0);
+            let pc_match = kperf_leaf == probe.mach_pc;
+            let kperf_lr = pet.stack.last().copied().unwrap_or(0);
+            let lr_match = kperf_lr == probe.mach_lr;
+            if pc_match {
+                pc_match_n += 1;
+                bucket_pc_match[bucket_idx] += 1;
+            }
+            if lr_match {
+                lr_match_n += 1;
+            }
+
+            // Drill-down render: build symbolicated stacks for the
+            // most recent N entries.
+            let kperf_stack: Vec<ResolvedFrame> = pet
+                .stack
+                .iter()
+                .map(|&addr| resolve_frame(bins, addr))
+                .collect();
+            let mut probe_stack: Vec<ResolvedFrame> = Vec::with_capacity(probe_walk.len() + 1);
+            probe_stack.push(resolve_frame(bins, probe.mach_pc));
+            for &addr in probe_walk {
+                probe_stack.push(resolve_frame(bins, addr));
+            }
+
+            let entry = ProbeDiffEntry {
+                tid: thread_tid,
+                timestamp_ns: pet.timestamp_ns.saturating_sub(session_start),
+                drift_mach: drift_mach.clamp(i64::MIN as i128, i64::MAX as i128) as i64,
+                kperf_stack,
+                probe_stack,
+                common_suffix: common as u32,
+                pc_match,
+                lr_match,
+                used_framehop: probe.used_framehop,
+            };
+            if recent.len() == PROBE_RECENT_CAP {
+                recent.pop_front();
+            }
+            recent.push_back(entry);
+        }
+    }
+
+    let mut drift_buckets: Vec<ProbeDiffBucket> =
+        Vec::with_capacity(PROBE_DRIFT_BUCKETS_NS.len() + 1);
+    for (i, &edge) in PROBE_DRIFT_BUCKETS_NS.iter().enumerate() {
+        drift_buckets.push(ProbeDiffBucket {
+            upper_mach: edge,
+            samples: bucket_count[i],
+            pc_match: bucket_pc_match[i],
+        });
+    }
+    drift_buckets.push(ProbeDiffBucket {
+        upper_mach: u64::MAX,
+        samples: bucket_count[PROBE_DRIFT_BUCKETS_NS.len()],
+        pc_match: bucket_pc_match[PROBE_DRIFT_BUCKETS_NS.len()],
+    });
+
+    ProbeDiffUpdate {
+        total_kperf_samples: total_kperf,
+        total_probes,
+        paired,
+        common_suffix_hist: hist,
+        drift_buckets,
+        pc_match: pc_match_n,
+        lr_match: lr_match_n,
+        framehop_used: framehop_n,
+        fp_walk_used: fp_walk_n,
+        recent: recent.into_iter().collect(),
+    }
+}
+
+/// Length of the longest matching suffix between two address
+/// slices. `a[a.len()-1]` lines up with `b[b.len()-1]`; the count
+/// is how many trailing frames match.
+fn longest_common_suffix(a: &[u64], b: &[u64]) -> usize {
+    let mut k = 0;
+    let max_k = a.len().min(b.len());
+    while k < max_k {
+        if a[a.len() - 1 - k] != b[b.len() - 1 - k] {
+            break;
+        }
+        k += 1;
+    }
+    k
+}
+
+/// Render one address as a `ResolvedFrame` using the live registry.
+/// Falls back to `<unmapped:0xaddr>` when no module covers the
+/// address (typical for jit code that didn't fire a BinaryLoaded
+/// event yet).
+fn resolve_frame(bins: &BinaryRegistry, address: u64) -> ResolvedFrame {
+    if address == 0 {
+        return ResolvedFrame {
+            address,
+            display: "<null>".to_owned(),
+            binary: String::new(),
+            function: String::new(),
+        };
+    }
+    match bins.lookup_symbol(address) {
+        Some(sym) => ResolvedFrame {
+            address,
+            display: format!("{}!{}", sym.binary, sym.function_name),
+            binary: sym.binary,
+            function: sym.function_name,
+        },
+        None => ResolvedFrame {
+            address,
+            display: format!("<unmapped:{address:#x}>"),
+            binary: String::new(),
+            function: String::new(),
+        },
     }
 }
 

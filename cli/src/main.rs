@@ -5,12 +5,16 @@ use std::process::exit;
 
 use figue as args;
 use stax_core::{
-    args::{AnnotateArgs, Cli, Command, FlameArgs, RecordArgs, ThreadsArgs, TopArgs, WaitArgs},
+    args::{
+        AnnotateArgs, Cli, Command, FlameArgs, ProbeDiffArgs, RecordArgs, ThreadsArgs, TopArgs,
+        WaitArgs,
+    },
     cmd_record_mac, cmd_setup_mac,
 };
 use stax_live_proto::{
-    FlameNode, FlamegraphUpdate, LiveFilter, OffCpuBreakdown, ProfilerClient, RunControlClient,
-    RunSummary, ServerStatus, ThreadsUpdate, TopSort, ViewParams, WaitCondition, WaitOutcome,
+    FlameNode, FlamegraphUpdate, LiveFilter, OffCpuBreakdown, ProbeDiffUpdate, ProfilerClient,
+    RunControlClient, RunSummary, ServerStatus, ThreadsUpdate, TopSort, ViewParams, WaitCondition,
+    WaitOutcome,
 };
 
 fn main_impl() -> Result<(), Box<dyn Error>> {
@@ -48,6 +52,7 @@ fn main_impl() -> Result<(), Box<dyn Error>> {
         Command::Annotate(args) => block_on_async(async { run_annotate(args).await })?,
         Command::Flame(args) => block_on_async(async { run_flame(args).await })?,
         Command::Threads(args) => block_on_async(async { run_threads(args).await })?,
+        Command::ProbeDiff(args) => block_on_async(async { run_probe_diff(args).await })?,
     }
     Ok(())
 }
@@ -366,6 +371,124 @@ fn print_threads(update: &ThreadsUpdate, limit: u32) {
     }
     if threads.len() > take {
         println!("…{} more threads", threads.len() - take);
+    }
+}
+
+async fn run_probe_diff(args: ProbeDiffArgs) -> Result<(), Box<dyn Error>> {
+    let url = require_server_socket()?;
+    let client: ProfilerClient = vox::connect(&url).await?;
+    let (tx, mut rx) = vox::channel();
+    client
+        .subscribe_probe_diff(args.tid, tx)
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+    let update_sref = rx
+        .recv()
+        .await
+        .map_err(|e| format!("{e:?}"))?
+        .ok_or("probe-diff stream closed before sending an update")?;
+    update_sref.map(|update| print_probe_diff(&update, args.recent));
+    Ok(())
+}
+
+fn print_probe_diff(update: &ProbeDiffUpdate, recent_limit: u32) {
+    println!(
+        "kperf samples : {}\nprobe results : {}\npaired        : {}",
+        update.total_kperf_samples, update.total_probes, update.paired,
+    );
+    if update.paired == 0 {
+        println!("(no paired samples yet — is staxd running with the probe enabled?)");
+        return;
+    }
+    let pct = |n: u64| (n as f64 * 100.0 / update.paired as f64);
+    println!(
+        "pc_match      : {:>6}  ({:>5.1}%)",
+        update.pc_match,
+        pct(update.pc_match)
+    );
+    println!(
+        "lr_match      : {:>6}  ({:>5.1}%)",
+        update.lr_match,
+        pct(update.lr_match)
+    );
+    println!(
+        "framehop      : {:>6}  ({:>5.1}%)",
+        update.framehop_used,
+        pct(update.framehop_used)
+    );
+    println!(
+        "fp-walk       : {:>6}  ({:>5.1}%)",
+        update.fp_walk_used,
+        pct(update.fp_walk_used)
+    );
+
+    println!("\ncommon_suffix histogram (parent frames that survived drift):");
+    let total = update.paired.max(1);
+    for (k, &n) in update.common_suffix_hist.iter().enumerate() {
+        if n > 0 {
+            println!("  k={k:<3} {n:>6}  ({:>5.1}%)", n as f64 * 100.0 / total as f64);
+        }
+    }
+
+    println!("\ndrift histogram (kperf_ts → probe_done, paired with pc_match rate):");
+    let mut prev = 0u64;
+    for b in &update.drift_buckets {
+        let label = if b.upper_mach == u64::MAX {
+            format!(">= {}ns", fmt_ns(prev))
+        } else {
+            format!("{}–{}ns", fmt_ns(prev), fmt_ns(b.upper_mach))
+        };
+        let rate = if b.samples == 0 {
+            0.0
+        } else {
+            b.pc_match as f64 * 100.0 / b.samples as f64
+        };
+        println!(
+            "  {label:<24} {:>6} samples   pc_match {:>3.0}%",
+            b.samples, rate
+        );
+        prev = b.upper_mach;
+    }
+
+    if recent_limit == 0 {
+        return;
+    }
+    println!(
+        "\nmost recent {} paired entries (oldest → newest):",
+        recent_limit.min(update.recent.len() as u32)
+    );
+    let take = recent_limit as usize;
+    for entry in update.recent.iter().rev().take(take).collect::<Vec<_>>().iter().rev() {
+        println!(
+            "\n  tid={} t={}ms drift={:+}ns common_suffix={} pc_match={} lr_match={} framehop={}",
+            entry.tid,
+            entry.timestamp_ns / 1_000_000,
+            entry.drift_mach,
+            entry.common_suffix,
+            entry.pc_match,
+            entry.lr_match,
+            entry.used_framehop,
+        );
+        println!("    kperf_stack:");
+        for f in &entry.kperf_stack {
+            println!("      {:#018x}  {}", f.address, f.display);
+        }
+        println!("    probe_stack:");
+        for f in &entry.probe_stack {
+            println!("      {:#018x}  {}", f.address, f.display);
+        }
+    }
+}
+
+fn fmt_ns(ns: u64) -> String {
+    if ns >= 1_000_000_000 {
+        format!("{}s", ns / 1_000_000_000)
+    } else if ns >= 1_000_000 {
+        format!("{}ms", ns / 1_000_000)
+    } else if ns >= 1_000 {
+        format!("{}µs", ns / 1_000)
+    } else {
+        format!("{ns}")
     }
 }
 

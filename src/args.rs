@@ -53,6 +53,12 @@ pub enum Command {
 
     /// Per-thread on/off-CPU breakdown for the active run.
     Threads(ThreadsArgs),
+
+    /// One snapshot of the kperf-vs-probe diff: pairs each PET
+    /// sample with the matching race-against-return probe result,
+    /// prints suffix-match histogram, drift histogram, and the most
+    /// recent N entries with both stacks symbolicated.
+    ProbeDiff(ProbeDiffArgs),
 }
 
 #[derive(Facet, Debug)]
@@ -100,6 +106,18 @@ pub struct ThreadsArgs {
     /// descending). 0 to print all.
     #[facet(args::named, args::short = 'n', default = 20)]
     pub limit: u32,
+}
+
+#[derive(Facet, Debug)]
+pub struct ProbeDiffArgs {
+    /// Restrict to a single thread. Default: all threads.
+    #[facet(args::named, default)]
+    pub tid: Option<u32>,
+
+    /// How many "recent paired entries" to print at the end.
+    /// 0 prints just the histograms.
+    #[facet(args::named, args::short = 'n', default = 8)]
+    pub recent: u32,
 }
 
 #[derive(Facet, Debug)]
