@@ -302,8 +302,8 @@ where
     Ok(())
 }
 
-async fn join_worker_with_deadline<S>(
-    worker_handle: std::thread::JoinHandle<S>,
+async fn join_worker_with_deadline(
+    worker_handle: std::thread::JoinHandle<()>,
     abort_worker_backlog: Arc<AtomicBool>,
 ) -> Result<(), tokio::task::JoinError> {
     const WORKER_SHUTDOWN_BUDGET: Duration = Duration::from_secs(2);
