@@ -34,6 +34,7 @@ use staxd_proto::{
     SessionConfig, SessionState,
 };
 
+mod probe;
 mod session;
 
 /// Default socket path. Production deployments pass their own via

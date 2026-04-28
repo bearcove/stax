@@ -79,14 +79,16 @@ fn install() -> Result<(), Box<dyn Error>> {
         fs::copy(&src, &dst)?;
 
         #[cfg(target_os = "macos")]
-        if bin == SHADE_BIN {
-            // stax-shade is the only entitled binary in the
-            // architecture: it's the one that holds Mach task port
-            // rights, so it's the one that needs cs.debugger.
-            // stax (CLI) and stax-server are unprivileged.
+        if bin == SHADE_BIN || bin == DAEMON_BIN {
+            // stax-shade and staxd both end up calling task_for_pid
+            // / thread_get_state on the target. shade always has —
+            // it's why this entitlement exists. staxd needs it for
+            // the race-against-return probe in session.rs: even
+            // running as root, hardened-runtime targets reject
+            // task_for_pid without cs.debugger.
             codesign_with_debugger(&dst)?;
         }
-        // BIN_NAME, DAEMON_BIN, SERVER_BIN: no codesign needed.
+        // BIN_NAME, SERVER_BIN: no codesign needed.
     }
 
     #[cfg(target_os = "macos")]

@@ -2266,6 +2266,7 @@ version = "0.1.0"
 dependencies = [
  "eyre",
  "libc",
+ "mach2",
  "stax-mac-kperf-sys",
  "staxd-proto",
  "tokio",
