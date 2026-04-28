@@ -38,6 +38,11 @@ export interface ServerStatus {
   active: RunSummary[];
 }
 
+export interface RunConfig {
+  label: string;
+  frequency_hz: number;
+}
+
 export type WaitCondition =
   | { tag: 'UntilStopped' }
   | { tag: 'ForSamples'; count: bigint }
@@ -56,6 +61,22 @@ export type StatusResponse = ServerStatus;
 
 export type ListRunsRequest = [];
 export type ListRunsResponse = RunSummary[];
+
+export type StartAttachRequest = [
+  number, // pid
+  RunConfig, // config
+  string, // daemon_socket
+  bigint | null, // time_limit_secs
+];
+export type StartAttachResponse = { ok: true; value: RunId } | { ok: false; error: string };
+
+export type StartLaunchRequest = [
+  string[], // command
+  RunConfig, // config
+  string, // daemon_socket
+  bigint | null, // time_limit_secs
+];
+export type StartLaunchResponse = { ok: true; value: RunId } | { ok: false; error: string };
 
 export type WaitActiveRequest = [
   WaitCondition, // condition
@@ -79,6 +100,10 @@ export interface RunControlCaller {
    * (in-memory only for now; on-disk persistence is a follow-up).
    */
   listRuns(): Promise<RunSummary[]>;
+  /** Start a recording by attaching stax-shade to an existing pid. */
+  startAttach(pid: number, config: RunConfig, daemonSocket: string, timeLimitSecs: bigint | null): Promise<{ ok: true; value: RunId } | { ok: false; error: string }>;
+  /** Start a recording by launching a new process under stax-shade. */
+  startLaunch(command: string[], config: RunConfig, daemonSocket: string, timeLimitSecs: bigint | null): Promise<{ ok: true; value: RunId } | { ok: false; error: string }>;
   /**
    * Block until `condition` fires, the active run stops, or
    * `timeout_ms` elapses (whichever comes first). Returns
@@ -132,6 +157,46 @@ export class RunControlClient implements RunControlCaller {
         sendSchemas,
       });
       return value as RunSummary[];
+  }
+
+  /** Start a recording by attaching stax-shade to an existing pid. */
+  async startAttach(pid: number, config: RunConfig, daemonSocket: string, timeLimitSecs: bigint | null): Promise<{ ok: true; value: RunId } | { ok: false; error: string }> {
+    const descriptor = runControl_startAttach_method;
+    const sendSchemas = runControl_descriptor.send_schemas;
+      try {
+        const value = await this.caller.call({
+          method: "RunControl.startAttach",
+          args: { pid, config, daemonSocket, timeLimitSecs },
+          descriptor,
+          sendSchemas,
+        });
+        return { ok: true, value } as { ok: true; value: RunId } | { ok: false; error: string };
+      } catch (e: any) {
+        if (e instanceof RpcError && e.isUserError()) {
+          return { ok: false, error: e.userError } as { ok: true; value: RunId } | { ok: false; error: string };
+        }
+        throw e;
+      }
+  }
+
+  /** Start a recording by launching a new process under stax-shade. */
+  async startLaunch(command: string[], config: RunConfig, daemonSocket: string, timeLimitSecs: bigint | null): Promise<{ ok: true; value: RunId } | { ok: false; error: string }> {
+    const descriptor = runControl_startLaunch_method;
+    const sendSchemas = runControl_descriptor.send_schemas;
+      try {
+        const value = await this.caller.call({
+          method: "RunControl.startLaunch",
+          args: { command, config, daemonSocket, timeLimitSecs },
+          descriptor,
+          sendSchemas,
+        });
+        return { ok: true, value } as { ok: true; value: RunId } | { ok: false; error: string };
+      } catch (e: any) {
+        if (e instanceof RpcError && e.isUserError()) {
+          return { ok: false, error: e.userError } as { ok: true; value: RunId } | { ok: false; error: string };
+        }
+        throw e;
+      }
   }
 
   /**
@@ -194,6 +259,8 @@ export async function connectRunControl(
 export interface RunControlHandler {
   status(): Promise<ServerStatus> | ServerStatus;
   listRuns(): Promise<RunSummary[]> | RunSummary[];
+  startAttach(pid: number, config: RunConfig, daemonSocket: string, timeLimitSecs: bigint | null): Promise<{ ok: true; value: RunId } | { ok: false; error: string }> | { ok: true; value: RunId } | { ok: false; error: string };
+  startLaunch(command: string[], config: RunConfig, daemonSocket: string, timeLimitSecs: bigint | null): Promise<{ ok: true; value: RunId } | { ok: false; error: string }> | { ok: true; value: RunId } | { ok: false; error: string };
   waitActive(condition: WaitCondition, timeoutMs: bigint | null): Promise<WaitOutcome> | WaitOutcome;
   stopActive(): Promise<{ ok: true; value: RunSummary } | { ok: false; error: string }> | { ok: true; value: RunSummary } | { ok: false; error: string };
 }
@@ -222,6 +289,20 @@ export class RunControlDispatcher implements Dispatcher {
       try {
         const result = await this.handler.listRuns();
         call.reply(result);
+      } catch (error) {
+        call.replyInternalError(error instanceof Error ? error.message : String(error));
+      }
+    } else if (method.id === 0xd1fa0143fbbb5525n) {
+      try {
+        const result = await this.handler.startAttach(args[0] as number, args[1] as RunConfig, args[2] as string, args[3] as bigint | null);
+        if (result.ok) call.reply(result.value); else call.replyErr(result.error);
+      } catch (error) {
+        call.replyInternalError(error instanceof Error ? error.message : String(error));
+      }
+    } else if (method.id === 0x153c5c16f3b393d4n) {
+      try {
+        const result = await this.handler.startLaunch(args[0] as string[], args[1] as RunConfig, args[2] as string, args[3] as bigint | null);
+        if (result.ok) call.reply(result.value); else call.replyErr(result.error);
       } catch (error) {
         call.replyInternalError(error instanceof Error ? error.message : String(error));
       }
@@ -262,6 +343,8 @@ export const runControl_send_schemas: import("@bearcove/vox-core").ServiceSendSc
     [0xa938a91823178fd5n, { id: 0xa938a91823178fd5n, type_params: [], kind: { tag: 'struct', name: 'RunSummary', fields: [{ name: 'id', type_ref: { tag: 'concrete', type_id: 0xde69b13dbe16811bn, args: [] }, required: true }, { name: 'state', type_ref: { tag: 'concrete', type_id: 0xee0f06d5e8720d1fn, args: [] }, required: true }, { name: 'stop_reason', type_ref: { tag: 'concrete', type_id: 0xdcafd4de6b7969bbn, args: [{ tag: 'concrete', type_id: 0xd93d51583a6b18d0n, args: [] }] }, required: true }, { name: 'started_at_unix_ns', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'stopped_at_unix_ns', type_ref: { tag: 'concrete', type_id: 0xdcafd4de6b7969bbn, args: [{ tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }] }, required: true }, { name: 'target_pid', type_ref: { tag: 'concrete', type_id: 0xdcafd4de6b7969bbn, args: [{ tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }] }, required: true }, { name: 'label', type_ref: { tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }, required: true }, { name: 'pet_samples', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'off_cpu_intervals', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }] } }],
     [0x0a96b404b4d79d67n, { id: 0x0a96b404b4d79d67n, type_params: ['T'], kind: { tag: 'list', element: { tag: 'var', name: 'T' } } }],
     [0x7959968283e55af0n, { id: 0x7959968283e55af0n, type_params: [], kind: { tag: 'struct', name: 'ServerStatus', fields: [{ name: 'server_started_at_unix_ns', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'active', type_ref: { tag: 'concrete', type_id: 0x0a96b404b4d79d67n, args: [{ tag: 'concrete', type_id: 0xa938a91823178fd5n, args: [] }] }, required: true }] } }],
+    [0x9974527f7711610cn, { id: 0x9974527f7711610cn, type_params: [], kind: { tag: 'struct', name: 'RunConfig', fields: [{ name: 'label', type_ref: { tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }, required: true }, { name: 'frequency_hz', type_ref: { tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }, required: true }] } }],
+    [0x915c6fb5b64f270bn, { id: 0x915c6fb5b64f270bn, type_params: ['T0', 'T1', 'T2', 'T3'], kind: { tag: 'tuple', elements: [{ tag: 'var', name: 'T0' }, { tag: 'var', name: 'T1' }, { tag: 'var', name: 'T2' }, { tag: 'var', name: 'T3' }] } }],
     [0x8fbc99220193571bn, { id: 0x8fbc99220193571bn, type_params: [], kind: { tag: 'enum', name: 'WaitCondition', variants: [{ name: 'UntilStopped', index: 0, payload: { tag: 'unit' } }, { name: 'ForSamples', index: 1, payload: { tag: 'struct', fields: [{ name: 'count', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }] } }, { name: 'ForSeconds', index: 2, payload: { tag: 'struct', fields: [{ name: 'seconds', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }] } }, { name: 'UntilSymbolSeen', index: 3, payload: { tag: 'struct', fields: [{ name: 'needle', type_ref: { tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }, required: true }] } }] } }],
     [0xba0496aa8cee7a4cn, { id: 0xba0496aa8cee7a4cn, type_params: ['T0', 'T1'], kind: { tag: 'tuple', elements: [{ tag: 'var', name: 'T0' }, { tag: 'var', name: 'T1' }] } }],
     [0x22ef152b3afb1613n, { id: 0x22ef152b3afb1613n, type_params: [], kind: { tag: 'enum', name: 'WaitOutcome', variants: [{ name: 'ConditionMet', index: 0, payload: { tag: 'struct', fields: [{ name: 'summary', type_ref: { tag: 'concrete', type_id: 0xa938a91823178fd5n, args: [] }, required: true }] } }, { name: 'Stopped', index: 1, payload: { tag: 'struct', fields: [{ name: 'summary', type_ref: { tag: 'concrete', type_id: 0xa938a91823178fd5n, args: [] }, required: true }] } }, { name: 'TimedOut', index: 2, payload: { tag: 'struct', fields: [{ name: 'summary', type_ref: { tag: 'concrete', type_id: 0xa938a91823178fd5n, args: [] }, required: true }] } }, { name: 'NoActiveRun', index: 3, payload: { tag: 'unit' } }] } }],
@@ -269,6 +352,8 @@ export const runControl_send_schemas: import("@bearcove/vox-core").ServiceSendSc
   methods: new Map<bigint, import("@bearcove/vox-core").MethodSendSchemas>([
     [0x874da25beec8b931n, { argsRootRef: { tag: 'concrete', type_id: 0xbc5c33249a2dc720n, args: [] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0x7959968283e55af0n, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
     [0x660607fe04b64c9fn, { argsRootRef: { tag: 'concrete', type_id: 0xbc5c33249a2dc720n, args: [] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0x0a96b404b4d79d67n, args: [{ tag: 'concrete', type_id: 0xa938a91823178fd5n, args: [] }] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
+    [0xd1fa0143fbbb5525n, { argsRootRef: { tag: 'concrete', type_id: 0x915c6fb5b64f270bn, args: [{ tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }, { tag: 'concrete', type_id: 0x9974527f7711610cn, args: [] }, { tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }, { tag: 'concrete', type_id: 0xdcafd4de6b7969bbn, args: [{ tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0xde69b13dbe16811bn, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }] }] } }],
+    [0x153c5c16f3b393d4n, { argsRootRef: { tag: 'concrete', type_id: 0x915c6fb5b64f270bn, args: [{ tag: 'concrete', type_id: 0x0a96b404b4d79d67n, args: [{ tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }] }, { tag: 'concrete', type_id: 0x9974527f7711610cn, args: [] }, { tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }, { tag: 'concrete', type_id: 0xdcafd4de6b7969bbn, args: [{ tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0xde69b13dbe16811bn, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }] }] } }],
     [0x0ab236833a4327den, { argsRootRef: { tag: 'concrete', type_id: 0xba0496aa8cee7a4cn, args: [{ tag: 'concrete', type_id: 0x8fbc99220193571bn, args: [] }, { tag: 'concrete', type_id: 0xdcafd4de6b7969bbn, args: [{ tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0x22ef152b3afb1613n, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
     [0xe975ffb5b17a9a3cn, { argsRootRef: { tag: 'concrete', type_id: 0xbc5c33249a2dc720n, args: [] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0xa938a91823178fd5n, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }] }] } }],
   ]),
@@ -283,6 +368,18 @@ export const runControl_status_method: MethodDescriptor = {
 export const runControl_listRuns_method: MethodDescriptor = {
   name: 'listRuns',
   id: 0x660607fe04b64c9fn,
+  retry: { persist: false, idem: false },
+};
+
+export const runControl_startAttach_method: MethodDescriptor = {
+  name: 'startAttach',
+  id: 0xd1fa0143fbbb5525n,
+  retry: { persist: false, idem: false },
+};
+
+export const runControl_startLaunch_method: MethodDescriptor = {
+  name: 'startLaunch',
+  id: 0x153c5c16f3b393d4n,
   retry: { persist: false, idem: false },
 };
 
@@ -305,6 +402,8 @@ export const runControl_descriptor: ServiceDescriptor = {
   methods: new Map<bigint, MethodDescriptor>([
     [runControl_status_method.id, runControl_status_method],
     [runControl_listRuns_method.id, runControl_listRuns_method],
+    [runControl_startAttach_method.id, runControl_startAttach_method],
+    [runControl_startLaunch_method.id, runControl_startLaunch_method],
     [runControl_waitActive_method.id, runControl_waitActive_method],
     [runControl_stopActive_method.id, runControl_stopActive_method],
   ]),

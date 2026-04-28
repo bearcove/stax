@@ -239,14 +239,18 @@ struct Inner {
     /// when stax-shade dials in; cleared when its session closes.
     /// One active run = at most one shade.
     active_shade: Option<ShadeInfo>,
-    /// Process handle for the auto-spawned stax-shade child. Set
-    /// when `apply_event` sees `TargetAttached` and there's no
-    /// shade yet; reaped + cleared by `stop_active` /
-    /// `finalize_run` (or when the child exits on its own and the
-    /// session-close cleanup fires). One active run = at most one
-    /// child.
+    /// Process handle for the server-spawned stax-shade child.
+    /// Set by RunControl start calls; reaped + cleared by
+    /// `stop_active` / `finalize_run` (or when the child exits on
+    /// its own and the session-close cleanup fires). One active run
+    /// = at most one child.
     shade_child: Option<std::process::Child>,
     history: Vec<RunSummary>,
+}
+
+enum ShadeTarget {
+    Attach(u32),
+    Launch(Vec<String>),
 }
 
 impl ServerState {
@@ -376,26 +380,54 @@ impl ServerState {
     /// shade will dial back in on its own and call
     /// `register_shade`, at which point `active_shade` gets
     /// populated.
-    fn spawn_shade(&self, run_id: RunId, pid: u32) {
+    fn spawn_shade(
+        &self,
+        run_id: RunId,
+        target: ShadeTarget,
+        frequency_hz: u32,
+        daemon_socket: String,
+        time_limit_secs: Option<u64>,
+    ) -> Result<(), String> {
         let bin = match resolve_shade_path() {
             Some(p) => p,
             None => {
-                tracing::warn!(
-                    "stax-shade binary not found in any of the candidate \
-                     locations; target-side helpers are disabled for this run. \
-                     `cargo xtask install` should land it in ~/.cargo/bin/."
+                return Err(
+                    "stax-shade binary not found; run `cargo xtask install` or set STAX_SHADE_BIN"
+                        .to_owned(),
                 );
-                return;
             }
         };
         let socket = self.socket_path.to_string_lossy().into_owned();
         let mut cmd = std::process::Command::new(&bin);
-        cmd.arg("--attach")
-            .arg(pid.to_string())
-            .arg("--server-socket")
+        let target_log = match &target {
+            ShadeTarget::Attach(pid) => format!("pid {pid}"),
+            ShadeTarget::Launch(command) => {
+                format!(
+                    "launch {}",
+                    command.first().map(String::as_str).unwrap_or("<empty>")
+                )
+            }
+        };
+        match target {
+            ShadeTarget::Attach(pid) => {
+                cmd.arg("--attach").arg(pid.to_string());
+            }
+            ShadeTarget::Launch(command) => {
+                cmd.arg("--launch").arg("--").args(command);
+            }
+        }
+        cmd.arg("--server-socket")
             .arg(&socket)
             .arg("--run-id")
             .arg(run_id.0.to_string())
+            .arg("--daemon-socket")
+            .arg(daemon_socket)
+            .arg("--frequency")
+            .arg(frequency_hz.to_string());
+        if let Some(limit) = time_limit_secs {
+            cmd.arg("--time-limit").arg(limit.to_string());
+        }
+        cmd
             // Don't inherit our stdin/out/err — the shade logs via
             // os_log on its own subsystem; nothing useful would
             // come out of the inherited fds. Stdin null also stops
@@ -408,19 +440,15 @@ impl ServerState {
             Ok(child) => {
                 tracing::info!(
                     run_id = run_id.0,
-                    pid,
+                    target = %target_log,
                     shade_pid = child.id(),
                     bin = %bin.display(),
                     "spawned stax-shade"
                 );
                 self.inner.lock().shade_child = Some(child);
+                Ok(())
             }
-            Err(e) => {
-                tracing::warn!(
-                    "failed to spawn {}: {e}; target-side helpers are disabled for this run",
-                    bin.display()
-                );
-            }
+            Err(e) => Err(format!("failed to spawn {}: {e}", bin.display())),
         }
     }
 
@@ -496,6 +524,106 @@ impl ServerState {
                 }
             }
         });
+    }
+
+    fn begin_run(&self, config: RunConfig) -> Result<(RunId, Arc<tokio::sync::Notify>), String> {
+        let id = RunId(self.next_run_id.fetch_add(1, Ordering::Relaxed));
+        let summary = RunSummary {
+            id,
+            state: RunState::Recording,
+            stop_reason: None,
+            started_at_unix_ns: now_unix_ns(),
+            stopped_at_unix_ns: None,
+            target_pid: None,
+            label: config.label,
+            pet_samples: 0,
+            off_cpu_intervals: 0,
+        };
+        let cancel = Arc::new(tokio::sync::Notify::new());
+        {
+            let mut inner = self.inner.lock();
+            if inner.active.is_some() {
+                return Err("another run is already active; \
+                    call RunControl::stop_active or wait_active first"
+                    .to_owned());
+            }
+            inner.active = Some(summary);
+            inner.cancel = Some(cancel.clone());
+        }
+
+        *self.aggregator.write() = Aggregator::default();
+        *self.binaries.write() = BinaryRegistry::new();
+        self.attach_local_shared_cache();
+
+        tracing::info!(
+            "stax-server: run {} started (frequency_hz={})",
+            id.0,
+            config.frequency_hz
+        );
+        Ok((id, cancel))
+    }
+
+    fn cancel_for_run(&self, run_id: RunId) -> Result<Arc<tokio::sync::Notify>, String> {
+        let inner = self.inner.lock();
+        let Some(active) = inner.active.as_ref() else {
+            return Err("no active run".to_owned());
+        };
+        if active.id != run_id {
+            return Err(format!(
+                "run id mismatch: ingest for {}, active run is {}",
+                run_id.0, active.id.0
+            ));
+        }
+        inner
+            .cancel
+            .clone()
+            .ok_or_else(|| "active run has no cancel handle".to_owned())
+    }
+
+    fn spawn_ingest_drainer(
+        &self,
+        id: RunId,
+        cancel: Arc<tokio::sync::Notify>,
+        mut events: vox::Rx<IngestEvent>,
+    ) {
+        let state = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancel.notified() => break,
+                    recv = events.recv() => match recv {
+                        Ok(Some(event_sref)) => {
+                            let state = state.clone();
+                            let _ = event_sref.map(|event| {
+                                state.apply_event(id, event);
+                            });
+                        }
+                        _ => break,
+                    },
+                }
+            }
+            drop(events);
+            state.finalize_run(id, StopReason::TargetExited);
+        });
+    }
+
+    fn discard_start_failed(&self, run_id: RunId, message: String) {
+        let mut inner = self.inner.lock();
+        let Some(active) = inner.active.as_ref() else {
+            return;
+        };
+        if active.id != run_id {
+            return;
+        }
+        let mut summary = inner.active.take().expect("checked above");
+        summary.state = RunState::Stopped;
+        summary.stop_reason = Some(StopReason::RecorderError { message });
+        summary.stopped_at_unix_ns = Some(now_unix_ns());
+        inner.cancel = None;
+        inner.active_shade = None;
+        inner.shade_child = None;
+        inner.history.push(summary);
     }
 }
 
@@ -593,6 +721,53 @@ impl RunControl for ServerState {
             out.push(active);
         }
         out
+    }
+
+    async fn start_attach(
+        &self,
+        pid: u32,
+        config: RunConfig,
+        daemon_socket: String,
+        time_limit_secs: Option<u64>,
+    ) -> Result<RunId, String> {
+        let frequency_hz = config.frequency_hz;
+        let (run_id, _) = self.begin_run(config)?;
+        if let Err(e) = self.spawn_shade(
+            run_id,
+            ShadeTarget::Attach(pid),
+            frequency_hz,
+            daemon_socket,
+            time_limit_secs,
+        ) {
+            self.discard_start_failed(run_id, e.clone());
+            return Err(e);
+        }
+        Ok(run_id)
+    }
+
+    async fn start_launch(
+        &self,
+        command: Vec<String>,
+        config: RunConfig,
+        daemon_socket: String,
+        time_limit_secs: Option<u64>,
+    ) -> Result<RunId, String> {
+        if command.is_empty() {
+            return Err("launch command is empty".to_owned());
+        }
+        let frequency_hz = config.frequency_hz;
+        let (run_id, _) = self.begin_run(config)?;
+        if let Err(e) = self.spawn_shade(
+            run_id,
+            ShadeTarget::Launch(command),
+            frequency_hz,
+            daemon_socket,
+            time_limit_secs,
+        ) {
+            self.discard_start_failed(run_id, e.clone());
+            return Err(e);
+        }
+        Ok(run_id)
     }
 
     async fn wait_active(&self, condition: WaitCondition, timeout_ms: Option<u64>) -> WaitOutcome {
@@ -700,76 +875,17 @@ impl RunIngest for ServerState {
     async fn start_run(
         &self,
         config: RunConfig,
-        mut events: vox::Rx<IngestEvent>,
+        events: vox::Rx<IngestEvent>,
     ) -> Result<RunId, String> {
-        let id = RunId(self.next_run_id.fetch_add(1, Ordering::Relaxed));
-        let summary = RunSummary {
-            id,
-            state: RunState::Recording,
-            stop_reason: None,
-            started_at_unix_ns: now_unix_ns(),
-            stopped_at_unix_ns: None,
-            target_pid: None,
-            label: config.label,
-            pet_samples: 0,
-            off_cpu_intervals: 0,
-        };
-        let cancel = Arc::new(tokio::sync::Notify::new());
-        {
-            let mut inner = self.inner.lock();
-            if inner.active.is_some() {
-                return Err("another run is already active; \
-                    call RunControl::stop_active or wait_active first"
-                    .to_owned());
-            }
-            inner.active = Some(summary);
-            inner.cancel = Some(cancel.clone());
-        }
-
-        // Reset aggregator + binary registry for this run. Historical
-        // queries against previous runs are deferred (Profiler doesn't
-        // take a RunId yet).
-        *self.aggregator.write() = Aggregator::default();
-        *self.binaries.write() = BinaryRegistry::new();
-        // Re-attach the host's dyld shared cache. Without this every
-        // cache-resident address (libsystem_*, CoreFoundation, dyld,
-        // …) shows as <unmapped> after the first run of the server's
-        // lifetime, since the previous attach lived on the old
-        // BinaryRegistry instance we just replaced.
-        self.attach_local_shared_cache();
-
-        tracing::info!(
-            "stax-server: run {} started (frequency_hz={})",
-            id.0,
-            config.frequency_hz
-        );
-
-        let state = self.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = cancel.notified() => break,
-                    recv = events.recv() => match recv {
-                        Ok(Some(event_sref)) => {
-                            let state = state.clone();
-                            let _ = event_sref.map(|event| {
-                                state.apply_event(id, event);
-                            });
-                        }
-                        _ => break,
-                    },
-                }
-            }
-            // Drop the Rx explicitly so the recorder's Tx::send
-            // surfaces an error and its forwarder flips
-            // stop_requested → recorder bails out of drive_session
-            // → the whole pipeline cascades down.
-            drop(events);
-            state.finalize_run(id, StopReason::TargetExited);
-        });
-
+        let (id, cancel) = self.begin_run(config)?;
+        self.spawn_ingest_drainer(id, cancel, events);
         Ok(id)
+    }
+
+    async fn attach_run(&self, run_id: RunId, events: vox::Rx<IngestEvent>) -> Result<(), String> {
+        let cancel = self.cancel_for_run(run_id)?;
+        self.spawn_ingest_drainer(run_id, cancel, events);
+        Ok(())
     }
 }
 
@@ -777,11 +893,7 @@ impl ServerState {
     /// Translate one ingest event into aggregator / binary-registry
     /// updates. Mirrors the in-process drainer in `stax-live::start`.
     fn apply_event(&self, run_id: RunId, event: IngestEvent) {
-        // Update run summary counters first (under run-lock). If
-        // this is a TargetAttached we may also need to spawn the
-        // shade — defer that to *after* the lock so the spawn
-        // syscall (fork+exec) doesn't block other lock takers.
-        let mut spawn_shade_for_pid: Option<u32> = None;
+        // Update run summary counters first (under run-lock).
         {
             let mut inner = self.inner.lock();
             let Some(active) = inner.active.as_mut() else {
@@ -795,15 +907,9 @@ impl ServerState {
                 IngestEvent::OffCpuInterval(_) => active.off_cpu_intervals += 1,
                 IngestEvent::TargetAttached { pid, .. } => {
                     active.target_pid = Some(*pid);
-                    if inner.shade_child.is_none() && inner.active_shade.is_none() {
-                        spawn_shade_for_pid = Some(*pid);
-                    }
                 }
                 _ => {}
             }
-        }
-        if let Some(pid) = spawn_shade_for_pid {
-            self.spawn_shade(run_id, pid);
         }
         match event {
             IngestEvent::Sample(s) => {

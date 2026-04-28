@@ -65,6 +65,18 @@ export interface WireWakeup {
   waker_kernel_stack: bigint[];
 }
 
+export interface WireProbeResult {
+  tid: number;
+  kperf_ts_ns: bigint;
+  probe_done_ns: bigint;
+  mach_pc: bigint;
+  mach_lr: bigint;
+  mach_fp: bigint;
+  mach_sp: bigint;
+  mach_walked: bigint[];
+  used_framehop: boolean;
+}
+
 export type IngestEvent =
   | { tag: 'TargetAttached'; pid: number; task_port: bigint }
   | { tag: 'Sample'; value: WireSampleEvent }
@@ -73,7 +85,8 @@ export type IngestEvent =
   | { tag: 'BinaryLoaded'; value: WireBinaryLoaded }
   | { tag: 'BinaryUnloaded'; path: string; base_avma: bigint }
   | { tag: 'ThreadName'; pid: number; tid: number; name: string }
-  | { tag: 'Wakeup'; value: WireWakeup };
+  | { tag: 'Wakeup'; value: WireWakeup }
+  | { tag: 'ProbeResult'; value: WireProbeResult };
 
 export interface RunId {
   0: bigint;
@@ -86,6 +99,12 @@ export type StartRunRequest = [
 ];
 export type StartRunResponse = { ok: true; value: RunId } | { ok: false; error: string };
 
+export type AttachRunRequest = [
+  RunId, // run_id
+  Rx<IngestEvent>, // events
+];
+export type AttachRunResponse = { ok: true; value: void } | { ok: false; error: string };
+
 // Caller interface for RunIngest
 export interface RunIngestCaller {
   /**
@@ -96,6 +115,13 @@ export interface RunIngestCaller {
    * before retrying.
    */
   startRun(config: RunConfig, events: Rx<IngestEvent>): Promise<{ ok: true; value: RunId } | { ok: false; error: string }>;
+  /**
+   * Attach an ingest channel to a run that was already created by
+   * `RunControl::start_attach` / `start_launch`. This is the
+   * server-orchestrated path: the server owns lifecycle and shade
+   * owns recording + ingest.
+   */
+  attachRun(runId: RunId, events: Rx<IngestEvent>): Promise<{ ok: true; value: void } | { ok: false; error: string }>;
 }
 
 // Client implementation for RunIngest
@@ -146,6 +172,45 @@ export class RunIngestClient implements RunIngestCaller {
       }
   }
 
+  /**
+   * Attach an ingest channel to a run that was already created by
+   * `RunControl::start_attach` / `start_launch`. This is the
+   * server-orchestrated path: the server owns lifecycle and shade
+   * owns recording + ingest.
+   */
+  async attachRun(runId: RunId, events: Rx<IngestEvent>): Promise<{ ok: true; value: void } | { ok: false; error: string }> {
+    const descriptor = runIngest_attachRun_method;
+    const sendSchemas = runIngest_descriptor.send_schemas;
+    const argTypeRefs = argElementRefsForMethod(descriptor.id, sendSchemas);
+    const prepareRetry = () => {
+      const channels = bindChannelsForTypeRefs(
+        argTypeRefs,
+        [runId, events],
+        this.caller.getChannelAllocator(),
+        this.caller.getChannelRegistry(),
+        sendSchemas.schemas,
+      );
+      const payload = new Uint8Array(0);
+      return { payload, channels };
+    };
+      try {
+        const value = await this.caller.call({
+          method: "RunIngest.attachRun",
+          args: { runId, events },
+          descriptor,
+          sendSchemas,
+          prepareRetry,
+          finalizeChannels: () => finalizeBoundChannelsForTypeRefs(argTypeRefs, [runId, events], sendSchemas.schemas),
+        });
+        return { ok: true, value } as { ok: true; value: void } | { ok: false; error: string };
+      } catch (e: any) {
+        if (e instanceof RpcError && e.isUserError()) {
+          return { ok: false, error: e.userError } as { ok: true; value: void } | { ok: false; error: string };
+        }
+        throw e;
+      }
+  }
+
 }
 
 /**
@@ -164,6 +229,7 @@ export async function connectRunIngest(
 // Handler interface for RunIngest
 export interface RunIngestHandler {
   startRun(config: RunConfig, events: Rx<IngestEvent>): Promise<{ ok: true; value: RunId } | { ok: false; error: string }> | { ok: true; value: RunId } | { ok: false; error: string };
+  attachRun(runId: RunId, events: Rx<IngestEvent>): Promise<{ ok: true; value: void } | { ok: false; error: string }> | { ok: true; value: void } | { ok: false; error: string };
 }
 
 // Dispatcher for RunIngest
@@ -182,6 +248,13 @@ export class RunIngestDispatcher implements Dispatcher {
     if (method.id === 0xd593e77239d1f5c4n) {
       try {
         const result = await this.handler.startRun(args[0] as RunConfig, args[1] as Rx<IngestEvent>);
+        if (result.ok) call.reply(result.value); else call.replyErr(result.error);
+      } catch (error) {
+        call.replyInternalError(error instanceof Error ? error.message : String(error));
+      }
+    } else if (method.id === 0xf3bae555f41cb749n) {
+      try {
+        const result = await this.handler.attachRun(args[0] as RunId, args[1] as Rx<IngestEvent>);
         if (result.ok) call.reply(result.value); else call.replyErr(result.error);
       } catch (error) {
         call.replyInternalError(error instanceof Error ? error.message : String(error));
@@ -211,13 +284,16 @@ export const runIngest_send_schemas: import("@bearcove/vox-core").ServiceSendSch
     [0x3f1203897762d214n, { id: 0x3f1203897762d214n, type_params: [], kind: { tag: 'struct', name: 'WireMachOSymbol', fields: [{ name: 'start_svma', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'end_svma', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'name', type_ref: { tag: 'concrete', type_id: 0x0a96b404b4d79d67n, args: [{ tag: 'concrete', type_id: 0x2c8d54f2314d0f20n, args: [] }] }, required: true }] } }],
     [0x2be434e8c106fbccn, { id: 0x2be434e8c106fbccn, type_params: [], kind: { tag: 'struct', name: 'WireBinaryLoaded', fields: [{ name: 'path', type_ref: { tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }, required: true }, { name: 'base_avma', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'vmsize', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'text_svma', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'arch', type_ref: { tag: 'concrete', type_id: 0xdcafd4de6b7969bbn, args: [{ tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }] }, required: true }, { name: 'is_executable', type_ref: { tag: 'concrete', type_id: 0x178367a87f66fb46n, args: [] }, required: true }, { name: 'symbols', type_ref: { tag: 'concrete', type_id: 0x0a96b404b4d79d67n, args: [{ tag: 'concrete', type_id: 0x3f1203897762d214n, args: [] }] }, required: true }, { name: 'text_bytes', type_ref: { tag: 'concrete', type_id: 0xdcafd4de6b7969bbn, args: [{ tag: 'concrete', type_id: 0x0a96b404b4d79d67n, args: [{ tag: 'concrete', type_id: 0x2c8d54f2314d0f20n, args: [] }] }] }, required: true }] } }],
     [0xae54aaf655597171n, { id: 0xae54aaf655597171n, type_params: [], kind: { tag: 'struct', name: 'WireWakeup', fields: [{ name: 'timestamp_ns', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'waker_tid', type_ref: { tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }, required: true }, { name: 'wakee_tid', type_ref: { tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }, required: true }, { name: 'waker_user_stack', type_ref: { tag: 'concrete', type_id: 0x0a96b404b4d79d67n, args: [{ tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }] }, required: true }, { name: 'waker_kernel_stack', type_ref: { tag: 'concrete', type_id: 0x0a96b404b4d79d67n, args: [{ tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }] }, required: true }] } }],
-    [0x65d5327a87a8c470n, { id: 0x65d5327a87a8c470n, type_params: [], kind: { tag: 'enum', name: 'IngestEvent', variants: [{ name: 'TargetAttached', index: 0, payload: { tag: 'struct', fields: [{ name: 'pid', type_ref: { tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }, required: true }, { name: 'task_port', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }] } }, { name: 'Sample', index: 1, payload: { tag: 'newtype', type_ref: { tag: 'concrete', type_id: 0x3cdfc405976d47d7n, args: [] } } }, { name: 'OnCpuInterval', index: 2, payload: { tag: 'newtype', type_ref: { tag: 'concrete', type_id: 0x64ceb9aa31fcf27bn, args: [] } } }, { name: 'OffCpuInterval', index: 3, payload: { tag: 'newtype', type_ref: { tag: 'concrete', type_id: 0x89d6e0da19957f03n, args: [] } } }, { name: 'BinaryLoaded', index: 4, payload: { tag: 'newtype', type_ref: { tag: 'concrete', type_id: 0x2be434e8c106fbccn, args: [] } } }, { name: 'BinaryUnloaded', index: 5, payload: { tag: 'struct', fields: [{ name: 'path', type_ref: { tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }, required: true }, { name: 'base_avma', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }] } }, { name: 'ThreadName', index: 6, payload: { tag: 'struct', fields: [{ name: 'pid', type_ref: { tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }, required: true }, { name: 'tid', type_ref: { tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }, required: true }, { name: 'name', type_ref: { tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }, required: true }] } }, { name: 'Wakeup', index: 7, payload: { tag: 'newtype', type_ref: { tag: 'concrete', type_id: 0xae54aaf655597171n, args: [] } } }] } }],
+    [0xc7a4f198550bd597n, { id: 0xc7a4f198550bd597n, type_params: [], kind: { tag: 'struct', name: 'WireProbeResult', fields: [{ name: 'tid', type_ref: { tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }, required: true }, { name: 'kperf_ts_ns', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'probe_done_ns', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'mach_pc', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'mach_lr', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'mach_fp', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'mach_sp', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'mach_walked', type_ref: { tag: 'concrete', type_id: 0x0a96b404b4d79d67n, args: [{ tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }] }, required: true }, { name: 'used_framehop', type_ref: { tag: 'concrete', type_id: 0x178367a87f66fb46n, args: [] }, required: true }] } }],
+    [0x8cc973f7042b181an, { id: 0x8cc973f7042b181an, type_params: [], kind: { tag: 'enum', name: 'IngestEvent', variants: [{ name: 'TargetAttached', index: 0, payload: { tag: 'struct', fields: [{ name: 'pid', type_ref: { tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }, required: true }, { name: 'task_port', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }] } }, { name: 'Sample', index: 1, payload: { tag: 'newtype', type_ref: { tag: 'concrete', type_id: 0x3cdfc405976d47d7n, args: [] } } }, { name: 'OnCpuInterval', index: 2, payload: { tag: 'newtype', type_ref: { tag: 'concrete', type_id: 0x64ceb9aa31fcf27bn, args: [] } } }, { name: 'OffCpuInterval', index: 3, payload: { tag: 'newtype', type_ref: { tag: 'concrete', type_id: 0x89d6e0da19957f03n, args: [] } } }, { name: 'BinaryLoaded', index: 4, payload: { tag: 'newtype', type_ref: { tag: 'concrete', type_id: 0x2be434e8c106fbccn, args: [] } } }, { name: 'BinaryUnloaded', index: 5, payload: { tag: 'struct', fields: [{ name: 'path', type_ref: { tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }, required: true }, { name: 'base_avma', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }] } }, { name: 'ThreadName', index: 6, payload: { tag: 'struct', fields: [{ name: 'pid', type_ref: { tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }, required: true }, { name: 'tid', type_ref: { tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }, required: true }, { name: 'name', type_ref: { tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }, required: true }] } }, { name: 'Wakeup', index: 7, payload: { tag: 'newtype', type_ref: { tag: 'concrete', type_id: 0xae54aaf655597171n, args: [] } } }, { name: 'ProbeResult', index: 8, payload: { tag: 'newtype', type_ref: { tag: 'concrete', type_id: 0xc7a4f198550bd597n, args: [] } } }] } }],
     [0x967a48ac345e2f5en, { id: 0x967a48ac345e2f5en, type_params: ['T'], kind: { tag: 'channel', direction: 'rx', element: { tag: 'var', name: 'T' } } }],
     [0xba0496aa8cee7a4cn, { id: 0xba0496aa8cee7a4cn, type_params: ['T0', 'T1'], kind: { tag: 'tuple', elements: [{ tag: 'var', name: 'T0' }, { tag: 'var', name: 'T1' }] } }],
     [0xde69b13dbe16811bn, { id: 0xde69b13dbe16811bn, type_params: [], kind: { tag: 'tuple', elements: [{ tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }] } }],
+    [0xbc5c33249a2dc720n, { id: 0xbc5c33249a2dc720n, type_params: [], kind: { tag: 'primitive', primitive_type: 'unit' } }],
   ]),
   methods: new Map<bigint, import("@bearcove/vox-core").MethodSendSchemas>([
-    [0xd593e77239d1f5c4n, { argsRootRef: { tag: 'concrete', type_id: 0xba0496aa8cee7a4cn, args: [{ tag: 'concrete', type_id: 0x9974527f7711610cn, args: [] }, { tag: 'concrete', type_id: 0x967a48ac345e2f5en, args: [{ tag: 'concrete', type_id: 0x65d5327a87a8c470n, args: [] }] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0xde69b13dbe16811bn, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }] }] } }],
+    [0xd593e77239d1f5c4n, { argsRootRef: { tag: 'concrete', type_id: 0xba0496aa8cee7a4cn, args: [{ tag: 'concrete', type_id: 0x9974527f7711610cn, args: [] }, { tag: 'concrete', type_id: 0x967a48ac345e2f5en, args: [{ tag: 'concrete', type_id: 0x8cc973f7042b181an, args: [] }] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0xde69b13dbe16811bn, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }] }] } }],
+    [0xf3bae555f41cb749n, { argsRootRef: { tag: 'concrete', type_id: 0xba0496aa8cee7a4cn, args: [{ tag: 'concrete', type_id: 0xde69b13dbe16811bn, args: [] }, { tag: 'concrete', type_id: 0x967a48ac345e2f5en, args: [{ tag: 'concrete', type_id: 0x8cc973f7042b181an, args: [] }] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0xbc5c33249a2dc720n, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }] }] } }],
   ]),
 };
 
@@ -227,12 +303,19 @@ export const runIngest_startRun_method: MethodDescriptor = {
   retry: { persist: false, idem: false },
 };
 
+export const runIngest_attachRun_method: MethodDescriptor = {
+  name: 'attachRun',
+  id: 0xf3bae555f41cb749n,
+  retry: { persist: false, idem: false },
+};
+
 // Service descriptor for runtime dispatch metadata
 export const runIngest_descriptor: ServiceDescriptor = {
   service_name: 'RunIngest',
   send_schemas: runIngest_send_schemas,
   methods: new Map<bigint, MethodDescriptor>([
     [runIngest_startRun_method.id, runIngest_startRun_method],
+    [runIngest_attachRun_method.id, runIngest_attachRun_method],
   ]),
 };
 

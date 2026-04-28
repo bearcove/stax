@@ -162,20 +162,19 @@ async fn run(cli: Cli) -> eyre::Result<()> {
     let server_socket = cli.server_socket.clone();
 
     match (server_socket.as_deref(), cli.run_id) {
-        // Legacy/server-spawned mode: server already owns the run
-        // ingest channel, so just register this shade and idle.
         (Some(socket), Some(run_id)) => {
-            let _server_client = register_with_server(socket, run_id, pid).await?;
-            if let Some(pre_resume) = attached.pre_resume {
-                pre_resume.resume()?;
-            }
-            park_until_signal().await;
+            run_recording(
+                cli,
+                socket,
+                stax_live_proto::RunId(run_id),
+                pid,
+                attached.pre_resume,
+                launched_pid,
+            )
+            .await?;
         }
-        // Recorder-host mode: this shade owns the staxd stream,
-        // parser pipeline, and RunIngest forwarding. This is the
-        // intended `stax record` path; the CLI only supervises us.
-        (Some(socket), None) => {
-            run_recording(cli, socket, pid, attached.pre_resume, launched_pid).await?;
+        (Some(_), None) => {
+            eyre::bail!("--server-socket requires --run-id; stax-server owns run allocation")
         }
         (None, _) => {
             tracing::warn!(
@@ -194,23 +193,14 @@ async fn run(cli: Cli) -> eyre::Result<()> {
 async fn run_recording(
     cli: Cli,
     server_socket: &str,
+    run_id: stax_live_proto::RunId,
     pid: u32,
     pre_resume: Option<PreResume>,
     launched_pid: Option<u32>,
 ) -> eyre::Result<()> {
-    let label = cli
-        .command
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "(attached)".to_owned());
-    let config = stax_live_proto::RunConfig {
-        label,
-        frequency_hz: cli.frequency,
-    };
-    let (run_id, ingest_sink, forwarder) =
-        stax_core::ingest_sink::connect_and_register(server_socket, config).await?;
-
     let _server_client = register_with_server(server_socket, run_id.0, pid).await?;
+    let (ingest_sink, forwarder) =
+        stax_core::ingest_sink::connect_to_existing_run(server_socket, run_id).await?;
 
     let sink = LiveOnlySink::new(Some(Box::new(ingest_sink)));
     sink.notify_target_attached(pid);

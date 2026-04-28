@@ -220,6 +220,67 @@ export interface PetSampleListUpdate {
   entries: PetSampleEntry[];
 }
 
+export interface ProbeDiffDepthCell {
+  depth: number;
+  matched: bigint;
+  total: bigint;
+}
+
+export interface ProbeDiffBucket {
+  upper_ns: bigint;
+  samples: bigint;
+  pc_match: bigint;
+}
+
+export interface ProbeDiffThread {
+  tid: number;
+  paired: bigint;
+  pc_match: bigint;
+  stitchable: bigint;
+  avg_common_suffix: number;
+  thread_name: string | null;
+}
+
+export interface ResolvedFrame {
+  address: bigint;
+  display: string;
+  binary: string;
+  function: string;
+}
+
+export interface ProbeDiffEntry {
+  tid: number;
+  timestamp_ns: bigint;
+  drift_ns: bigint;
+  kperf_stack: ResolvedFrame[];
+  kperf_kernel_stack: ResolvedFrame[];
+  probe_stack: ResolvedFrame[];
+  stitched_stack: ResolvedFrame[];
+  common_suffix: number;
+  pc_match: boolean;
+  stitchable: boolean;
+  used_framehop: boolean;
+}
+
+export interface ProbeDiffUpdate {
+  total_kperf_samples: bigint;
+  total_probes: bigint;
+  paired: bigint;
+  kperf_only: bigint;
+  probe_only: bigint;
+  probe_augmented_kperf: bigint;
+  probe_walked_deeper: bigint;
+  common_suffix_hist: bigint[];
+  depth_match: ProbeDiffDepthCell[];
+  drift_buckets: ProbeDiffBucket[];
+  pc_match: bigint;
+  stitchable: bigint;
+  framehop_used: bigint;
+  fp_walk_used: bigint;
+  threads: ProbeDiffThread[];
+  recent: ProbeDiffEntry[];
+}
+
 // Request/Response type aliases
 export type TopRequest = [
   number, // limit
@@ -294,6 +355,12 @@ export type SetPausedResponse = void;
 export type IsPausedRequest = [];
 export type IsPausedResponse = boolean;
 
+export type SubscribeProbeDiffRequest = [
+  number | null, // tid
+  Tx<ProbeDiffUpdate>, // output
+];
+export type SubscribeProbeDiffResponse = void;
+
 // Caller interface for Profiler
 export interface ProfilerCaller {
   /**
@@ -351,6 +418,16 @@ export interface ProfilerCaller {
    */
   setPaused(paused: boolean): Promise<void>;
   isPaused(): Promise<boolean>;
+  /**
+   * Stream periodic snapshots of the kperf-vs-probe diff:
+   * per-thread pairing of kperf PET samples with their
+   * race-against-return probe results, common-suffix histogram,
+   * drift histogram, and the most recent N entries with both
+   * stacks symbolicated through the live BinaryRegistry. Pass
+   * `tid = Some(_)` to scope to a single thread, or `None` for
+   * all threads.
+   */
+  subscribeProbeDiff(tid: number | null, output: Tx<ProbeDiffUpdate>): Promise<void>;
 }
 
 // Client implementation for Profiler
@@ -685,6 +762,41 @@ export class ProfilerClient implements ProfilerCaller {
       return value as boolean;
   }
 
+  /**
+   * Stream periodic snapshots of the kperf-vs-probe diff:
+   * per-thread pairing of kperf PET samples with their
+   * race-against-return probe results, common-suffix histogram,
+   * drift histogram, and the most recent N entries with both
+   * stacks symbolicated through the live BinaryRegistry. Pass
+   * `tid = Some(_)` to scope to a single thread, or `None` for
+   * all threads.
+   */
+  async subscribeProbeDiff(tid: number | null, output: Tx<ProbeDiffUpdate>): Promise<void> {
+    const descriptor = profiler_subscribeProbeDiff_method;
+    const sendSchemas = profiler_descriptor.send_schemas;
+    const argTypeRefs = argElementRefsForMethod(descriptor.id, sendSchemas);
+    const prepareRetry = () => {
+      const channels = bindChannelsForTypeRefs(
+        argTypeRefs,
+        [tid, output],
+        this.caller.getChannelAllocator(),
+        this.caller.getChannelRegistry(),
+        sendSchemas.schemas,
+      );
+      const payload = new Uint8Array(0);
+      return { payload, channels };
+    };
+      const value = await this.caller.call({
+        method: "Profiler.subscribeProbeDiff",
+        args: { tid, output },
+        descriptor,
+        sendSchemas,
+        prepareRetry,
+        finalizeChannels: () => finalizeBoundChannelsForTypeRefs(argTypeRefs, [tid, output], sendSchemas.schemas),
+      });
+      return value as void;
+  }
+
 }
 
 /**
@@ -715,6 +827,7 @@ export interface ProfilerHandler {
   subscribePetSamples(flameKey: string, params: ViewParams, output: Tx<PetSampleListUpdate>): Promise<void> | void;
   setPaused(paused: boolean): Promise<void> | void;
   isPaused(): Promise<boolean> | boolean;
+  subscribeProbeDiff(tid: number | null, output: Tx<ProbeDiffUpdate>): Promise<void> | void;
 }
 
 // Dispatcher for Profiler
@@ -821,6 +934,13 @@ export class ProfilerDispatcher implements Dispatcher {
       } catch (error) {
         call.replyInternalError(error instanceof Error ? error.message : String(error));
       }
+    } else if (method.id === 0x45bb91e63c98208an) {
+      try {
+        const result = await this.handler.subscribeProbeDiff(args[0] as number | null, args[1] as Tx<ProbeDiffUpdate>);
+        call.reply(result);
+      } catch (error) {
+        call.replyInternalError(error instanceof Error ? error.message : String(error));
+      }
     }
   }
 }
@@ -869,6 +989,14 @@ export const profiler_send_schemas: import("@bearcove/vox-core").ServiceSendSche
     [0xe0dc192175c3c123n, { id: 0xe0dc192175c3c123n, type_params: [], kind: { tag: 'struct', name: 'IntervalListUpdate', fields: [{ name: 'strings', type_ref: { tag: 'concrete', type_id: 0x0a96b404b4d79d67n, args: [{ tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }] }, required: true }, { name: 'total_intervals', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'total_duration_ns', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'by_reason', type_ref: { tag: 'concrete', type_id: 0xa6544bf68ad6b55cn, args: [] }, required: true }, { name: 'entries', type_ref: { tag: 'concrete', type_id: 0x0a96b404b4d79d67n, args: [{ tag: 'concrete', type_id: 0x697260434424b795n, args: [] }] }, required: true }] } }],
     [0x8ff4ce59f1e94d72n, { id: 0x8ff4ce59f1e94d72n, type_params: [], kind: { tag: 'struct', name: 'PetSampleEntry', fields: [{ name: 'tid', type_ref: { tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }, required: true }, { name: 'timestamp_ns', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'cycles', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'instructions', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'l1d_misses', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'branch_mispreds', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }] } }],
     [0xd6af01229bc47f82n, { id: 0xd6af01229bc47f82n, type_params: [], kind: { tag: 'struct', name: 'PetSampleListUpdate', fields: [{ name: 'total_samples', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'entries', type_ref: { tag: 'concrete', type_id: 0x0a96b404b4d79d67n, args: [{ tag: 'concrete', type_id: 0x8ff4ce59f1e94d72n, args: [] }] }, required: true }] } }],
+    [0x28630521853183b3n, { id: 0x28630521853183b3n, type_params: [], kind: { tag: 'struct', name: 'ProbeDiffDepthCell', fields: [{ name: 'depth', type_ref: { tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }, required: true }, { name: 'matched', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'total', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }] } }],
+    [0x605b8a9435bfeb8en, { id: 0x605b8a9435bfeb8en, type_params: [], kind: { tag: 'struct', name: 'ProbeDiffBucket', fields: [{ name: 'upper_ns', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'samples', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'pc_match', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }] } }],
+    [0x8e02f623d1b2310cn, { id: 0x8e02f623d1b2310cn, type_params: [], kind: { tag: 'primitive', primitive_type: 'f32' } }],
+    [0xdb973fadc1801ce2n, { id: 0xdb973fadc1801ce2n, type_params: [], kind: { tag: 'struct', name: 'ProbeDiffThread', fields: [{ name: 'tid', type_ref: { tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }, required: true }, { name: 'paired', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'pc_match', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'stitchable', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'avg_common_suffix', type_ref: { tag: 'concrete', type_id: 0x8e02f623d1b2310cn, args: [] }, required: true }, { name: 'thread_name', type_ref: { tag: 'concrete', type_id: 0xdcafd4de6b7969bbn, args: [{ tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }] }, required: true }] } }],
+    [0xc6eb8c46f1e17fban, { id: 0xc6eb8c46f1e17fban, type_params: [], kind: { tag: 'primitive', primitive_type: 'i64' } }],
+    [0xa24a048785643f31n, { id: 0xa24a048785643f31n, type_params: [], kind: { tag: 'struct', name: 'ResolvedFrame', fields: [{ name: 'address', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'display', type_ref: { tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }, required: true }, { name: 'binary', type_ref: { tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }, required: true }, { name: 'function', type_ref: { tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }, required: true }] } }],
+    [0xa1148fc6af151d83n, { id: 0xa1148fc6af151d83n, type_params: [], kind: { tag: 'struct', name: 'ProbeDiffEntry', fields: [{ name: 'tid', type_ref: { tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }, required: true }, { name: 'timestamp_ns', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'drift_ns', type_ref: { tag: 'concrete', type_id: 0xc6eb8c46f1e17fban, args: [] }, required: true }, { name: 'kperf_stack', type_ref: { tag: 'concrete', type_id: 0x0a96b404b4d79d67n, args: [{ tag: 'concrete', type_id: 0xa24a048785643f31n, args: [] }] }, required: true }, { name: 'kperf_kernel_stack', type_ref: { tag: 'concrete', type_id: 0x0a96b404b4d79d67n, args: [{ tag: 'concrete', type_id: 0xa24a048785643f31n, args: [] }] }, required: true }, { name: 'probe_stack', type_ref: { tag: 'concrete', type_id: 0x0a96b404b4d79d67n, args: [{ tag: 'concrete', type_id: 0xa24a048785643f31n, args: [] }] }, required: true }, { name: 'stitched_stack', type_ref: { tag: 'concrete', type_id: 0x0a96b404b4d79d67n, args: [{ tag: 'concrete', type_id: 0xa24a048785643f31n, args: [] }] }, required: true }, { name: 'common_suffix', type_ref: { tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }, required: true }, { name: 'pc_match', type_ref: { tag: 'concrete', type_id: 0x178367a87f66fb46n, args: [] }, required: true }, { name: 'stitchable', type_ref: { tag: 'concrete', type_id: 0x178367a87f66fb46n, args: [] }, required: true }, { name: 'used_framehop', type_ref: { tag: 'concrete', type_id: 0x178367a87f66fb46n, args: [] }, required: true }] } }],
+    [0xb4a957abbf408621n, { id: 0xb4a957abbf408621n, type_params: [], kind: { tag: 'struct', name: 'ProbeDiffUpdate', fields: [{ name: 'total_kperf_samples', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'total_probes', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'paired', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'kperf_only', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'probe_only', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'probe_augmented_kperf', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'probe_walked_deeper', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'common_suffix_hist', type_ref: { tag: 'concrete', type_id: 0x0a96b404b4d79d67n, args: [{ tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }] }, required: true }, { name: 'depth_match', type_ref: { tag: 'concrete', type_id: 0x0a96b404b4d79d67n, args: [{ tag: 'concrete', type_id: 0x28630521853183b3n, args: [] }] }, required: true }, { name: 'drift_buckets', type_ref: { tag: 'concrete', type_id: 0x0a96b404b4d79d67n, args: [{ tag: 'concrete', type_id: 0x605b8a9435bfeb8en, args: [] }] }, required: true }, { name: 'pc_match', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'stitchable', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'framehop_used', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'fp_walk_used', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'threads', type_ref: { tag: 'concrete', type_id: 0x0a96b404b4d79d67n, args: [{ tag: 'concrete', type_id: 0xdb973fadc1801ce2n, args: [] }] }, required: true }, { name: 'recent', type_ref: { tag: 'concrete', type_id: 0x0a96b404b4d79d67n, args: [{ tag: 'concrete', type_id: 0xa1148fc6af151d83n, args: [] }] }, required: true }] } }],
   ]),
   methods: new Map<bigint, import("@bearcove/vox-core").MethodSendSchemas>([
     [0x4eb5e594c5e49e21n, { argsRootRef: { tag: 'concrete', type_id: 0xaa510ab07d34f141n, args: [{ tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }, { tag: 'concrete', type_id: 0xa9bc52fb11aa78c0n, args: [] }, { tag: 'concrete', type_id: 0x6f5fed68b5ace623n, args: [] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0x0a96b404b4d79d67n, args: [{ tag: 'concrete', type_id: 0x5973fe57ec11dd2fn, args: [] }] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
@@ -884,6 +1012,7 @@ export const profiler_send_schemas: import("@bearcove/vox-core").ServiceSendSche
     [0xca1b65cabd8a8f38n, { argsRootRef: { tag: 'concrete', type_id: 0xaa510ab07d34f141n, args: [{ tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }, { tag: 'concrete', type_id: 0x6f5fed68b5ace623n, args: [] }, { tag: 'concrete', type_id: 0xc886545a493d06ebn, args: [{ tag: 'concrete', type_id: 0xd6af01229bc47f82n, args: [] }] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0xbc5c33249a2dc720n, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
     [0x0ffcbbadd058c8f7n, { argsRootRef: { tag: 'concrete', type_id: 0x6847ab90feda71c1n, args: [{ tag: 'concrete', type_id: 0x178367a87f66fb46n, args: [] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0xbc5c33249a2dc720n, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
     [0xfbcae644722d364en, { argsRootRef: { tag: 'concrete', type_id: 0xbc5c33249a2dc720n, args: [] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0x178367a87f66fb46n, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
+    [0x45bb91e63c98208an, { argsRootRef: { tag: 'concrete', type_id: 0xba0496aa8cee7a4cn, args: [{ tag: 'concrete', type_id: 0xdcafd4de6b7969bbn, args: [{ tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }] }, { tag: 'concrete', type_id: 0xc886545a493d06ebn, args: [{ tag: 'concrete', type_id: 0xb4a957abbf408621n, args: [] }] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0xbc5c33249a2dc720n, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
   ]),
 };
 
@@ -965,6 +1094,12 @@ export const profiler_isPaused_method: MethodDescriptor = {
   retry: { persist: false, idem: false },
 };
 
+export const profiler_subscribeProbeDiff_method: MethodDescriptor = {
+  name: 'subscribeProbeDiff',
+  id: 0x45bb91e63c98208an,
+  retry: { persist: false, idem: false },
+};
+
 // Service descriptor for runtime dispatch metadata
 export const profiler_descriptor: ServiceDescriptor = {
   service_name: 'Profiler',
@@ -983,6 +1118,7 @@ export const profiler_descriptor: ServiceDescriptor = {
     [profiler_subscribePetSamples_method.id, profiler_subscribePetSamples_method],
     [profiler_setPaused_method.id, profiler_setPaused_method],
     [profiler_isPaused_method.id, profiler_isPaused_method],
+    [profiler_subscribeProbeDiff_method.id, profiler_subscribeProbeDiff_method],
   ]),
 };
 

@@ -235,3 +235,64 @@ pub async fn connect_and_register(
 
     Ok((run_id, IngestSink::new(sync_tx, stop_requested), forwarder))
 }
+
+/// Connect an ingest channel to a run that stax-server already
+/// created via RunControl. Used by stax-shade in the server-owned
+/// lifecycle path.
+pub async fn connect_to_existing_run(
+    server_socket: &str,
+    run_id: stax_live_proto::RunId,
+) -> eyre::Result<(IngestSink, tokio::task::JoinHandle<()>)> {
+    let url = format!("local://{server_socket}");
+    let client: RunIngestClient = vox::connect(&url).await?;
+
+    let (vox_tx, vox_rx) = vox::channel::<IngestEvent>();
+    match client.attach_run(run_id, vox_rx).await {
+        Ok(()) => {}
+        Err(vox::VoxError::User(msg)) => {
+            return Err(eyre::eyre!("server rejected attach_run: {msg}"));
+        }
+        Err(e) => return Err(eyre::eyre!("vox attach_run failed: {e:?}")),
+    }
+
+    let (sync_tx, mut sync_rx) = mpsc::unbounded_channel::<IngestEvent>();
+    let stop_requested = Arc::new(AtomicBool::new(false));
+    let stop_for_forwarder = stop_requested.clone();
+    let forwarder = tokio::spawn(async move {
+        let mut forwarded: u64 = 0;
+        let mut last_log = std::time::Instant::now();
+        while let Some(event) = sync_rx.recv().await {
+            match vox_tx.send(event).await {
+                Ok(()) => {
+                    forwarded = forwarded.saturating_add(1);
+                    if last_log.elapsed() >= std::time::Duration::from_secs(2) {
+                        log::info!(
+                            "ingest_sink: forwarder progress: forwarded={} queued={}",
+                            forwarded,
+                            sync_rx.len()
+                        );
+                        last_log = std::time::Instant::now();
+                    }
+                }
+                Err(e) => {
+                    log::warn!(
+                        "ingest_sink: vox send failed (server dropped Rx?) after forwarded={} queued={} err={:?}",
+                        forwarded,
+                        sync_rx.len(),
+                        e
+                    );
+                    stop_for_forwarder.store(true, Ordering::Relaxed);
+                    break;
+                }
+            }
+        }
+        log::info!(
+            "ingest_sink: forwarder exiting (sync_rx closed) after forwarded={}; flushing vox",
+            forwarded
+        );
+        let _ = vox_tx.close(Default::default()).await;
+        stop_for_forwarder.store(true, Ordering::Relaxed);
+    });
+
+    Ok((IngestSink::new(sync_tx, stop_requested), forwarder))
+}

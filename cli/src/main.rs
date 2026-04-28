@@ -1,13 +1,13 @@
 use std::env;
 use std::error::Error;
 use std::path::PathBuf;
-use std::process::{Command as ProcessCommand, exit};
+use std::process::exit;
 
 use figue as args;
 use stax_core::{
     args::{
-        AnnotateArgs, Cli, Command, FlameArgs, ProbeDiffArgs, RecordArgs, TargetProcess,
-        ThreadsArgs, TopArgs, WaitArgs,
+        AnnotateArgs, Cli, Command, FlameArgs, ProbeDiffArgs, RecordArgs, ThreadsArgs, TopArgs,
+        WaitArgs,
     },
     cmd_setup_mac,
 };
@@ -74,46 +74,7 @@ fn block_on_async<F: std::future::Future<Output = Result<(), Box<dyn Error>>>>(
 }
 
 fn run_record(args: RecordArgs) -> Result<(), Box<dyn Error>> {
-    // Recording is meaningless without a server to forward events
-    // to — refuse rather than silently drop everything.
-    let socket = stax_server_socket().ok_or_else(|| {
-        "stax-server isn't running. Start it with `stax-server` (or set \
-         STAX_SERVER_SOCKET if you've moved the socket)."
-            .to_owned()
-    })?;
-    let shade = resolve_shade_path().ok_or_else(|| {
-        "stax-shade not found. Run `cargo xtask install` or set STAX_SHADE_BIN.".to_owned()
-    })?;
-
-    let target = args.target()?;
-    let mut cmd = ProcessCommand::new(&shade);
-    match target {
-        TargetProcess::ByPid(pid) => {
-            cmd.arg("--attach").arg(pid.to_string());
-        }
-        TargetProcess::Launch {
-            program,
-            args: prog_args,
-        } => {
-            cmd.arg("--launch").arg("--").arg(program).args(prog_args);
-        }
-    }
-    cmd.arg("--server-socket")
-        .arg(&socket)
-        .arg("--daemon-socket")
-        .arg(&args.daemon_socket)
-        .arg("--frequency")
-        .arg(args.frequency.to_string());
-    if let Some(limit) = args.time_limit {
-        cmd.arg("--time-limit").arg(limit.to_string());
-    }
-
-    eprintln!("stax: recording via stax-shade at {}", shade.display());
-    let status = cmd.status()?;
-    if !status.success() {
-        return Err(format!("stax-shade exited with {status}").into());
-    }
-    Ok(())
+    block_on_async(async { run_record_async(args).await })
 }
 
 fn stax_server_socket() -> Option<PathBuf> {
@@ -132,35 +93,67 @@ fn stax_server_socket() -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
-fn resolve_shade_path() -> Option<PathBuf> {
-    if let Ok(p) = env::var("STAX_SHADE_BIN") {
-        let p = PathBuf::from(p);
-        if p.exists() {
-            return Some(p);
-        }
-    }
-    if let Ok(exe) = env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        let p = dir.join("stax-shade");
-        if p.exists() {
-            return Some(p);
-        }
-    }
-    if let Ok(home) = env::var("HOME") {
-        let p = PathBuf::from(home)
-            .join(".cargo")
-            .join("bin")
-            .join("stax-shade");
-        if p.exists() {
-            return Some(p);
-        }
-    }
-    let p = PathBuf::from("/usr/local/bin/stax-shade");
-    p.exists().then_some(p)
-}
-
 // --- agent-facing subcommands ------------------------------------------
+
+async fn run_record_async(args: RecordArgs) -> Result<(), Box<dyn Error>> {
+    let url = require_server_socket()?;
+    let client: RunControlClient = vox::connect(&url).await?;
+    let target = args.target()?;
+    let label = args
+        .command
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "(attached)".to_owned());
+    let config = stax_live_proto::RunConfig {
+        label,
+        frequency_hz: args.frequency,
+    };
+
+    let run_id = match target {
+        stax_core::args::TargetProcess::ByPid(pid) => client
+            .start_attach(pid, config, args.daemon_socket.clone(), args.time_limit)
+            .await
+            .map_err(|e| format!("{e:?}"))?,
+        stax_core::args::TargetProcess::Launch {
+            program,
+            args: rest,
+        } => {
+            let mut command = Vec::with_capacity(1 + rest.len());
+            command.push(program);
+            command.extend(rest);
+            client
+                .start_launch(command, config, args.daemon_socket.clone(), args.time_limit)
+                .await
+                .map_err(|e| format!("{e:?}"))?
+        }
+    };
+    eprintln!("stax: started run {}", run_id.0);
+
+    let wait_client = client.clone();
+    tokio::select! {
+        outcome = wait_client.wait_active(WaitCondition::UntilStopped, None) => {
+            match outcome.map_err(|e| format!("{e:?}"))? {
+                WaitOutcome::Stopped { summary } => {
+                    println!("stopped:");
+                    print_run_one_line(&summary);
+                }
+                WaitOutcome::NoActiveRun => {
+                    eprintln!("stax: run ended before wait attached");
+                }
+                other => {
+                    eprintln!("stax: unexpected wait outcome: {other:?}");
+                }
+            }
+        }
+        signal = tokio::signal::ctrl_c() => {
+            signal.map_err(|e| format!("waiting for Ctrl-C: {e}"))?;
+            let summary = client.stop_active().await.map_err(|e| format!("{e:?}"))?;
+            println!("stopped:");
+            print_run_one_line(&summary);
+        }
+    }
+    Ok(())
+}
 
 fn require_server_socket() -> Result<String, Box<dyn Error>> {
     let socket = stax_server_socket().ok_or_else(|| {

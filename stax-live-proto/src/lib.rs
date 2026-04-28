@@ -973,6 +973,12 @@ pub trait RunIngest {
         config: RunConfig,
         events: vox::Rx<IngestEvent>,
     ) -> Result<RunId, String>;
+
+    /// Attach an ingest channel to a run that was already created by
+    /// `RunControl::start_attach` / `start_launch`. This is the
+    /// server-orchestrated path: the server owns lifecycle and shade
+    /// owns recording + ingest.
+    async fn attach_run(&self, run_id: RunId, events: vox::Rx<IngestEvent>) -> Result<(), String>;
 }
 
 /// Agent-facing control plane. One service instance per server; runs
@@ -990,6 +996,24 @@ pub trait RunControl {
     /// in-memory archive). Bounded by the server's eviction policy
     /// (in-memory only for now; on-disk persistence is a follow-up).
     async fn list_runs(&self) -> Vec<RunSummary>;
+
+    /// Start a recording by attaching stax-shade to an existing pid.
+    async fn start_attach(
+        &self,
+        pid: u32,
+        config: RunConfig,
+        daemon_socket: String,
+        time_limit_secs: Option<u64>,
+    ) -> Result<RunId, String>;
+
+    /// Start a recording by launching a new process under stax-shade.
+    async fn start_launch(
+        &self,
+        command: Vec<String>,
+        config: RunConfig,
+        daemon_socket: String,
+        time_limit_secs: Option<u64>,
+    ) -> Result<RunId, String>;
 
     /// Block until `condition` fires, the active run stops, or
     /// `timeout_ms` elapses (whichever comes first). Returns
