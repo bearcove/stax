@@ -24,6 +24,7 @@ use stax_live_proto::{
     RunIngest, RunIngestDispatcher, RunState, RunSummary, ServerStatus, StopReason,
     WaitCondition, WaitOutcome,
 };
+use vox::VoxListener;
 use stax_shade_proto::{
     ShadeAck, ShadeInfo, ShadeRegistry, ShadeRegistryDispatcher,
 };
@@ -53,9 +54,11 @@ async fn main() -> eyre::Result<()> {
 
     let ws_addr = std::env::var("STAX_SERVER_WS_BIND")
         .unwrap_or_else(|_| DEFAULT_WS_BIND.to_owned());
-    let ws_listener = vox::WsListener::bind(&ws_addr).await?;
+    let mut ws_listener = vox::WsListener::bind(&ws_addr).await?;
     let ws_local = ws_listener.local_addr()?;
     tracing::info!("stax-server listening on ws://{ws_local}");
+
+    server.spawn_shade_liveness_watchdog();
 
     let local_loop = tokio::spawn({
         let server = server.clone();
@@ -75,8 +78,15 @@ async fn main() -> eyre::Result<()> {
     let ws_loop = tokio::spawn({
         let server = server.clone();
         async move {
-            if let Err(e) = vox::serve_listener(ws_listener, factory(server)).await {
-                tracing::error!("stax-server: ws serve exited: {e}");
+            loop {
+                let link = match ws_listener.accept().await {
+                    Ok(l) => l,
+                    Err(e) => {
+                        tracing::warn!("stax-server: ws accept failed: {e}");
+                        continue;
+                    }
+                };
+                spawn_session_ws(server.clone(), link);
             }
         }
     });
@@ -91,8 +101,18 @@ async fn main() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Build the multi-service routing factory shared by both transports.
-fn factory(server: ServerState) -> impl vox::ConnectionAcceptor + 'static {
+/// Per-session bookkeeping. Currently just tracks the shade-pid (if
+/// any) registered through this session, so the post-`closed()`
+/// cleanup can call `shade_session_closed`. Shared between the
+/// acceptor closure and the cleanup tail.
+type ShadeSlot = Arc<parking_lot::Mutex<Option<u32>>>;
+
+/// Build a fresh routing factory for one session. Per-session so
+/// concurrent sessions get independent `ShadeSlot`s.
+fn build_factory(
+    server: ServerState,
+    shade_slot: ShadeSlot,
+) -> impl vox::ConnectionAcceptor + 'static {
     vox::acceptor_fn(move |request: &vox::ConnectionRequest,
                             connection: vox::PendingConnection|
                             -> Result<(), vox::Metadata<'static>> {
@@ -110,7 +130,10 @@ fn factory(server: ServerState) -> impl vox::ConnectionAcceptor + 'static {
                 Ok(())
             }
             "ShadeRegistry" => {
-                connection.handle_with(ShadeRegistryDispatcher::new(server.clone()));
+                connection.handle_with(ShadeRegistryDispatcher::new(ShadeRegistryImpl {
+                    server: server.clone(),
+                    shade_slot: shade_slot.clone(),
+                }));
                 Ok(())
             }
             other => {
@@ -126,23 +149,59 @@ fn factory(server: ServerState) -> impl vox::ConnectionAcceptor + 'static {
 /// session in recovery mode and the per-channel send would silently
 /// succeed into a void).
 fn spawn_session_local(server: ServerState, link: vox::transport::local::LocalLink) {
+    let shade_slot: ShadeSlot = Arc::new(parking_lot::Mutex::new(None));
+    let factory = build_factory(server.clone(), shade_slot.clone());
     tokio::spawn(async move {
         let result = vox::acceptor_on(link)
             .non_resumable()
-            // Same shape as staxd's keepalive — see the longer
-            // comment there for why the timeout is generous.
             .keepalive(vox::SessionKeepaliveConfig {
                 ping_interval: std::time::Duration::from_secs(5),
                 pong_timeout: std::time::Duration::from_secs(30),
             })
-            .on_connection(factory(server))
+            .on_connection(factory)
             .establish::<vox::NoopClient>()
             .await;
         match result {
             Ok(client) => client.caller.closed().await,
             Err(e) => tracing::warn!("stax-server: local session establish failed: {e:?}"),
         }
+        cleanup_session_shade(&server, &shade_slot);
     });
+}
+
+/// WS-side accept path. Browsers don't usually deliver the
+/// non-resumable + keepalive guarantees the local-socket peers
+/// (recorder, shade) need, so the WS side stays plain
+/// resumable-by-default; we still want the per-session slot so a
+/// browser-resident shade (future debugging tool) would have a
+/// cleanup path too.
+fn spawn_session_ws(
+    server: ServerState,
+    link: <vox::WsListener as vox::VoxListener>::Link,
+) {
+    let shade_slot: ShadeSlot = Arc::new(parking_lot::Mutex::new(None));
+    let factory = build_factory(server.clone(), shade_slot.clone());
+    tokio::spawn(async move {
+        let result = vox::acceptor_on(link)
+            .on_connection(factory)
+            .establish::<vox::NoopClient>()
+            .await;
+        match result {
+            Ok(client) => client.caller.closed().await,
+            Err(e) => tracing::warn!("stax-server: ws session establish failed: {e:?}"),
+        }
+        cleanup_session_shade(&server, &shade_slot);
+    });
+}
+
+/// If this session had a shade registered through it, tell the
+/// server so it can clear `active_shade`. Tolerates the slot being
+/// empty (most sessions don't have a shade — e.g. `stax top` from
+/// a CLI agent).
+fn cleanup_session_shade(server: &ServerState, slot: &ShadeSlot) {
+    if let Some(pid) = slot.lock().take() {
+        server.shade_session_closed(pid);
+    }
 }
 
 fn resolve_socket_path() -> PathBuf {
@@ -247,6 +306,113 @@ impl ServerState {
             paused: self.paused.clone(),
         }
     }
+
+    /// Validate + record a shade registration. Used by
+    /// `ShadeRegistryImpl` (per-session wrapper) so the per-session
+    /// `ShadeSlot` can be populated atomically with the
+    /// server-side `active_shade`.
+    fn try_register_shade(&self, info: ShadeInfo) -> ShadeAck {
+        let mut inner = self.inner.lock();
+        let Some(active) = inner.active.as_ref() else {
+            return ShadeAck {
+                accepted: false,
+                reason: Some("no active run".to_owned()),
+            };
+        };
+        if active.id.0 != info.run_id {
+            return ShadeAck {
+                accepted: false,
+                reason: Some(format!(
+                    "run id mismatch: shade for {}, server's active run is {}",
+                    info.run_id, active.id.0
+                )),
+            };
+        }
+        if inner.active_shade.is_some() {
+            return ShadeAck {
+                accepted: false,
+                reason: Some("a shade is already registered for this run".to_owned()),
+            };
+        }
+        tracing::info!(
+            run_id = info.run_id,
+            target_pid = info.target_pid,
+            shade_pid = info.shade_pid,
+            "shade registered"
+        );
+        inner.active_shade = Some(info);
+        ShadeAck {
+            accepted: true,
+            reason: None,
+        }
+    }
+
+    /// Called by the accept-loop after a session closes, with the
+    /// `shade_pid` (if any) that registered through this session.
+    /// Clears `active_shade` if it still matches — the run may
+    /// have stopped between registration and close, in which case
+    /// `stop_active` already cleared it and we no-op.
+    fn shade_session_closed(&self, shade_pid: u32) {
+        let mut inner = self.inner.lock();
+        if let Some(info) = inner.active_shade.as_ref()
+            && info.shade_pid == shade_pid
+        {
+            tracing::info!(
+                shade_pid,
+                "shade session closed; clearing active_shade"
+            );
+            inner.active_shade = None;
+        }
+    }
+
+    /// Belt-and-suspenders for the case where vox's session
+    /// keepalive fails to surface a dead shade in a timely way:
+    /// every few seconds, if there's an `active_shade`, check
+    /// whether its pid is still alive via `kill(pid, 0)`. ESRCH
+    /// → process is gone → clear. Cheap (one syscall per tick)
+    /// and correctness-critical: the alternative is a permanently
+    /// stuck `active_shade` slot blocking new attachments.
+    fn spawn_shade_liveness_watchdog(&self) {
+        let state = self.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                tick.tick().await;
+                let pid = match state.inner.lock().active_shade.as_ref() {
+                    Some(info) => info.shade_pid,
+                    None => continue,
+                };
+                if !pid_is_alive(pid) {
+                    let mut inner = state.inner.lock();
+                    if let Some(info) = inner.active_shade.as_ref()
+                        && info.shade_pid == pid
+                    {
+                        tracing::warn!(
+                            shade_pid = pid,
+                            "shade pid no longer alive; clearing active_shade"
+                        );
+                        inner.active_shade = None;
+                    }
+                }
+            }
+        });
+    }
+}
+
+/// Liveness check via `kill(pid, 0)`. Returns true while the
+/// kernel still has a process table entry — a zombie counts as
+/// alive (`kill(0)` returns 0 / `EPERM` for those), but a fully
+/// reaped pid returns `ESRCH`. That's exactly what we want for
+/// "is the shade process gone?"
+fn pid_is_alive(pid: u32) -> bool {
+    // SAFETY: kill with sig=0 sends no signal; safe for any pid.
+    let r = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if r == 0 {
+        return true;
+    }
+    // SAFETY: errno_location is FFI-safe.
+    let errno = unsafe { *libc::__error() };
+    errno != libc::ESRCH
 }
 
 /// Fan tracing out to two sinks:
@@ -357,14 +523,24 @@ impl RunControl for ServerState {
         // something to print without waiting on the recorder.
         let (snapshot, cancel) = {
             let mut inner = self.inner.lock();
-            let summary = match inner.active.as_mut() {
-                Some(s) => s,
+            let snapshot = match inner.active.as_mut() {
+                Some(summary) => {
+                    summary.state = RunState::Stopped;
+                    summary.stop_reason = Some(StopReason::UserStop);
+                    summary.stopped_at_unix_ns = Some(now_unix_ns());
+                    summary.clone()
+                }
                 None => return Err("no active run".to_owned()),
             };
-            summary.state = RunState::Stopped;
-            summary.stop_reason = Some(StopReason::UserStop);
-            summary.stopped_at_unix_ns = Some(now_unix_ns());
-            (summary.clone(), inner.cancel.take())
+            // The shade has nothing left to attach to; release
+            // the slot so a follow-up run on the same server can
+            // start a fresh shade. The shade process itself is
+            // tolerated until its session-close cleanup fires (or
+            // the liveness watchdog notices it died). It would be
+            // tidier to actively detach via the Shade trait once
+            // we have a shutdown method on it; for now best-effort.
+            inner.active_shade = None;
+            (snapshot, inner.cancel.take())
         };
         if let Some(cancel) = cancel {
             cancel.notify_waiters();
@@ -373,44 +549,23 @@ impl RunControl for ServerState {
     }
 }
 
-impl ShadeRegistry for ServerState {
+/// Per-session `ShadeRegistry` impl. Captures the shade-pid into
+/// the per-session `ShadeSlot` on successful registration so the
+/// accept-loop's post-`closed()` cleanup knows which shade this
+/// session owned.
+#[derive(Clone)]
+struct ShadeRegistryImpl {
+    server: ServerState,
+    shade_slot: ShadeSlot,
+}
+
+impl ShadeRegistry for ShadeRegistryImpl {
     async fn register_shade(&self, info: ShadeInfo) -> Result<ShadeAck, String> {
-        let mut inner = self.inner.lock();
-        let active = match inner.active.as_ref() {
-            Some(a) => a,
-            None => {
-                return Ok(ShadeAck {
-                    accepted: false,
-                    reason: Some("no active run".to_owned()),
-                });
-            }
-        };
-        if active.id.0 != info.run_id {
-            return Ok(ShadeAck {
-                accepted: false,
-                reason: Some(format!(
-                    "run id mismatch: shade for {}, server's active run is {}",
-                    info.run_id, active.id.0
-                )),
-            });
+        let ack = self.server.try_register_shade(info.clone());
+        if ack.accepted {
+            *self.shade_slot.lock() = Some(info.shade_pid);
         }
-        if inner.active_shade.is_some() {
-            return Ok(ShadeAck {
-                accepted: false,
-                reason: Some("a shade is already registered for this run".to_owned()),
-            });
-        }
-        tracing::info!(
-            run_id = info.run_id,
-            target_pid = info.target_pid,
-            shade_pid = info.shade_pid,
-            "shade registered"
-        );
-        inner.active_shade = Some(info);
-        Ok(ShadeAck {
-            accepted: true,
-            reason: None,
-        })
+        Ok(ack)
     }
 }
 
@@ -600,6 +755,10 @@ impl ServerState {
             summary.stopped_at_unix_ns = Some(now_unix_ns());
         }
         inner.cancel = None;
+        // Run is over → the shade slot is no longer claimable.
+        // Same caveat as `stop_active`: the shade process itself
+        // is left to its own session-close cleanup.
+        inner.active_shade = None;
         tracing::info!(
             "stax-server: run {} stopped after {} samples / {} intervals",
             summary.id.0,
