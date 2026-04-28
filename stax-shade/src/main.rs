@@ -92,6 +92,21 @@ struct Cli {
     /// Program + arguments for `--launch`.
     #[facet(args::positional, default)]
     command: Vec<String>,
+
+    /// Sampling rate for the framehop user-stack walker, in Hz.
+    /// Set to 0 to disable framehop-side sampling entirely (useful
+    /// when smoke-testing kperf integration without the walker).
+    #[facet(args::named, default = default_walker_hz())]
+    walker_hz: u32,
+}
+
+fn default_walker_hz() -> u32 {
+    // 100 Hz is conservative — kperf typically runs at 1000 Hz, and
+    // the framehop loop on bee.app's 27 threads finished one snapshot
+    // in ~400µs, so 1000 Hz is feasible. Starting low keeps the log
+    // signal-to-noise high and gives us headroom while we wire the
+    // sample stream out to stax-server.
+    100
 }
 
 #[tokio::main]
@@ -151,10 +166,21 @@ async fn run(cli: Cli) -> eyre::Result<()> {
     // Walk the target's loaded images once and build a framehop
     // unwinder + AVMA→image map out of the parsed sections, then
     // take one snapshot of every thread to validate the path
-    // end-to-end. Periodic sampling lands on top.
-    if let Some((mut unwinder, image_map)) = build_unwinder_from_target(task) {
+    // end-to-end and (if --walker-hz > 0) hand the unwinder off
+    // to a periodic sampling task.
+    let _walker_handle = if let Some((mut unwinder, image_map)) =
+        build_unwinder_from_target(task)
+    {
         snapshot_once(task, &mut unwinder, &image_map);
-    }
+        if cli.walker_hz > 0 {
+            Some(spawn_periodic_walker(task, unwinder, image_map, cli.walker_hz))
+        } else {
+            tracing::info!("--walker-hz=0, framehop sampling disabled");
+            None
+        }
+    } else {
+        None
+    };
 
     // If a server socket was provided, dial in and register so the
     // server knows we're up and which run we belong to. When
@@ -216,6 +242,96 @@ impl PreResume {
     }
 }
 
+/// Long-running periodic walker: every `1_000_000 / hz` µs, walk
+/// every thread of `task` and emit aggregate stats every second
+/// (samples per second, average frame depth, p50/p99 elapsed).
+///
+/// Lives on a tokio task so the main thread can keep waiting on
+/// SIGTERM. The task takes ownership of the unwinder + image_map
+/// + framehop cache; when the runtime drops on shutdown, the task
+/// drops and so do they.
+///
+/// Streaming samples to stax-server lands in the next slice — for
+/// now the loop runs purely for throughput / overhead validation.
+#[cfg(target_arch = "aarch64")]
+fn spawn_periodic_walker(
+    task: mach2::port::mach_port_t,
+    unwinder: framehop::aarch64::UnwinderAarch64<Vec<u8>>,
+    image_map: walker::ImageMap,
+    hz: u32,
+) -> tokio::task::JoinHandle<()> {
+    // SAFETY (justification): mach_port_t is a u32 and the right
+    // is task-scoped to the shade. Sending it to another task in
+    // the same process is fine; the kernel doesn't require the
+    // sender to be the original acquirer.
+    struct Send<T>(T);
+    unsafe impl<T> std::marker::Send for Send<T> {}
+
+    let task_send = Send(task);
+    tokio::task::spawn(async move {
+        let task = task_send.0;
+        // Drop the wrapper so subsequent moves are clean.
+        let _ = image_map; // ensure map captured (we use it below)
+        let mut unwinder = unwinder;
+        let image_map = image_map;
+        let mut cache = framehop::aarch64::CacheAarch64::new();
+
+        let period = std::time::Duration::from_micros(1_000_000 / u64::from(hz.max(1)));
+        let mut interval = tokio::time::interval(period);
+        // Skip-missed: if a tick falls behind we don't pile them
+        // up — better to drop than burst.
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        let report_period = std::time::Duration::from_secs(1);
+        let mut window_started = std::time::Instant::now();
+        let mut window_samples = 0u64;
+        let mut window_frames = 0u64;
+        let mut window_elapsed_us_total = 0u64;
+        let mut window_max_us = 0u64;
+
+        tracing::info!(hz, period_us = period.as_micros() as u64, "periodic walker started");
+
+        loop {
+            interval.tick().await;
+            let started = std::time::Instant::now();
+            let samples = walker::snapshot_all_threads(task, &mut unwinder, &mut cache);
+            let elapsed_us = started.elapsed().as_micros() as u64;
+
+            window_samples += samples.len() as u64;
+            for s in &samples {
+                window_frames += s.frames.len() as u64;
+            }
+            window_elapsed_us_total += elapsed_us;
+            window_max_us = window_max_us.max(elapsed_us);
+
+            if window_started.elapsed() >= report_period {
+                let pass_count = window_started.elapsed().as_secs_f64();
+                let avg_us = window_elapsed_us_total
+                    .checked_div(if pass_count > 0.0 {
+                        // approx number of passes in the window
+                        (pass_count * f64::from(hz)) as u64
+                    } else {
+                        1
+                    })
+                    .unwrap_or(0);
+                tracing::info!(
+                    samples = window_samples,
+                    frames = window_frames,
+                    avg_us,
+                    max_us = window_max_us,
+                    map_entries = image_map.len_for_log(),
+                    "walker 1s window"
+                );
+                window_started = std::time::Instant::now();
+                window_samples = 0;
+                window_frames = 0;
+                window_elapsed_us_total = 0;
+                window_max_us = 0;
+            }
+        }
+    })
+}
+
 /// One-shot validation: enumerate threads, walk each one's stack
 /// via framehop, log a per-thread frame count + an example stack
 /// rendered as `<basename>+<offset>` so it's eyeballable without
@@ -226,8 +342,9 @@ fn snapshot_once(
     unwinder: &mut framehop::aarch64::UnwinderAarch64<Vec<u8>>,
     image_map: &walker::ImageMap,
 ) {
+    let mut cache = framehop::aarch64::CacheAarch64::new();
     let started = std::time::Instant::now();
-    let samples = walker::snapshot_all_threads(task, unwinder);
+    let samples = walker::snapshot_all_threads(task, unwinder, &mut cache);
     let elapsed_us = started.elapsed().as_micros();
 
     let total_frames: usize = samples.iter().map(|s| s.frames.len()).sum();

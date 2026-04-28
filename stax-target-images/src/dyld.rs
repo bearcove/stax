@@ -109,7 +109,33 @@ impl TargetImageWalker {
             unsafe { std::slice::from_raw_parts_mut(images.as_mut_ptr().cast::<u8>(), bytes_total) },
         )?;
 
-        let mut out: Vec<ImageEntry> = Vec::with_capacity(images.len());
+        let mut out: Vec<ImageEntry> = Vec::with_capacity(images.len() + 1);
+
+        // dyld itself is *not* in info_array on macOS — it lives
+        // outside the array and is exposed via dyld_image_load_address
+        // + dyld_path. Frames captured at the very top of a thread
+        // (libdyld_image::start, dlopen plumbing) point inside dyld;
+        // without this synthetic entry, those frames render as
+        // "(no module)". We add dyld first; the consumer sorts by
+        // avma_range.start so order doesn't matter for lookups.
+        if header.dyld_image_load_address != 0 && header.dyld_path != 0 {
+            if let Some(path) = self.read_c_string(header.dyld_path) {
+                let sections =
+                    crate::macho::parse_image(self.task, header.dyld_image_load_address);
+                out.push(ImageEntry {
+                    path,
+                    load_address: header.dyld_image_load_address,
+                    file_mod_date: 0,
+                    sections,
+                });
+            } else {
+                tracing::debug!(
+                    load_address = header.dyld_image_load_address,
+                    "dyld path read failed; skipping synthetic dyld entry"
+                );
+            }
+        }
+
         for img in &images {
             if img.image_load_address == 0 || img.image_file_path == 0 {
                 continue;

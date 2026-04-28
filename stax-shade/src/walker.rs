@@ -253,6 +253,10 @@ pub struct ImageMapEntry {
 }
 
 impl ImageMap {
+    pub fn len_for_log(&self) -> usize {
+        self.entries.len()
+    }
+
     pub fn lookup(&self, addr: u64) -> Option<&ImageMapEntry> {
         // partition_point gives the first entry whose
         // avma_range.start > addr; the candidate is the one before
@@ -304,17 +308,17 @@ pub struct ThreadSample {
 ///
 /// Cost: 1× `task_threads` + per-thread `(suspend, get_state,
 /// walk, resume)`. The walk itself is N small `mach_vm_read`s
-/// per CFA / saved-register lookup — fine for one-shot
-/// validation, future periodic pass should mmap a stack window.
+/// per CFA / saved-register lookup — fine for low-rate periodic
+/// sampling, a future pass should mmap a stack window.
 ///
-/// `Unwinder` is taken by `&mut` because `iter_frames` borrows
-/// it; the cache is created here per call (cheap — empty rule
-/// table). We'll lift the cache into the periodic loop later
-/// so warm rules survive across samples.
+/// `cache` is shared across calls so framehop's per-(module,
+/// address) rule lookups warm up — the second sample of the same
+/// stack pays only the cache hit, not the full unwind-info parse.
 #[cfg(target_arch = "aarch64")]
 pub fn snapshot_all_threads(
     task: mach_port_t,
     unwinder: &mut framehop::aarch64::UnwinderAarch64<Vec<u8>>,
+    cache: &mut framehop::aarch64::CacheAarch64,
 ) -> Vec<ThreadSample> {
     use mach2::mach_types::thread_act_array_t;
     use mach2::message::mach_msg_type_number_t;
@@ -348,7 +352,7 @@ pub fn snapshot_all_threads(
         }
 
         let sample = match thread_state_arm64(thread) {
-            Some(state) => walk_one(thread, state, &reader, unwinder),
+            Some(state) => walk_one(thread, state, &reader, unwinder, cache),
             None => ThreadSample {
                 thread,
                 pc: 0,
@@ -394,11 +398,11 @@ fn walk_one(
     state: mach2::structs::arm_thread_state64_t,
     reader: &MachStackReader,
     unwinder: &mut framehop::aarch64::UnwinderAarch64<Vec<u8>>,
+    cache: &mut framehop::aarch64::CacheAarch64,
 ) -> ThreadSample {
     use framehop::Unwinder;
-    use framehop::aarch64::{CacheAarch64, UnwindRegsAarch64};
+    use framehop::aarch64::UnwindRegsAarch64;
 
-    let mut cache = CacheAarch64::<_>::new();
     let pc = state.__pc;
     let lr = state.__lr;
     let sp = state.__sp;
@@ -409,7 +413,7 @@ fn walk_one(
     let mut iter = unwinder.iter_frames(
         pc,
         UnwindRegsAarch64::new(lr, sp, fp),
-        &mut cache,
+        cache,
         &mut read_stack,
     );
 

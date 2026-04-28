@@ -127,7 +127,6 @@ pub fn parse_image(task: mach_port_t, load_address: u64) -> Option<MachoSections
     let mut pending: Vec<(u64, u64, BytesSlot)> = Vec::new();
 
     let mut cursor = 0usize;
-    let mut first_segment = true;
     for _ in 0..header.ncmds {
         if cursor + std::mem::size_of::<LoadCommand>() > cmds.len() {
             break;
@@ -147,11 +146,18 @@ pub fn parse_image(task: mach_port_t, load_address: u64) -> Option<MachoSections
                 let seg: SegmentCommand64 = unsafe {
                     std::ptr::read_unaligned(cmds.as_ptr().add(cursor).cast())
                 };
-                if first_segment {
-                    out.slide = (load_address as i64).wrapping_sub(seg.vmaddr as i64);
-                    first_segment = false;
-                }
+                // Compute the slide off __TEXT, not the first
+                // segment. Main executables on macOS lead with
+                // __PAGEZERO (vmaddr=0, vmsize=4GB) — basing the
+                // slide on it would give `slide = load_address`,
+                // which then projects all subsequent sections way
+                // above where they're actually mapped. The Mach-O
+                // header lives at the start of __TEXT, so
+                // `slide = load_address - __TEXT.vmaddr` is the
+                // identity that actually holds for every kind of
+                // image (main exec, dylib, dyld-shared-cache slot).
                 if name_eq(&seg.segname, b"__TEXT") {
+                    out.slide = (load_address as i64).wrapping_sub(seg.vmaddr as i64);
                     let start = (seg.vmaddr as i64).wrapping_add(out.slide) as u64;
                     out.text_avma = Some(start..start + seg.vmsize);
                 }
