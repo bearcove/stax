@@ -12,7 +12,7 @@ use stax_live_proto::{
     IngestEvent, RunIngestClient, WireBinaryLoaded, WireMachOSymbol, WireOffCpuInterval,
     WireOnCpuInterval, WireSampleEvent, WireWakeup,
 };
-use tokio::sync::mpsc::{self, Sender};
+use tokio::sync::mpsc::{self, UnboundedSender};
 
 use crate::live_sink::{
     BinaryLoadedEvent, BinaryUnloadedEvent, CpuIntervalEvent, CpuIntervalKind, LiveSink,
@@ -31,12 +31,12 @@ use crate::live_sink::MachOByteSource;
 /// recorder loop polls `LiveSink::stop_requested()` to break out
 /// of `drive_session` cleanly.
 pub struct IngestSink {
-    tx: Sender<IngestEvent>,
+    tx: UnboundedSender<IngestEvent>,
     stop_requested: Arc<AtomicBool>,
 }
 
 impl IngestSink {
-    pub fn new(tx: Sender<IngestEvent>, stop_requested: Arc<AtomicBool>) -> Self {
+    pub fn new(tx: UnboundedSender<IngestEvent>, stop_requested: Arc<AtomicBool>) -> Self {
         Self { tx, stop_requested }
     }
 }
@@ -49,30 +49,24 @@ impl LiveSink for IngestSink {
 
     async fn on_sample(&self, ev: &SampleEvent) {
         let user_backtrace = ev.user_backtrace.iter().map(|f| f.address).collect();
-        let _ = self
-            .tx
-            .send(IngestEvent::Sample(WireSampleEvent {
-                timestamp_ns: ev.timestamp,
-                pid: ev.pid,
-                tid: ev.tid,
-                kernel_backtrace: ev.kernel_backtrace.to_vec(),
-                user_backtrace,
-                cycles: ev.cycles,
-                instructions: ev.instructions,
-                l1d_misses: ev.l1d_misses,
-                branch_mispreds: ev.branch_mispreds,
-            }))
-            .await;
+        let _ = self.tx.send(IngestEvent::Sample(WireSampleEvent {
+            timestamp_ns: ev.timestamp,
+            pid: ev.pid,
+            tid: ev.tid,
+            kernel_backtrace: ev.kernel_backtrace.to_vec(),
+            user_backtrace,
+            cycles: ev.cycles,
+            instructions: ev.instructions,
+            l1d_misses: ev.l1d_misses,
+            branch_mispreds: ev.branch_mispreds,
+        }));
     }
 
     async fn on_target_attached(&self, ev: &TargetAttached) {
-        let _ = self
-            .tx
-            .send(IngestEvent::TargetAttached {
-                pid: ev.pid,
-                task_port: ev.task_port,
-            })
-            .await;
+        let _ = self.tx.send(IngestEvent::TargetAttached {
+            pid: ev.pid,
+            task_port: ev.task_port,
+        });
     }
 
     async fn on_binary_loaded(&self, ev: &BinaryLoadedEvent) {
@@ -85,53 +79,41 @@ impl LiveSink for IngestSink {
                 name: s.name.to_vec(),
             })
             .collect();
-        let _ = self
-            .tx
-            .send(IngestEvent::BinaryLoaded(WireBinaryLoaded {
-                path: ev.path.to_owned(),
-                base_avma: ev.base_avma,
-                vmsize: ev.vmsize,
-                text_svma: ev.text_svma,
-                arch: ev.arch.map(|s| s.to_owned()),
-                is_executable: ev.is_executable,
-                symbols,
-                text_bytes: ev.text_bytes.map(|b| b.to_vec()),
-            }))
-            .await;
+        let _ = self.tx.send(IngestEvent::BinaryLoaded(WireBinaryLoaded {
+            path: ev.path.to_owned(),
+            base_avma: ev.base_avma,
+            vmsize: ev.vmsize,
+            text_svma: ev.text_svma,
+            arch: ev.arch.map(|s| s.to_owned()),
+            is_executable: ev.is_executable,
+            symbols,
+            text_bytes: ev.text_bytes.map(|b| b.to_vec()),
+        }));
     }
 
     async fn on_binary_unloaded(&self, ev: &BinaryUnloadedEvent) {
-        let _ = self
-            .tx
-            .send(IngestEvent::BinaryUnloaded {
-                path: ev.path.to_owned(),
-                base_avma: ev.base_avma,
-            })
-            .await;
+        let _ = self.tx.send(IngestEvent::BinaryUnloaded {
+            path: ev.path.to_owned(),
+            base_avma: ev.base_avma,
+        });
     }
 
     async fn on_thread_name(&self, ev: &ThreadName) {
-        let _ = self
-            .tx
-            .send(IngestEvent::ThreadName {
-                pid: ev.pid,
-                tid: ev.tid,
-                name: ev.name.to_owned(),
-            })
-            .await;
+        let _ = self.tx.send(IngestEvent::ThreadName {
+            pid: ev.pid,
+            tid: ev.tid,
+            name: ev.name.to_owned(),
+        });
     }
 
     async fn on_wakeup(&self, ev: &WakeupEvent) {
-        let _ = self
-            .tx
-            .send(IngestEvent::Wakeup(WireWakeup {
-                timestamp_ns: ev.timestamp,
-                waker_tid: ev.waker_tid,
-                wakee_tid: ev.wakee_tid,
-                waker_user_stack: ev.waker_user_stack.to_vec(),
-                waker_kernel_stack: ev.waker_kernel_stack.to_vec(),
-            }))
-            .await;
+        let _ = self.tx.send(IngestEvent::Wakeup(WireWakeup {
+            timestamp_ns: ev.timestamp,
+            waker_tid: ev.waker_tid,
+            wakee_tid: ev.wakee_tid,
+            waker_user_stack: ev.waker_user_stack.to_vec(),
+            waker_kernel_stack: ev.waker_kernel_stack.to_vec(),
+        }));
     }
 
     async fn on_probe_result<'a>(&self, ev: &crate::live_sink::ProbeResultEvent<'a>) {
@@ -147,38 +129,31 @@ impl LiveSink for IngestSink {
                 mach_sp: ev.mach_sp,
                 mach_walked: ev.mach_walked.to_vec(),
                 used_framehop: ev.used_framehop,
-            }))
-            .await;
+            }));
     }
 
     async fn on_cpu_interval(&self, ev: &CpuIntervalEvent) {
         match &ev.kind {
             CpuIntervalKind::OnCpu => {
-                let _ = self
-                    .tx
-                    .send(IngestEvent::OnCpuInterval(WireOnCpuInterval {
-                        tid: ev.tid,
-                        start_ns: ev.start_ns,
-                        end_ns: ev.end_ns,
-                    }))
-                    .await;
+                let _ = self.tx.send(IngestEvent::OnCpuInterval(WireOnCpuInterval {
+                    tid: ev.tid,
+                    start_ns: ev.start_ns,
+                    end_ns: ev.end_ns,
+                }));
             }
             CpuIntervalKind::OffCpu {
                 stack,
                 waker_tid,
                 waker_user_stack,
             } => {
-                let _ = self
-                    .tx
-                    .send(IngestEvent::OffCpuInterval(WireOffCpuInterval {
-                        tid: ev.tid,
-                        start_ns: ev.start_ns,
-                        end_ns: ev.end_ns,
-                        stack: stack.iter().map(|f| f.address).collect(),
-                        waker_tid: *waker_tid,
-                        waker_user_stack: waker_user_stack.map(|s| s.to_vec()),
-                    }))
-                    .await;
+                let _ = self.tx.send(IngestEvent::OffCpuInterval(WireOffCpuInterval {
+                    tid: ev.tid,
+                    start_ns: ev.start_ns,
+                    end_ns: ev.end_ns,
+                    stack: stack.iter().map(|f| f.address).collect(),
+                    waker_tid: *waker_tid,
+                    waker_user_stack: waker_user_stack.map(|s| s.to_vec()),
+                }));
             }
         }
     }
@@ -213,32 +188,42 @@ pub async fn connect_and_register(
         Err(e) => return Err(eyre::eyre!("vox start_run failed: {e:?}")),
     };
 
-    // Bounded so the worker thread feels real backpressure when
-    // the server falls behind. Unbounded was the source of the
-    // multi-second "flushing samples to stax-server" wait at
-    // end-of-recording: we'd buffer ~1M IngestEvents in here and
-    // then have to drain them all serially after the recording
-    // had stopped. With a cap, the worker's block_on(send) blocks
-    // when the server is the bottleneck, recording slows to match
-    // server throughput, and the end-of-recording flush is bounded
-    // by INGEST_QUEUE_CAP × per-event vox time.
-    const INGEST_QUEUE_CAP: usize = 16_384;
-    let (sync_tx, mut sync_rx) = mpsc::channel::<IngestEvent>(INGEST_QUEUE_CAP);
+    let (sync_tx, mut sync_rx) = mpsc::unbounded_channel::<IngestEvent>();
     let stop_requested = Arc::new(AtomicBool::new(false));
     let stop_for_forwarder = stop_requested.clone();
     let forwarder = tokio::spawn(async move {
+        let mut forwarded: u64 = 0;
+        let mut last_log = std::time::Instant::now();
         while let Some(event) = sync_rx.recv().await {
-            if vox_tx.send(event).await.is_err() {
-                // Server dropped its Rx (most likely
-                // stop_active fired). Tell the recorder loop to
-                // bail out via LiveSink::stop_requested.
-                stop_for_forwarder.store(true, Ordering::Relaxed);
-                break;
+            match vox_tx.send(event).await {
+                Ok(()) => {
+                    forwarded = forwarded.saturating_add(1);
+                    if last_log.elapsed() >= std::time::Duration::from_secs(2) {
+                        log::info!(
+                            "ingest_sink: forwarder progress: forwarded={} queued={}",
+                            forwarded,
+                            sync_rx.len()
+                        );
+                        last_log = std::time::Instant::now();
+                    }
+                }
+                Err(e) => {
+                    log::warn!(
+                        "ingest_sink: vox send failed (server dropped Rx?) after forwarded={} queued={} err={:?}",
+                        forwarded,
+                        sync_rx.len(),
+                        e
+                    );
+                    stop_for_forwarder.store(true, Ordering::Relaxed);
+                    break;
+                }
             }
         }
+        log::info!(
+            "ingest_sink: forwarder exiting (sync_rx closed) after forwarded={}; flushing vox",
+            forwarded
+        );
         let _ = vox_tx.close(Default::default()).await;
-        // Cover the cases where sync_rx closed for any other
-        // reason — the recorder should stop either way.
         stop_for_forwarder.store(true, Ordering::Relaxed);
     });
 
