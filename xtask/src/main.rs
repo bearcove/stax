@@ -66,10 +66,16 @@ fn install() -> Result<(), Box<dyn Error>> {
     let cargo_bin = cargo_bin_dir()?;
     fs::create_dir_all(&cargo_bin)?;
 
-    for bin in [BIN_NAME, DAEMON_BIN, SERVER_BIN, SHADE_BIN] {
-        println!(":: Building {bin} (release)...");
-        cargo_build_release(&workspace_root, bin)?;
+    // One workspace-wide build; never `cargo build -p <pkg>` per
+    // binary, because per-package builds resolve features
+    // independently and you can end up with mismatched feature
+    // unification across artifacts that all link against the same
+    // shared deps. One pass keeps the lockfile-resolved feature
+    // set consistent across every binary we install.
+    println!(":: Building workspace (release)...");
+    cargo_build_release_workspace(&workspace_root)?;
 
+    for bin in [BIN_NAME, DAEMON_BIN, SERVER_BIN, SHADE_BIN] {
         let src = workspace_root.join("target").join("release").join(bin);
         if !src.exists() {
             return Err(format!("expected built binary at {} but it wasn't there", src.display()).into());
@@ -264,8 +270,11 @@ fn codesign_with_debugger(binary: &Path) -> Result<(), Box<dyn Error>> {
 fn build_daemon() -> Result<(), Box<dyn Error>> {
     let workspace_root = workspace_root();
 
-    println!(":: Building {DAEMON_BIN} (release)...");
-    cargo_build_release(&workspace_root, DAEMON_BIN)?;
+    // Workspace build (not `cargo build -p staxd`) so feature
+    // unification stays identical to what `cargo xtask install`
+    // produces — see the comment in `install()`.
+    println!(":: Building workspace (release)...");
+    cargo_build_release_workspace(&workspace_root)?;
 
     let binary = workspace_root.join("target").join("release").join(DAEMON_BIN);
     let plist = workspace_root
@@ -285,14 +294,14 @@ fn build_daemon() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn cargo_build_release(workspace_root: &Path, package: &str) -> Result<(), Box<dyn Error>> {
+fn cargo_build_release_workspace(workspace_root: &Path) -> Result<(), Box<dyn Error>> {
     let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let status = Command::new(&cargo)
-        .args(["build", "--release", "-p", package])
+        .args(["build", "--release", "--workspace"])
         .current_dir(workspace_root)
         .status()?;
     if !status.success() {
-        return Err(format!("cargo build -p {package} failed: {status}").into());
+        return Err(format!("cargo build --workspace --release failed: {status}").into());
     }
     Ok(())
 }

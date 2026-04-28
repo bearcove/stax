@@ -591,9 +591,9 @@ fn mach_timebase_numer_denom() -> (u32, u32) {
     use std::sync::OnceLock;
     static TB: OnceLock<(u32, u32)> = OnceLock::new();
     *TB.get_or_init(|| {
-        // SAFETY: out-pointer to a stack-local of the right shape.
-        let mut info: libc::mach_timebase_info = unsafe { std::mem::zeroed() };
-        let _ = unsafe { libc::mach_timebase_info(&mut info) };
+        let mut info = mach2::mach_time::mach_timebase_info { numer: 0, denom: 0 };
+        // SAFETY: leaf libc-ish call writing two u32s into our stack local.
+        let _ = unsafe { mach2::mach_time::mach_timebase_info(&mut info) };
         if info.denom == 0 {
             (1, 1)
         } else {
