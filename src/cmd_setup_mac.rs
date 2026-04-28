@@ -149,19 +149,24 @@ Press Enter to continue, or Ctrl-C to cancel."#,
         .map_err(|err| format!("writing {}: {err}", PLIST_PATH))?;
     fs::set_permissions(PLIST_PATH, fs::Permissions::from_mode(0o644))?;
 
-    // Reload via launchctl. `bootstrap` is the modern verb (macOS 10.10+);
-    // we run `bootout` first to handle the "already loaded from a previous
-    // setup" case, ignoring its exit status because it errors out cleanly
-    // when nothing was loaded.
-    println!(":: launchctl bootout system/{LAUNCHD_LABEL} (best-effort)");
-    let _ = Command::new("launchctl")
-        .args(["bootout", &format!("system/{LAUNCHD_LABEL}")])
-        .status();
+    // Reload via launchctl. `bootout` returns before launchd has
+    // always fully removed the job from the domain; bootstrapping
+    // immediately after can fail with the opaque "Bootstrap failed:
+    // 5: Input/output error". Wait until `launchctl print` agrees
+    // the label is gone before bootstrapping it again.
+    let label_target = format!("system/{LAUNCHD_LABEL}");
+    if is_launchd_job_loaded(&label_target) {
+        println!(":: launchctl bootout {label_target}");
+        let _ = Command::new("launchctl")
+            .args(["bootout", &label_target])
+            .status();
+        wait_until_launchd_job_unloaded(&label_target)?;
+    } else {
+        println!(":: launchctl bootout {label_target} (not loaded)");
+    }
 
     println!(":: launchctl bootstrap system {PLIST_PATH}");
-    let status = Command::new("launchctl")
-        .args(["bootstrap", "system", PLIST_PATH])
-        .status()?;
+    let status = bootstrap_launch_daemon()?;
     if !status.success() {
         return Err(format!(
             "launchctl bootstrap exited with {} — try `launchctl load {}` manually",
@@ -175,6 +180,55 @@ Press Enter to continue, or Ctrl-C to cancel."#,
     println!(":: socket    : /var/run/staxd.sock");
     println!(":: logs      : sudo log stream --predicate 'subsystem == \"eu.bearcove.staxd\"'");
     println!(":: now: stax record --serve 127.0.0.1:8080 -- /bin/foo");
+    Ok(())
+}
+
+fn bootstrap_launch_daemon() -> Result<std::process::ExitStatus, Box<dyn Error>> {
+    let mut last_status = Command::new("launchctl")
+        .args(["bootstrap", "system", PLIST_PATH])
+        .status()?;
+    if last_status.success() {
+        return Ok(last_status);
+    }
+
+    // launchd sometimes reports EIO while the old label is still
+    // settling out of the system domain. A tiny retry removes the
+    // flaky "run the exact same command again and it works" path.
+    for attempt in 2..=5 {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        println!(":: launchctl bootstrap retry {attempt}/5");
+        last_status = Command::new("launchctl")
+            .args(["bootstrap", "system", PLIST_PATH])
+            .status()?;
+        if last_status.success() {
+            return Ok(last_status);
+        }
+    }
+    Ok(last_status)
+}
+
+fn is_launchd_job_loaded(label_target: &str) -> bool {
+    Command::new("launchctl")
+        .args(["print", label_target])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn wait_until_launchd_job_unloaded(label_target: &str) -> Result<(), Box<dyn Error>> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while is_launchd_job_loaded(label_target) {
+        if std::time::Instant::now() >= deadline {
+            return Err(format!(
+                "launchctl bootout: {label_target} still loaded after 10s; \
+                 try `launchctl bootout {label_target}` manually"
+            )
+            .into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
     Ok(())
 }
 

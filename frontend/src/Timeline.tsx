@@ -77,25 +77,28 @@ export function Timeline({
   const onMouseDown = (e: React.MouseEvent) => {
     if (e.button !== 0) return;
     e.preventDefault();
-    const f = fracOf(e.clientX);
-    setDrag({ x0: f, x1: f });
-  };
-  const onMouseMove = (e: React.MouseEvent) => {
-    if (!drag) return;
-    setDrag({ x0: drag.x0, x1: fracOf(e.clientX) });
-  };
-  const finishDrag = (e: React.MouseEvent) => {
-    if (!drag) return;
-    const x1 = fracOf(e.clientX);
-    setDrag(null);
-    const lo = Math.min(drag.x0, x1);
-    const hi = Math.max(drag.x0, x1);
-    // Treat tiny drags (< ~1% of width) as clicks → clear the range.
-    if (hi - lo < 0.005) {
-      if (range) onRangeChange(null);
-      return;
-    }
-    onRangeChange({ start_ns: fracToNs(lo), end_ns: fracToNs(hi) });
+    const x0 = fracOf(e.clientX);
+    setDrag({ x0, x1: x0 });
+
+    const onMove = (ev: MouseEvent) => {
+      setDrag({ x0, x1: fracOf(ev.clientX) });
+    };
+    const onUp = (ev: MouseEvent) => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      const x1 = fracOf(ev.clientX);
+      setDrag(null);
+      const lo = Math.min(x0, x1);
+      const hi = Math.max(x0, x1);
+      // Treat tiny drags (< ~0.5% of width) as clicks → clear the range.
+      if (hi - lo < 0.005) {
+        if (range) onRangeChange(null);
+        return;
+      }
+      onRangeChange({ start_ns: fracToNs(lo), end_ns: fracToNs(hi) });
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
   };
 
   // Selection overlay — prefer the live drag state; fall back to the
@@ -136,11 +139,6 @@ export function Timeline({
         viewBox="0 0 100 100"
         preserveAspectRatio="none"
         onMouseDown={onMouseDown}
-        onMouseMove={onMouseMove}
-        onMouseUp={finishDrag}
-        onMouseLeave={(e) => {
-          if (drag) finishDrag(e);
-        }}
       >
         {areaD && <path className="timeline-area" d={areaD} />}
         {overlay && (

@@ -44,7 +44,7 @@ fn record_existing_pid(
     live_sink: Option<Box<dyn LiveSink>>,
 ) -> Result<(), Box<dyn Error>> {
     info!("Recording PID {pid}");
-    let sink = LiveOnlySink { live_sink };
+    let sink = LiveOnlySink::new(live_sink);
     notify_target_attached(&sink, pid);
 
     let sigint = SigintHandler::new();
@@ -94,7 +94,7 @@ fn record_child_launch(
     let child_for_stop = child_guard.share();
     info!("Child started: PID {pid}");
 
-    let sink = LiveOnlySink { live_sink };
+    let sink = LiveOnlySink::new(live_sink);
     notify_target_attached(&sink, pid);
 
     let sigint = SigintHandler::new();
@@ -142,7 +142,7 @@ fn record_child_launch(
 /// `SampleSink` impl that forwards every event to a live sink (if any)
 /// and drops it otherwise. There's no on-disk archive in the live-only
 /// path.
-struct LiveOnlySink {
+pub struct LiveOnlySink {
     live_sink: Option<Box<dyn LiveSink>>,
 }
 
@@ -151,19 +151,25 @@ struct LiveOnlySink {
 /// every `RunSummary` so `stax list` / `stax status` can show
 /// something useful. Synthesise one with task_port=0 the moment we
 /// know the pid.
-fn notify_target_attached(sink: &LiveOnlySink, pid: u32) {
-    if let Some(live) = sink.live_sink.as_ref() {
-        futures::executor::block_on(live.on_target_attached(&TargetAttached { pid, task_port: 0 }));
-    }
-}
-
 impl LiveOnlySink {
+    pub fn new(live_sink: Option<Box<dyn LiveSink>>) -> Self {
+        Self { live_sink }
+    }
+
+    pub fn notify_target_attached(&self, pid: u32) {
+        if let Some(live) = self.live_sink.as_ref() {
+            futures::executor::block_on(
+                live.on_target_attached(&TargetAttached { pid, task_port: 0 }),
+            );
+        }
+    }
+
     /// Build a `Fn() -> bool` that reflects the live sink's
     /// out-of-band stop signal (server closed ingest channel,
     /// etc.). Returns a closure that always returns `false` when
     /// the sink doesn't expose a stop flag — keeps the
     /// `should_stop` pattern in `record_*` symmetric.
-    fn live_sink_stop_flag(&self) -> impl Fn() -> bool + Send + Sync + 'static {
+    pub fn live_sink_stop_flag(&self) -> impl Fn() -> bool + Send + Sync + 'static {
         let flag = self.live_sink.as_ref().and_then(|s| s.stop_flag());
         move || {
             flag.as_ref()
@@ -171,6 +177,10 @@ impl LiveOnlySink {
                 .unwrap_or(false)
         }
     }
+}
+
+fn notify_target_attached(sink: &LiveOnlySink, pid: u32) {
+    sink.notify_target_attached(pid);
 }
 
 /// Bridge between the kperf-parse pipeline (sync `SampleSink`)

@@ -56,9 +56,11 @@
 #![cfg(target_os = "macos")]
 
 use std::process::ExitCode;
+use std::time::Duration;
 
 use facet::Facet;
 use figue as args;
+use stax_core::cmd_record_mac::LiveOnlySink;
 use stax_shade_proto::{ShadeAck, ShadeCapabilities, ShadeInfo, ShadeRegistryClient};
 
 #[derive(Facet, Debug)]
@@ -77,6 +79,18 @@ struct Cli {
     /// Run id (assigned by stax-server) this attachment belongs to.
     #[facet(args::named, default)]
     run_id: Option<u64>,
+
+    /// Local socket path of the privileged staxd daemon.
+    #[facet(args::named, default = "/var/run/staxd.sock")]
+    daemon_socket: String,
+
+    /// PET sampling frequency, in Hz.
+    #[facet(args::named, default = 900)]
+    frequency: u32,
+
+    /// Stop sampling after this many seconds. Unlimited by default.
+    #[facet(args::named, default)]
+    time_limit: Option<u64>,
 
     /// Launch a fresh process and attach to it before its first
     /// instruction (POSIX_SPAWN_START_SUSPENDED). Mutually
@@ -143,32 +157,107 @@ async fn run(cli: Cli) -> eyre::Result<()> {
     let pid = attached.pid;
     let task = attached.task;
 
-    // If a server socket was provided, dial in and register so the
-    // server knows we're up and which run we belong to. The shade
-    // does not run the old uncorrelated periodic walker; future
-    // correlated probe/framehop work belongs in this process.
-    let _server_client = match (cli.server_socket.as_deref(), cli.run_id) {
-        (Some(socket), Some(run_id)) => Some(register_with_server(socket, run_id, pid).await?),
-        _ => {
-            tracing::warn!(
-                "no --server-socket / --run-id; running standalone — \
-                 stax-server will not learn about this attachment"
-            );
-            None
-        }
-    };
+    let launched_pid = attached.pre_resume.as_ref().map(|_| pid);
     let _ = task;
+    let server_socket = cli.server_socket.clone();
 
-    // For --launch we held the target suspended through
-    // task_for_pid + register_shade so neither kperf-side nor
-    // shade-side could miss the very first instructions. Now
-    // that the server knows about us and (eventually) staxd has
-    // the kperf session running, resume.
-    if let Some(pre_resume) = attached.pre_resume {
+    match (server_socket.as_deref(), cli.run_id) {
+        // Legacy/server-spawned mode: server already owns the run
+        // ingest channel, so just register this shade and idle.
+        (Some(socket), Some(run_id)) => {
+            let _server_client = register_with_server(socket, run_id, pid).await?;
+            if let Some(pre_resume) = attached.pre_resume {
+                pre_resume.resume()?;
+            }
+            park_until_signal().await;
+        }
+        // Recorder-host mode: this shade owns the staxd stream,
+        // parser pipeline, and RunIngest forwarding. This is the
+        // intended `stax record` path; the CLI only supervises us.
+        (Some(socket), None) => {
+            run_recording(cli, socket, pid, attached.pre_resume, launched_pid).await?;
+        }
+        (None, _) => {
+            tracing::warn!(
+                "no --server-socket; running standalone attachment with no recording pipeline"
+            );
+            if let Some(pre_resume) = attached.pre_resume {
+                pre_resume.resume()?;
+            }
+            park_until_signal().await;
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_recording(
+    cli: Cli,
+    server_socket: &str,
+    pid: u32,
+    pre_resume: Option<PreResume>,
+    launched_pid: Option<u32>,
+) -> eyre::Result<()> {
+    let label = cli
+        .command
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "(attached)".to_owned());
+    let config = stax_live_proto::RunConfig {
+        label,
+        frequency_hz: cli.frequency,
+    };
+    let (run_id, ingest_sink, forwarder) =
+        stax_core::ingest_sink::connect_and_register(server_socket, config).await?;
+
+    let _server_client = register_with_server(server_socket, run_id.0, pid).await?;
+
+    let sink = LiveOnlySink::new(Some(Box::new(ingest_sink)));
+    sink.notify_target_attached(pid);
+    let stop_via_sink = sink.live_sink_stop_flag();
+
+    if let Some(pre_resume) = pre_resume {
         pre_resume.resume()?;
     }
 
-    park_until_signal().await;
+    let opts = staxd_client::RemoteOptions {
+        daemon_socket: cli.daemon_socket,
+        pid,
+        frequency_hz: cli.frequency,
+        duration: cli.time_limit.map(Duration::from_secs),
+        ..Default::default()
+    };
+
+    tracing::info!(
+        run_id = run_id.0,
+        pid,
+        "shade starting staxd recording pipeline"
+    );
+    let mut child_done = false;
+    let result = staxd_client::drive_session(opts, sink, move || {
+        if stop_via_sink() {
+            return true;
+        }
+        if let Some(pid) = launched_pid
+            && !child_done
+            && launched_child_exited(pid)
+        {
+            child_done = true;
+            return true;
+        }
+        false
+    })
+    .await;
+
+    if let Some(pid) = launched_pid {
+        terminate_launched_child(pid);
+    }
+
+    if let Err(e) = forwarder.await {
+        tracing::warn!("ingest forwarder task ended unexpectedly: {e}");
+    }
+
+    result.map_err(|e| eyre::eyre!("staxd-client failed: {e}"))?;
     Ok(())
 }
 
@@ -214,9 +303,8 @@ impl PreResume {
 /// breakpoints, …) and then call `PreResume::resume`.
 ///
 /// Argv: `argv[0]` is the program path; the rest are passed to
-/// the child as-is. We use `posix_spawn` (not `posix_spawnp`) so
-/// the program path is taken literally — callers that want PATH
-/// resolution can invoke `which(1)` first.
+/// the child as-is. `posix_spawnp` keeps CLI behavior aligned with
+/// `std::process::Command`: bare program names resolve through PATH.
 fn launch_suspended(argv: Vec<String>) -> eyre::Result<Attached> {
     use std::ffi::CString;
     use std::os::raw::c_char;
@@ -258,7 +346,7 @@ fn launch_suspended(argv: Vec<String>) -> eyre::Result<Attached> {
 
     let mut pid: libc::pid_t = 0;
     let r = unsafe {
-        libc::posix_spawn(
+        libc::posix_spawnp(
             &mut pid,
             program.as_ptr(),
             ptr::null(),
@@ -294,6 +382,29 @@ fn launch_suspended(argv: Vec<String>) -> eyre::Result<Attached> {
         task,
         pre_resume: Some(PreResume { task }),
     })
+}
+
+fn launched_child_exited(pid: u32) -> bool {
+    let mut status = 0;
+    // SAFETY: waitpid is called for the direct child this shade
+    // spawned. WNOHANG makes it a polling liveness check.
+    let r = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
+    r == pid as libc::pid_t || r == -1
+}
+
+fn terminate_launched_child(pid: u32) {
+    let mut status = 0;
+    // SAFETY: same direct child as above.
+    let r = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
+    if r == 0 {
+        // Match the previous CLI ChildGuard semantics: when the
+        // recording ends because of a time limit or user stop, the
+        // launched target is not left running in the background.
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            libc::waitpid(pid as libc::pid_t, &mut status, 0);
+        }
+    }
 }
 
 unsafe extern "C" {

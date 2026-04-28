@@ -1,15 +1,15 @@
 use std::env;
 use std::error::Error;
 use std::path::PathBuf;
-use std::process::exit;
+use std::process::{Command as ProcessCommand, exit};
 
 use figue as args;
 use stax_core::{
     args::{
-        AnnotateArgs, Cli, Command, FlameArgs, ProbeDiffArgs, RecordArgs, ThreadsArgs, TopArgs,
-        WaitArgs,
+        AnnotateArgs, Cli, Command, FlameArgs, ProbeDiffArgs, RecordArgs, TargetProcess,
+        ThreadsArgs, TopArgs, WaitArgs,
     },
-    cmd_record_mac, cmd_setup_mac,
+    cmd_setup_mac,
 };
 use stax_live_proto::{
     FlameNode, FlamegraphUpdate, LiveFilter, OffCpuBreakdown, ProbeDiffEntry, ProbeDiffUpdate,
@@ -74,10 +74,6 @@ fn block_on_async<F: std::future::Future<Output = Result<(), Box<dyn Error>>>>(
 }
 
 fn run_record(args: RecordArgs) -> Result<(), Box<dyn Error>> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-
     // Recording is meaningless without a server to forward events
     // to — refuse rather than silently drop everything.
     let socket = stax_server_socket().ok_or_else(|| {
@@ -85,30 +81,39 @@ fn run_record(args: RecordArgs) -> Result<(), Box<dyn Error>> {
          STAX_SERVER_SOCKET if you've moved the socket)."
             .to_owned()
     })?;
-    let (id, sink, forwarder) = runtime.block_on(connect_to_server(&socket, &args))?;
-    eprintln!(
-        "stax: registered run {} with stax-server at {}",
-        id.0,
-        socket.display()
-    );
+    let shade = resolve_shade_path().ok_or_else(|| {
+        "stax-shade not found. Run `cargo xtask install` or set STAX_SHADE_BIN.".to_owned()
+    })?;
 
-    let live_sink: Box<dyn stax_core::live_sink::LiveSink> = Box::new(sink);
-    let result = cmd_record_mac::main_with_live_sink(args, Some(live_sink));
-
-    // The recorder is done sampling; live_sink (and therefore the
-    // sync mpsc sender inside IngestSink) was just dropped. Wait
-    // for the forwarder to flush the backlog into vox before we
-    // tear down the tokio runtime — otherwise dropping the runtime
-    // cancels the task with thousands of samples still in flight,
-    // which is why a 5s recording was landing only ~1% of them on
-    // the server.
-    eprintln!("stax: flushing samples to stax-server …");
-    let flush = runtime.block_on(forwarder);
-    if let Err(e) = flush {
-        eprintln!("stax: forwarder task ended unexpectedly: {e}");
+    let target = args.target()?;
+    let mut cmd = ProcessCommand::new(&shade);
+    match target {
+        TargetProcess::ByPid(pid) => {
+            cmd.arg("--attach").arg(pid.to_string());
+        }
+        TargetProcess::Launch {
+            program,
+            args: prog_args,
+        } => {
+            cmd.arg("--launch").arg("--").arg(program).args(prog_args);
+        }
     }
-    drop(runtime);
-    result
+    cmd.arg("--server-socket")
+        .arg(&socket)
+        .arg("--daemon-socket")
+        .arg(&args.daemon_socket)
+        .arg("--frequency")
+        .arg(args.frequency.to_string());
+    if let Some(limit) = args.time_limit {
+        cmd.arg("--time-limit").arg(limit.to_string());
+    }
+
+    eprintln!("stax: recording via stax-shade at {}", shade.display());
+    let status = cmd.status()?;
+    if !status.success() {
+        return Err(format!("stax-shade exited with {status}").into());
+    }
+    Ok(())
 }
 
 fn stax_server_socket() -> Option<PathBuf> {
@@ -127,28 +132,32 @@ fn stax_server_socket() -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
-async fn connect_to_server(
-    socket: &std::path::Path,
-    args: &RecordArgs,
-) -> eyre::Result<(
-    stax_live_proto::RunId,
-    stax_core::ingest_sink::IngestSink,
-    tokio::task::JoinHandle<()>,
-)> {
-    // For child-launches the basename of the program is the
-    // useful label. For --pid attaches the target_pid field on
-    // RunSummary already carries the pid, so "(attached)" is
-    // enough — no need to repeat the pid in two columns.
-    let label = args
-        .command
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "(attached)".to_owned());
-    let config = stax_live_proto::RunConfig {
-        label,
-        frequency_hz: args.frequency,
-    };
-    stax_core::ingest_sink::connect_and_register(&socket.to_string_lossy(), config).await
+fn resolve_shade_path() -> Option<PathBuf> {
+    if let Ok(p) = env::var("STAX_SHADE_BIN") {
+        let p = PathBuf::from(p);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    if let Ok(exe) = env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let p = dir.join("stax-shade");
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    if let Ok(home) = env::var("HOME") {
+        let p = PathBuf::from(home)
+            .join(".cargo")
+            .join("bin")
+            .join("stax-shade");
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    let p = PathBuf::from("/usr/local/bin/stax-shade");
+    p.exists().then_some(p)
 }
 
 // --- agent-facing subcommands ------------------------------------------
