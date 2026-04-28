@@ -619,7 +619,12 @@ fn print_run_one_line(run: &RunSummary) {
         stax_live_proto::RunState::Stopped => "stopped",
     };
     println!(
-        "  run {}  [{state}]  {}  {} samples / {} intervals  ({})",
-        run.id.0, pid, run.pet_samples, run.off_cpu_intervals, run.label
+        "  run {}  [{state}]  {}  {} kperf / {} walker / {} intervals  ({})",
+        run.id.0,
+        pid,
+        run.pet_samples,
+        run.walker_samples,
+        run.off_cpu_intervals,
+        run.label
     );
 }

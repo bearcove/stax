@@ -149,6 +149,15 @@ pub struct PetSample {
     pub pmc: PmuSample,
 }
 
+/// One framehop-walked user stack from stax-shade. Distinct from
+/// `PetSample`: source is shade's `thread_suspend` + `framehop`
+/// path, not kperf. Atomic-from-target-perspective; no kernel
+/// stack and no PMU.
+pub struct WalkerSample {
+    pub timestamp_ns: u64,
+    pub stack: Box<[u64]>,
+}
+
 /// One on-CPU or off-CPU interval, as reported by SCHED-record
 /// transitions. For off-CPU, the stack the thread was on at the
 /// moment it parked is included so the aggregator can attribute the
@@ -198,6 +207,7 @@ const MAX_EVENTS_PER_THREAD: usize = 100_000;
 #[derive(Default)]
 pub struct ThreadStats {
     pub(crate) pet_samples: std::collections::VecDeque<PetSample>,
+    pub(crate) walker_samples: std::collections::VecDeque<WalkerSample>,
     pub(crate) intervals: std::collections::VecDeque<RawInterval>,
     pub(crate) wakeups: std::collections::VecDeque<RawWakeup>,
 }
@@ -282,6 +292,24 @@ pub struct Aggregator {
 }
 
 impl Aggregator {
+    /// Append a framehop-walked stack from stax-shade. Lives on
+    /// its own per-thread queue; queries that want
+    /// "shade-accurate user only" read this, queries that want
+    /// "kperf-paired with kernel" read `pet_samples`. Never
+    /// merged automatically — the two streams aren't atomic with
+    /// each other.
+    pub fn record_walker_sample(&mut self, tid: u32, timestamp_ns: u64, user_addrs: &[u64]) {
+        self.note_timestamp(timestamp_ns);
+        let stats = self.threads.entry(tid).or_default();
+        if stats.walker_samples.len() >= MAX_EVENTS_PER_THREAD {
+            stats.walker_samples.pop_front();
+        }
+        stats.walker_samples.push_back(WalkerSample {
+            timestamp_ns,
+            stack: user_addrs.to_vec().into_boxed_slice(),
+        });
+    }
+
     pub fn record_pet_sample(
         &mut self,
         tid: u32,

@@ -360,21 +360,18 @@ impl ServerState {
     }
 
     /// Ingest a batch of framehop walker samples published by the
-    /// shade. We validate the run id under the same lock that
-    /// guards the active run summary, then funnel each sample
-    /// through the same `Aggregator::record_pet_sample` path the
-    /// kperf ingest uses. PMU fields land as zero — kperf is the
-    /// authoritative source for those, and the aggregator will
-    /// pick whichever entry has non-zero PMU when it merges by
-    /// (tid, timestamp).
+    /// shade. Walker samples land on `Aggregator::record_walker_sample`,
+    /// a per-thread queue distinct from kperf's `pet_samples`. The
+    /// two streams aren't atomic with each other (kperf samples
+    /// in-kernel-interrupt; walker samples via thread_suspend in
+    /// the shade) so we never merge them — that's the deliberate
+    /// design. Run summary counts the two streams separately
+    /// (`pet_samples` vs `walker_samples`).
     fn ingest_walker_samples(
         &self,
         run_id: u64,
         samples: Vec<WalkerSample>,
     ) -> Result<(), String> {
-        // Bump the run-summary counters under the run-lock first.
-        // We let the lock go before touching the aggregator so a
-        // long batch can't starve other readers (status / list_runs).
         let n = samples.len();
         {
             let mut inner = self.inner.lock();
@@ -387,22 +384,12 @@ impl ServerState {
                     active.id.0
                 ));
             }
-            active.pet_samples = active.pet_samples.saturating_add(n as u64);
+            active.walker_samples = active.walker_samples.saturating_add(n as u64);
         }
 
         let mut agg = self.aggregator.write();
         for s in samples {
-            agg.record_pet_sample(
-                s.tid,
-                s.timestamp_ns,
-                &s.frames,
-                PmuSample {
-                    cycles: 0,
-                    instructions: 0,
-                    l1d_misses: 0,
-                    branch_mispreds: 0,
-                },
-            );
+            agg.record_walker_sample(s.tid, s.timestamp_ns, &s.frames);
         }
         Ok(())
     }
@@ -783,6 +770,7 @@ impl RunIngest for ServerState {
             target_pid: None,
             label: config.label,
             pet_samples: 0,
+            walker_samples: 0,
             off_cpu_intervals: 0,
         };
         let cancel = Arc::new(tokio::sync::Notify::new());

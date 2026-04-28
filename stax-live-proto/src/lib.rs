@@ -626,8 +626,20 @@ pub struct RunSummary {
     /// Best-effort label derived from the launch command or attached
     /// PID's executable basename. Free-form; not guaranteed unique.
     pub label: String,
-    /// PET stack-walk hits ingested so far.
+    /// PET stack-walk hits ingested so far. Sourced from kperf
+    /// (kdebug PERF_CS_UHDR/UDATA), one per kernel-side sampling
+    /// tick. User stacks here are FP-walked — broken for FP-less
+    /// code (Rust release without -C force-frame-pointers, JIT).
+    /// Use `walker_samples` when accuracy matters more than
+    /// timing fidelity.
     pub pet_samples: u64,
+    /// Framehop-walked user stacks pushed by stax-shade. These
+    /// are atomic-from-target-perspective (the thread is
+    /// suspended for the duration of the walk) and accurate for
+    /// FP-less code. Independent stream from `pet_samples`; no
+    /// kernel-graph attached, no atomic stitch with kperf
+    /// possible without kernel cooperation we don't have.
+    pub walker_samples: u64,
     /// Off-CPU intervals ingested so far.
     pub off_cpu_intervals: u64,
 }
