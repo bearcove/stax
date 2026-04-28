@@ -40,6 +40,8 @@ use mach2::traps::{mach_task_self, task_for_pid};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use crate::unwind::{self, TargetUnwinder};
+
 /// One sample-completed snapshot the drain loop hands to the
 /// probe worker. Owns the kperf-walked user backtrace so the
 /// worker can compare it against an FP-walked stack from the
@@ -80,6 +82,10 @@ struct ProbeWorker {
     /// Mach absolute-time numer/denom for converting ticks → ns
     /// when we write the log.
     timebase: TimebaseInfo,
+    /// framehop unwinder built from the target's loaded images.
+    /// `None` if dyld walk failed at session start; we then fall
+    /// back to the simple FP walker.
+    unwinder: Option<TargetUnwinder>,
     stats: ProbeStats,
 }
 
@@ -176,6 +182,20 @@ pub fn spawn(target_pid: u32) -> Option<mpsc::Sender<ProbeRequest>> {
         }
     };
 
+    let unwinder = unwind::build(task);
+    if let Some(tu) = unwinder.as_ref() {
+        info!(
+            target_pid,
+            images_total = tu.stats.images_total,
+            modules_added = tu.stats.modules_added,
+            with_unwind_info = tu.stats.with_unwind_info,
+            with_eh_frame = tu.stats.with_eh_frame,
+            "probe: framehop unwinder built"
+        );
+    } else {
+        warn!(target_pid, "probe: framehop unwinder unavailable; falling back to FP walk");
+    }
+
     info!(target_pid, "probe: race-against-return logging started (per-probe events under staxd::probe target)");
 
     let (tx, mut rx) = mpsc::channel::<ProbeRequest>(4096);
@@ -185,6 +205,7 @@ pub fn spawn(target_pid: u32) -> Option<mpsc::Sender<ProbeRequest>> {
         task,
         tid_cache: HashMap::new(),
         timebase: TimebaseInfo::now(),
+        unwinder,
         stats: ProbeStats::default(),
     };
 
@@ -305,14 +326,29 @@ impl ProbeWorker {
             )
         };
 
-        // Walk the FP chain *before* resume, while the thread is
-        // still frozen — guarantees a consistent stack image. The
-        // walk reads target memory with mach_vm_read_overwrite, so
-        // the thread doesn't need to be running for it to work.
-        let mach_walked: Vec<u64> = if kr_get == KERN_SUCCESS {
-            fp_walk(self.task, state.__fp, MAX_WALK_FRAMES)
-        } else {
+        // Walk the stack *before* resume, while the thread is still
+        // frozen — guarantees a consistent stack image.
+        //
+        // Prefer framehop (DWARF / compact unwind): it handles
+        // omit-frame-pointer code, JITed Swift async stacks, and
+        // PAC stripping correctly. Fall back to a plain FP walk if
+        // image enumeration failed at session start.
+        let mach_walked: Vec<u64> = if kr_get != KERN_SUCCESS {
             Vec::new()
+        } else if let Some(tu) = self.unwinder.as_mut() {
+            unwind::walk(
+                tu,
+                state.__pc,
+                state.__lr,
+                state.__sp,
+                state.__fp,
+                MAX_WALK_FRAMES,
+            )
+            .into_iter()
+            .map(pac_strip)
+            .collect()
+        } else {
+            fp_walk(self.task, state.__fp, MAX_WALK_FRAMES)
         };
 
         let probe_done_mach = mach_now();
@@ -403,8 +439,11 @@ impl ProbeWorker {
     }
 
     /// Verbose dump of one probe: kperf's full user_backtrace and
-    /// our FP-walked stack from the suspended thread, side by
-    /// side. Capped per session by `MAX_COMPARISON_ROWS`.
+    /// our framehop-walked stack from the suspended thread, side
+    /// by side, with each frame symbolicated to
+    /// `module!symbol+offset` via the in-tree symbolicator
+    /// (on-disk Mach-O symtab + dyld_shared_cache). Capped per
+    /// session by `MAX_COMPARISON_ROWS`.
     fn emit_comparison_row(
         &self,
         req: &ProbeRequest,
@@ -414,16 +453,29 @@ impl ProbeWorker {
         mach_walked: &[u64],
         common_suffix: usize,
     ) {
-        let kperf_str = stack_to_hex(&req.kperf_user_backtrace, true);
-        let mach_walked_str = stack_to_hex(mach_walked, false);
+        let sym = self
+            .unwinder
+            .as_ref()
+            .map(|tu| &tu.symbolicator);
+        let kperf_str = stack_to_symbols(&req.kperf_user_backtrace, sym);
+        let mach_walked_str = stack_to_symbols(mach_walked, sym);
+        let mach_pc_sym = sym.map_or_else(
+            || format!("{mach_pc:#x}"),
+            |s| format!("{mach_pc:#x} {}", s.resolve(mach_pc)),
+        );
+        let mach_lr_sym = sym.map_or_else(
+            || format!("{mach_lr:#x}"),
+            |s| format!("{mach_lr:#x} {}", s.resolve(mach_lr)),
+        );
+
         tracing::info!(
             target: "staxd::probe",
             tid = req.tid,
             kperf_ts_mach = req.kperf_ts_mach,
             kperf_stack = %kperf_str,
-            mach_pc = format!("{mach_pc:#x}"),
+            mach_pc = %mach_pc_sym,
             mach_fp = format!("{mach_fp:#x}"),
-            mach_lr = format!("{mach_lr:#x}"),
+            mach_lr = %mach_lr_sym,
             mach_walked = %mach_walked_str,
             common_suffix,
             kperf_walked_depth = req.kperf_user_backtrace.len().saturating_sub(2),
@@ -603,18 +655,32 @@ fn longest_common_suffix(a: &[u64], b: &[u64]) -> usize {
     k
 }
 
-/// Render a stack of u64 addresses as `[0x123,0x456,...]`. Pre-PAC
-/// when `raw=true` (so the caller sees what kperf actually emitted).
-fn stack_to_hex(frames: &[u64], raw: bool) -> String {
-    let mut s = String::with_capacity(frames.len() * 14 + 2);
+/// Render a stack as `[0x123 module!symbol+0xN | 0x456 ... | ...]`.
+/// Each frame is PAC-stripped before symbolication. Without a
+/// symbolicator, falls back to bare `[0x123,0x456,...]`.
+fn stack_to_symbols(frames: &[u64], sym: Option<&crate::unwind::Symbolicator>) -> String {
+    use std::fmt::Write;
+    let Some(sym) = sym else {
+        let mut s = String::with_capacity(frames.len() * 14 + 2);
+        s.push('[');
+        for (i, f) in frames.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            let _ = write!(s, "{:#x}", pac_strip(*f));
+        }
+        s.push(']');
+        return s;
+    };
+
+    let mut s = String::with_capacity(frames.len() * 64 + 2);
     s.push('[');
     for (i, f) in frames.iter().enumerate() {
         if i > 0 {
-            s.push(',');
+            s.push_str(" | ");
         }
-        let v = if raw { *f } else { pac_strip(*f) };
-        use std::fmt::Write;
-        let _ = write!(s, "{v:#x}");
+        let stripped = pac_strip(*f);
+        let _ = write!(s, "{stripped:#x} {}", sym.resolve(stripped));
     }
     s.push(']');
     s

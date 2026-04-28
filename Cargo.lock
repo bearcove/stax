@@ -2265,9 +2265,15 @@ name = "staxd"
 version = "0.1.0"
 dependencies = [
  "eyre",
+ "framehop",
  "libc",
  "mach2",
+ "object 0.39.1",
+ "stax-demangle",
+ "stax-mac-capture",
  "stax-mac-kperf-sys",
+ "stax-mac-shared-cache",
+ "stax-target-images",
  "staxd-proto",
  "tokio",
  "tracing",

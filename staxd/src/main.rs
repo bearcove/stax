@@ -36,6 +36,7 @@ use staxd_proto::{
 
 mod probe;
 mod session;
+mod unwind;
 
 /// Default socket path. Production deployments pass their own via
 /// `--socket` (the LaunchDaemon plist normally puts it under
