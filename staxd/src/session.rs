@@ -148,6 +148,25 @@ async fn drain(
     let mut buf: Vec<KdBuf> = vec![empty_kdbuf(); config.buf_records as usize];
     let mut total_drained: u64 = 0;
 
+    // Signal "kperf/kdebug is configured and enabled" before the
+    // first timed drain. Launch-mode shade uses this as the safe
+    // point to resume a suspended child; waiting for the first real
+    // read can add hundreds of ms and can include stale system-wide
+    // SCHED records unrelated to the target.
+    if let Err(e) = records
+        .send(KdBufBatch {
+            records: Vec::new(),
+            drained_at_unix_ns: unix_ns_now(),
+        })
+        .await
+    {
+        info!(?e, "client closed records channel before ready batch");
+        return Ok(RecordSummary {
+            records_drained: 0,
+            session_ns: session_start.elapsed().as_nanos() as u64,
+        });
+    }
+
     loop {
         if cancel.load(Ordering::Relaxed) {
             info!("stop requested; ending kdebug drain");
