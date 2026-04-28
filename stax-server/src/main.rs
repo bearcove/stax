@@ -790,6 +790,12 @@ impl RunIngest for ServerState {
         // take a RunId yet).
         *self.aggregator.write() = Aggregator::default();
         *self.binaries.write() = BinaryRegistry::new();
+        // Re-attach the host's dyld shared cache. Without this every
+        // cache-resident address (libsystem_*, CoreFoundation, dyld,
+        // …) shows as <unmapped> after the first run of the server's
+        // lifetime, since the previous attach lived on the old
+        // BinaryRegistry instance we just replaced.
+        self.attach_local_shared_cache();
 
         tracing::info!(
             "stax-server: run {} started (frequency_hz={})",

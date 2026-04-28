@@ -651,14 +651,16 @@ fn build_probe_diff_update(
                 fp_walk_n += 1;
             }
 
-            // Compare the FP-walked portion of kperf's stack
-            // against the probe's walked stack (both are leaf-
-            // first, return addresses; kperf's leaf is at [0],
-            // probe's leaf-PC isn't included). Skip kperf[0]
-            // (leaf PC) and kperf's last frame (appended LR) for
-            // the suffix comparison.
-            let kperf_walk: &[u64] = if pet.stack.len() >= 2 {
-                &pet.stack[1..pet.stack.len() - 1]
+            // Compare kperf's walked frames against the probe's
+            // walked stack. Both are leaf-first; kperf's leaf PC
+            // is at [0]; probe's leaf-PC is `mach_pc` and is not
+            // in `mach_walked`. The pipeline parser already
+            // truncates kperf's user_backtrace at the first NULL
+            // (see stax-mac-kperf-parse parser.rs:135), which
+            // strips the appended-LR — so `pet.stack[1..]` is
+            // exactly the FP-walked return-address chain.
+            let kperf_walk: &[u64] = if pet.stack.len() >= 1 {
+                &pet.stack[1..]
             } else {
                 &[]
             };
@@ -677,14 +679,17 @@ fn build_probe_diff_update(
 
             let kperf_leaf = pet.stack.first().copied().unwrap_or(0);
             let pc_match = kperf_leaf == probe.mach_pc;
-            let kperf_lr = pet.stack.last().copied().unwrap_or(0);
-            let lr_match = kperf_lr == probe.mach_lr;
+            // The "appended LR" frame kperf used to emit at the
+            // end of the user backtrace gets dropped in the
+            // pipeline parser's NULL-truncation pass before this
+            // code sees it, so a true LR comparison is no longer
+            // possible from the live data. Surface 0 for
+            // lr_match; if we ever want it back, it has to flow
+            // through the probe channel as a separate field.
+            let lr_match = false;
             if pc_match {
                 pc_match_n += 1;
                 bucket_pc_match[bucket_idx] += 1;
-            }
-            if lr_match {
-                lr_match_n += 1;
             }
 
             // Drill-down render: build symbolicated stacks for the
