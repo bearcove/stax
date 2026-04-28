@@ -24,6 +24,10 @@ targets:
       - path: stax
         excludes:
           - stax.entitlements
+          - Fonts
+      - path: stax/Fonts
+        type: folder
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: eu.bearcove.stax
@@ -32,6 +36,7 @@ targets:
         INFOPLIST_KEY_CFBundleDisplayName: stax
         INFOPLIST_KEY_NSHumanReadableCopyright: "© bearcove"
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+        INFOPLIST_KEY_ATSApplicationFontsPath: Fonts
         ENABLE_APP_SANDBOX: YES
         ENABLE_HARDENED_RUNTIME: YES
         CODE_SIGN_ENTITLEMENTS: stax/stax.entitlements
