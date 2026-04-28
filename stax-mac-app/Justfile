@@ -1,0 +1,39 @@
+project := "stax.xcodeproj"
+scheme  := "stax"
+config  := "Debug"
+
+list:
+    just --list
+
+# Regenerate stax.xcodeproj from project.yml
+gen:
+    xcodegen generate
+
+# Build the app (regenerates project first)
+build: gen
+    xcodebuild -project {{project}} -scheme {{scheme}} -configuration {{config}} build 2>&1 | xcbeautify
+
+# Build, then launch from DerivedData (kills any prior instance first)
+run: build
+    pkill -x stax || true
+    @sleep 0.2
+    @build_dir="$(xcodebuild -project {{project}} -scheme {{scheme}} -configuration {{config}} -showBuildSettings 2>/dev/null | awk '/^ *BUILT_PRODUCTS_DIR =/ { print $3 }')"; \
+      open "$build_dir/stax.app"
+
+# Build, copy to /Applications, launch from there
+install: build
+    pkill -x stax || true
+    @sleep 0.2
+    @build_dir="$(xcodebuild -project {{project}} -scheme {{scheme}} -configuration {{config}} -showBuildSettings 2>/dev/null | awk '/^ *BUILT_PRODUCTS_DIR =/ { print $3 }')"; \
+      rm -rf /Applications/stax.app; \
+      cp -R "$build_dir/stax.app" /Applications/stax.app; \
+      echo "installed to /Applications/stax.app"
+    open /Applications/stax.app
+
+# Open the project in Xcode
+xcode: gen
+    open {{project}}
+
+clean:
+    xcodebuild -project {{project}} -scheme {{scheme}} -configuration {{config}} clean
+    rm -rf .build build DerivedData

@@ -1,0 +1,44 @@
+name: stax
+options:
+  bundleIdPrefix: eu.bearcove
+  deploymentTarget:
+    macOS: "15.0"
+  xcodeVersion: "16.3"
+  defaultConfig: Release
+  createIntermediateGroups: true
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: B2N6FSRTPV
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    SWIFT_VERSION: "6.0"
+    SWIFT_APPROACHABLE_CONCURRENCY: YES
+    SWIFT_DEFAULT_ACTOR_ISOLATION: nonisolated
+    SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY: YES
+
+targets:
+  stax:
+    type: application
+    platform: macOS
+    sources:
+      - path: stax
+        excludes:
+          - stax.entitlements
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: eu.bearcove.stax
+        PRODUCT_NAME: stax
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: stax
+        INFOPLIST_KEY_NSHumanReadableCopyright: "© bearcove"
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+        ENABLE_APP_SANDBOX: YES
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_ENTITLEMENTS: stax/stax.entitlements
+        CODE_SIGN_STYLE: Automatic
+    entitlements:
+      path: stax/stax.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.network.client: true
+        com.apple.security.files.user-selected.read-only: true
