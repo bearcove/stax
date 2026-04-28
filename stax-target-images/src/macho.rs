@@ -20,6 +20,17 @@ use mach2::port::mach_port_t;
 use mach2::vm::mach_vm_read_overwrite;
 use mach2::vm_types::{mach_vm_address_t, mach_vm_size_t};
 
+/// One parsed section: where it lives in the target's address
+/// space (AVMA) plus its bytes. framehop's
+/// `ExplicitModuleSectionInfo` wants both for DWARF CFI (it
+/// needs the svma to resolve eh_frame-relative addresses), so
+/// we keep them paired.
+#[derive(Clone, Debug)]
+pub struct SectionData {
+    pub avma: Range<u64>,
+    pub bytes: Vec<u8>,
+}
+
 /// What we extract from one image. AVMA ranges are runtime
 /// (already slid). Section bytes for the small unwind sections
 /// are eagerly read because the unwinder needs them on every
@@ -38,16 +49,28 @@ pub struct MachoSections {
     /// AVMA range of the `__got` section (PC-relative addressing
     /// hints used by some unwind tables).
     pub got_avma: Option<Range<u64>>,
-    /// `__unwind_info` bytes (Apple's compact-unwind format —
-    /// what `__LINKEDIT/__unwind_info` carries on Apple Silicon).
-    pub unwind_info: Option<Vec<u8>>,
-    /// `__compact_unwind` bytes (older format, still emitted by
-    /// some older toolchains).
-    pub compact_unwind: Option<Vec<u8>>,
-    /// `__eh_frame` bytes (DWARF unwind, the GCC/clang fallback).
-    pub eh_frame: Option<Vec<u8>>,
-    /// `__eh_frame_hdr` bytes (binary search index over eh_frame).
-    pub eh_frame_hdr: Option<Vec<u8>>,
+    /// `__unwind_info` (Apple's compact-unwind format — what
+    /// `__LINKEDIT/__unwind_info` carries on Apple Silicon).
+    pub unwind_info: Option<SectionData>,
+    /// `__compact_unwind` (older format, still emitted by some
+    /// older toolchains).
+    pub compact_unwind: Option<SectionData>,
+    /// `__eh_frame` (DWARF unwind, the GCC/clang fallback).
+    pub eh_frame: Option<SectionData>,
+    /// `__eh_frame_hdr` (binary search index over eh_frame).
+    pub eh_frame_hdr: Option<SectionData>,
+}
+
+impl MachoSections {
+    /// Translate an AVMA range to its SVMA counterpart using the
+    /// recorded slide. SVMA = AVMA - slide. Used at unwinder
+    /// build time to feed framehop, which keys everything by
+    /// SVMA.
+    pub fn avma_to_svma(&self, range: &Range<u64>) -> Range<u64> {
+        let start = (range.start as i64).wrapping_sub(self.slide) as u64;
+        let end = (range.end as i64).wrapping_sub(self.slide) as u64;
+        start..end
+    }
 }
 
 /// Parse the Mach-O image mapped at `load_address` in `task`.
@@ -175,7 +198,13 @@ pub fn parse_image(task: mach_port_t, load_address: u64) -> Option<MachoSections
         }
         let mut buf = vec![0u8; size as usize];
         if read_exact(task, avma, &mut buf) {
-            slot.assign(&mut out, buf);
+            slot.assign(
+                &mut out,
+                SectionData {
+                    avma: avma..avma + size,
+                    bytes: buf,
+                },
+            );
         } else {
             tracing::debug!(
                 avma = format!("{avma:#x}"),
@@ -198,12 +227,12 @@ enum BytesSlot {
 }
 
 impl BytesSlot {
-    fn assign(self, dst: &mut MachoSections, bytes: Vec<u8>) {
+    fn assign(self, dst: &mut MachoSections, data: SectionData) {
         match self {
-            BytesSlot::UnwindInfo => dst.unwind_info = Some(bytes),
-            BytesSlot::CompactUnwind => dst.compact_unwind = Some(bytes),
-            BytesSlot::EhFrame => dst.eh_frame = Some(bytes),
-            BytesSlot::EhFrameHdr => dst.eh_frame_hdr = Some(bytes),
+            BytesSlot::UnwindInfo => dst.unwind_info = Some(data),
+            BytesSlot::CompactUnwind => dst.compact_unwind = Some(data),
+            BytesSlot::EhFrame => dst.eh_frame = Some(data),
+            BytesSlot::EhFrameHdr => dst.eh_frame_hdr = Some(data),
         }
     }
 }

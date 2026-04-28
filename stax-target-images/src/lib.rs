@@ -52,4 +52,4 @@ mod dyld;
 mod macho;
 
 pub use dyld::{ImageEntry, TargetImageWalker, WalkError};
-pub use macho::MachoSections;
+pub use macho::{MachoSections, SectionData};

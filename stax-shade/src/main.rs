@@ -148,11 +148,13 @@ async fn run(cli: Cli) -> eyre::Result<()> {
     let pid = attached.pid;
     let task = attached.task;
 
-    // Walk the target's loaded images once to confirm the
-    // dyld-walking path works end-to-end. Subsequent commits
-    // turn this into a periodic refresh and feed each image's
-    // unwind sections to framehop.
-    log_loaded_images(task);
+    // Walk the target's loaded images once and build a framehop
+    // unwinder + AVMA→image map out of the parsed sections, then
+    // take one snapshot of every thread to validate the path
+    // end-to-end. Periodic sampling lands on top.
+    if let Some((mut unwinder, image_map)) = build_unwinder_from_target(task) {
+        snapshot_once(task, &mut unwinder, &image_map);
+    }
 
     // If a server socket was provided, dial in and register so the
     // server knows we're up and which run we belong to. When
@@ -214,59 +216,120 @@ impl PreResume {
     }
 }
 
-/// Snapshot the target's loaded images and log a summary. Just
-/// validates the dyld walker plumbs through correctly; the real
-/// consumer (framehop unwinder seeding) lands when we wire the
-/// periodic walker loop. Errors are logged and swallowed —
-/// dyld-walk failure shouldn't kill the shade, kperf-side
-/// recording is independent.
-fn log_loaded_images(task: mach2::port::mach_port_t) {
-    let walker = stax_target_images::TargetImageWalker::new(task);
-    match walker.enumerate() {
-        Ok(images) => {
-            // Coverage stats — tells us at a glance how much of
-            // the loaded image set actually has unwind tables we
-            // can feed framehop.
-            let mut with_sections = 0usize;
-            let mut with_unwind_info = 0usize;
-            let mut with_eh_frame = 0usize;
-            let mut unwind_bytes_total = 0usize;
-            for img in &images {
-                if let Some(s) = img.sections.as_ref() {
-                    with_sections += 1;
-                    if let Some(b) = s.unwind_info.as_ref() {
-                        with_unwind_info += 1;
-                        unwind_bytes_total += b.len();
-                    }
-                    if let Some(b) = s.eh_frame.as_ref() {
-                        with_eh_frame += 1;
-                        unwind_bytes_total += b.len();
-                    }
+/// One-shot validation: enumerate threads, walk each one's stack
+/// via framehop, log a per-thread frame count + an example stack
+/// rendered as `<basename>+<offset>` so it's eyeballable without
+/// pulling out `atos`.
+#[cfg(target_arch = "aarch64")]
+fn snapshot_once(
+    task: mach2::port::mach_port_t,
+    unwinder: &mut framehop::aarch64::UnwinderAarch64<Vec<u8>>,
+    image_map: &walker::ImageMap,
+) {
+    let started = std::time::Instant::now();
+    let samples = walker::snapshot_all_threads(task, unwinder);
+    let elapsed_us = started.elapsed().as_micros();
+
+    let total_frames: usize = samples.iter().map(|s| s.frames.len()).sum();
+    let with_frames = samples.iter().filter(|s| !s.frames.is_empty()).count();
+    tracing::info!(
+        threads = samples.len(),
+        with_frames,
+        total_frames,
+        elapsed_us = elapsed_us as u64,
+        "framehop one-shot snapshot"
+    );
+
+    if let Some(deepest) = samples.iter().max_by_key(|s| s.frames.len()) {
+        tracing::info!(
+            thread = deepest.thread,
+            pc = format!("{:#x}", deepest.pc),
+            depth = deepest.frames.len(),
+            "deepest stack"
+        );
+        for (i, addr) in deepest.frames.iter().enumerate().take(32) {
+            match image_map.lookup(*addr) {
+                Some(entry) => {
+                    let basename = entry
+                        .path
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(entry.path.as_str());
+                    let offset = addr - entry.load_address;
+                    tracing::info!(
+                        "  frame[{i:>2}] {:#x}  {basename}+{:#x}",
+                        addr,
+                        offset
+                    );
+                }
+                None => {
+                    tracing::info!("  frame[{i:>2}] {:#x}  (no module)", addr);
                 }
             }
-            tracing::info!(
-                count = images.len(),
-                with_sections,
-                with_unwind_info,
-                with_eh_frame,
-                unwind_bytes = unwind_bytes_total,
-                "dyld walk: enumerated loaded images"
-            );
-            for img in images.iter().take(8) {
-                tracing::debug!(
-                    load_address = format!("{:#x}", img.load_address),
-                    path = %img.path,
-                    "  image"
-                );
-            }
-            if images.len() > 8 {
-                tracing::debug!("  …and {} more", images.len() - 8);
-            }
         }
-        Err(e) => {
-            tracing::warn!("dyld walk failed: {e}");
+        if deepest.frames.len() > 32 {
+            tracing::info!("  …and {} more", deepest.frames.len() - 32);
+        }
+        if let Some(err) = &deepest.error {
+            tracing::info!("  walk ended on: {err}");
         }
     }
+}
+
+/// Snapshot the target's loaded images and build a framehop
+/// `UnwinderAarch64` from them. Logs a coverage summary; returns
+/// `None` only if the dyld walk itself failed — a shade running
+/// without an unwinder is still useful for kperf-side bookkeeping.
+fn build_unwinder_from_target(
+    task: mach2::port::mach_port_t,
+) -> Option<(framehop::aarch64::UnwinderAarch64<Vec<u8>>, walker::ImageMap)> {
+    let walker = stax_target_images::TargetImageWalker::new(task);
+    let images = match walker.enumerate() {
+        Ok(images) => images,
+        Err(e) => {
+            tracing::warn!("dyld walk failed: {e}");
+            return None;
+        }
+    };
+
+    // Pre-walk byte totals for the log line — we lose ownership
+    // once we hand the sections to framehop.
+    let mut unwind_bytes_total = 0usize;
+    let preview: Vec<(u64, String)> = images
+        .iter()
+        .take(8)
+        .map(|i| (i.load_address, i.path.clone()))
+        .collect();
+    let total_count = images.len();
+    for img in &images {
+        if let Some(s) = img.sections.as_ref() {
+            if let Some(b) = s.unwind_info.as_ref() {
+                unwind_bytes_total += b.bytes.len();
+            }
+            if let Some(b) = s.eh_frame.as_ref() {
+                unwind_bytes_total += b.bytes.len();
+            }
+        }
+    }
+
+    let (unwinder, image_map, stats) = walker::build_unwinder(images);
+    tracing::info!(
+        count = stats.images_total,
+        modules = stats.modules_added,
+        with_unwind_info = stats.with_unwind_info,
+        with_eh_frame = stats.with_eh_frame,
+        skipped_no_sections = stats.skipped_no_sections,
+        skipped_no_text = stats.skipped_no_text,
+        unwind_bytes = unwind_bytes_total,
+        "framehop unwinder built from dyld image list"
+    );
+    for (addr, path) in &preview {
+        tracing::debug!(load_address = format!("{addr:#x}"), path = %path, "  image");
+    }
+    if total_count > preview.len() {
+        tracing::debug!("  …and {} more", total_count - preview.len());
+    }
+    Some((unwinder, image_map))
 }
 
 /// Spawn a fresh child via `posix_spawn` with
@@ -426,19 +489,35 @@ fn task_for_pid(pid: u32) -> eyre::Result<mach2::port::mach_port_t> {
     Ok(task)
 }
 
-/// Idle until SIGINT/SIGTERM (or stdin closes). Stage C will
-/// replace this with awaiting on the vox session's `closed()`
-/// future once the server can actually call into `Shade` and
-/// drive a real teardown.
+/// Idle until SIGINT or SIGTERM. Stage C will replace this with
+/// awaiting on the vox session's `closed()` future once the server
+/// can actually call into `Shade` and drive a real teardown.
+///
+/// Earlier versions also raced a `spawn_blocking(read stdin)` so
+/// closing the parent's pipe would terminate the shade. That made
+/// ctrl-c hang: the blocking-pool thread was stuck in a `read()`
+/// syscall forever, and tokio's runtime drop waits for the
+/// blocking pool. Signals alone are enough — stax-server kills the
+/// shade with SIGTERM at run-end.
 async fn park_until_signal() {
-    let stdin_close = tokio::task::spawn_blocking(|| {
-        use std::io::Read;
-        let mut sink = [0u8; 1];
-        let _ = std::io::stdin().read(&mut sink);
-    });
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut sigint = match signal(SignalKind::interrupt()) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("install SIGINT handler failed: {e}");
+            return;
+        }
+    };
+    let mut sigterm = match signal(SignalKind::terminate()) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("install SIGTERM handler failed: {e}");
+            return;
+        }
+    };
     tokio::select! {
-        _ = stdin_close => {}
-        _ = tokio::signal::ctrl_c() => {}
+        _ = sigint.recv() => tracing::info!("received SIGINT, shutting down"),
+        _ = sigterm.recv() => tracing::info!("received SIGTERM, shutting down"),
     }
 }
 
