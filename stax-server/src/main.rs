@@ -930,6 +930,21 @@ impl ServerState {
             IngestEvent::TargetAttached { pid, task_port } => {
                 self.binaries.write().set_target(pid, task_port);
             }
+            IngestEvent::ProbeResult(p) => {
+                self.aggregator
+                    .write()
+                    .record_probe_result(stax_live::ProbeResultRecord {
+                        tid: p.tid,
+                        kperf_ts: p.kperf_ts_ns,
+                        probe_done_ns: p.probe_done_ns,
+                        mach_pc: p.mach_pc,
+                        mach_lr: p.mach_lr,
+                        mach_fp: p.mach_fp,
+                        mach_sp: p.mach_sp,
+                        mach_walked: p.mach_walked.into_boxed_slice(),
+                        used_framehop: p.used_framehop,
+                    });
+            }
         }
     }
 

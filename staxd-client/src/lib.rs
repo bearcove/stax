@@ -14,7 +14,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use stax_mac_capture::SampleSink;
+use stax_mac_capture::{ProbeResultEvent, SampleSink};
 use stax_mac_kperf_parse::pipeline::{Pipeline, PipelineConfig};
 use stax_mac_kperf_sys::bindings::sampler;
 use stax_mac_kperf_sys::kdebug::{self, KdBuf, DBG_MACH, DBG_MACH_SCHED, DBG_PERF};
@@ -219,6 +219,25 @@ pub async fn drive_session<S: SampleSink>(
             total_drained += batch.records.len() as u64;
             let kdbufs: Vec<KdBuf> = batch.records.iter().map(wire_to_kdbuf).collect();
             pipeline.process_records(&kdbufs, sink);
+
+            // Probe results ride alongside the kperf records — emit
+            // them through the same sink so they reach the same
+            // symbolicator + aggregator + UI as kperf samples. The
+            // pipeline doesn't need to correlate; downstream pairs
+            // by (tid, kperf_ts == sample.timestamp_ns).
+            for pr in &batch.probe_results {
+                sink.on_probe_result(ProbeResultEvent {
+                    tid: pr.tid,
+                    kperf_ts_ns: pr.kperf_ts_mach,
+                    probe_done_ns: pr.probe_done_mach,
+                    mach_pc: pr.mach_pc,
+                    mach_lr: pr.mach_lr,
+                    mach_fp: pr.mach_fp,
+                    mach_sp: pr.mach_sp,
+                    mach_walked: &pr.mach_walked,
+                    used_framehop: pr.used_framehop,
+                });
+            }
         });
     }
 

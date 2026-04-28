@@ -320,6 +320,25 @@ impl SampleSink for LiveOnlySink {
         }));
     }
 
+    fn on_probe_result(&mut self, ev: stax_mac_capture::ProbeResultEvent<'_>) {
+        let Some(sink) = self.live_sink.as_ref() else {
+            return;
+        };
+        block_sink(sink.on_probe_result(
+            &crate::live_sink::ProbeResultEvent {
+                tid: ev.tid,
+                kperf_ts: ev.kperf_ts_ns,
+                probe_done_ns: ev.probe_done_ns,
+                mach_pc: ev.mach_pc,
+                mach_lr: ev.mach_lr,
+                mach_fp: ev.mach_fp,
+                mach_sp: ev.mach_sp,
+                mach_walked: ev.mach_walked,
+                used_framehop: ev.used_framehop,
+            },
+        ));
+    }
+
     fn on_macho_byte_source(
         &mut self,
         source: std::sync::Arc<dyn stax_mac_capture::MachOByteSource>,

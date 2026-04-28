@@ -127,6 +127,24 @@ pub struct WakeupEvent< 'a > {
     pub waker_kernel_stack: &'a [u64],
 }
 
+/// Race-against-return probe output. Correlates with the matching
+/// `SampleEvent` by `(tid, kperf_ts == SampleEvent::timestamp)`.
+/// `mach_walked` is the suspended thread's stack from framehop
+/// (or FP-walk fallback), leaf-most first, PAC-stripped, no leaf
+/// PC. Server resolves through the same BinaryRegistry as kperf
+/// samples.
+pub struct ProbeResultEvent<'a> {
+    pub tid: u32,
+    pub kperf_ts: u64,
+    pub probe_done_ns: u64,
+    pub mach_pc: u64,
+    pub mach_lr: u64,
+    pub mach_fp: u64,
+    pub mach_sp: u64,
+    pub mach_walked: &'a [u64],
+    pub used_framehop: bool,
+}
+
 /// Recording-side observer. Methods are async so consumers can do
 /// real I/O — buffer drains, vox sends, parallel image walks —
 /// without blocking the recorder's runtime.
@@ -181,6 +199,13 @@ pub trait LiveSink: Send + Sync {
     /// scheduling events.
     #[allow(unused_variables)]
     async fn on_cpu_interval(&self, event: &CpuIntervalEvent) {}
+
+    /// One race-against-return probe result, paired with a
+    /// `SampleEvent` by `(tid, timestamp == kperf_ts)`. Default
+    /// no-op so backends without the probe (Linux, anything not
+    /// driven by staxd) compile fine.
+    #[allow(unused_variables)]
+    async fn on_probe_result<'a>(&self, event: &ProbeResultEvent<'a>) {}
 
     /// Recorder hands the live side a typed byte source it can use
     /// to satisfy disassembly requests for addresses inside the

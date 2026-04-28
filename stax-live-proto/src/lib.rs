@@ -763,6 +763,38 @@ pub struct WireWakeup {
     pub waker_kernel_stack: Vec<u64>,
 }
 
+/// One race-against-return probe result, correlated with a kperf
+/// sample by `(tid, kperf_ts_mach)`. The probe ran in staxd shortly
+/// after the kperf PMI sample landed: it suspended the originating
+/// thread, captured registers, walked the stack via framehop (or
+/// FP-walk fallback), and shipped the result back through the
+/// existing batch channel. Server resolves addresses through the
+/// same BinaryRegistry path it uses for kperf samples.
+#[derive(Clone, Debug, Facet)]
+pub struct WireProbeResult {
+    pub tid: u32,
+    /// Kdebug timestamp of the matching kperf sample (mach ticks),
+    /// converted to ns by the recorder before shipping.
+    pub kperf_ts_ns: u64,
+    /// Wall-clock-ns timestamp of when the probe completed.
+    pub probe_done_ns: u64,
+    /// User PC at suspend (PAC-stripped).
+    pub mach_pc: u64,
+    /// Link register at suspend (PAC-stripped).
+    pub mach_lr: u64,
+    /// Frame pointer at suspend.
+    pub mach_fp: u64,
+    /// Stack pointer at suspend.
+    pub mach_sp: u64,
+    /// Walked return addresses from the suspended thread, leaf-most
+    /// first; PAC-stripped; does not include the leaf PC.
+    pub mach_walked: Vec<u64>,
+    /// `true` if framehop produced the walk, `false` for FP-walk
+    /// fallback. Lets the server label "DWARF-accurate" vs
+    /// "best-effort" frames in the UI.
+    pub used_framehop: bool,
+}
+
 /// One ingest event the recorder ships to the server. Mirrors the
 /// in-process `LiveSink` trait minus `on_macho_byte_source` (which
 /// holds an mmap-backed `Arc<dyn Trait>` that doesn't cross a
@@ -781,6 +813,9 @@ pub enum IngestEvent {
     BinaryUnloaded { path: String, base_avma: u64 },
     ThreadName { pid: u32, tid: u32, name: String },
     Wakeup(WireWakeup),
+    /// Race-against-return probe result for one kperf sample.
+    /// Correlate against a `Sample` by `(tid, kperf_ts_ns)`.
+    ProbeResult(WireProbeResult),
 }
 
 #[derive(Clone, Debug, Facet)]

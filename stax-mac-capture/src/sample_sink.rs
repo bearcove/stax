@@ -54,6 +54,30 @@ pub trait SampleSink {
     /// archive-only sinks ignore it.
     #[allow(unused_variables)]
     fn on_macho_byte_source(&mut self, source: std::sync::Arc<dyn MachOByteSource>) {}
+
+    /// One race-against-return probe result. The recorder produces
+    /// these in the staxd-driven path: staxd suspends the sampled
+    /// thread shortly after kperf's PMI lands, walks via framehop,
+    /// and ships the result alongside the kperf records. Pair
+    /// against a `SampleEvent` by matching `(tid, timestamp_ns ==
+    /// kperf_ts_ns)`. Default no-op so archive-only sinks ignore.
+    #[allow(unused_variables)]
+    fn on_probe_result(&mut self, ev: ProbeResultEvent<'_>) {}
+}
+
+/// Race-against-return probe output for one kperf sample.
+/// `kperf_ts_ns` matches the corresponding `SampleEvent`'s
+/// `timestamp_ns`.
+pub struct ProbeResultEvent<'a> {
+    pub tid: u32,
+    pub kperf_ts_ns: u64,
+    pub probe_done_ns: u64,
+    pub mach_pc: u64,
+    pub mach_lr: u64,
+    pub mach_fp: u64,
+    pub mach_sp: u64,
+    pub mach_walked: &'a [u64],
+    pub used_framehop: bool,
 }
 
 /// One PET stack-walk hit: a snapshot of where a thread was at one

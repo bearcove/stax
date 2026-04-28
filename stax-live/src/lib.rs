@@ -23,7 +23,7 @@ mod disassemble;
 mod highlight;
 pub mod source;
 
-pub use aggregator::Aggregator;
+pub use aggregator::{Aggregator, ProbeResultRecord};
 pub use binaries::{BinaryRegistry, LiveSymbolOwned, LoadedBinary};
 
 

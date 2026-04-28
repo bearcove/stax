@@ -116,6 +116,22 @@ impl LiveSink for IngestSink {
         }));
     }
 
+    async fn on_probe_result<'a>(&self, ev: &crate::live_sink::ProbeResultEvent<'a>) {
+        let _ = self
+            .tx
+            .send(IngestEvent::ProbeResult(stax_live_proto::WireProbeResult {
+                tid: ev.tid,
+                kperf_ts_ns: ev.kperf_ts,
+                probe_done_ns: ev.probe_done_ns,
+                mach_pc: ev.mach_pc,
+                mach_lr: ev.mach_lr,
+                mach_fp: ev.mach_fp,
+                mach_sp: ev.mach_sp,
+                mach_walked: ev.mach_walked.to_vec(),
+                used_framehop: ev.used_framehop,
+            }));
+    }
+
     async fn on_cpu_interval(&self, ev: &CpuIntervalEvent) {
         match &ev.kind {
             CpuIntervalKind::OnCpu => {

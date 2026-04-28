@@ -158,6 +158,33 @@ pub struct WalkerSample {
     pub stack: Box<[u64]>,
 }
 
+/// Race-against-return probe output paired with one kperf
+/// `PetSample` by `(tid, timestamp_ns == kperf_ts)`. Source: staxd
+/// suspends the sampled thread shortly after kperf's PMI lands,
+/// captures registers, walks via framehop (or FP-walk fallback).
+/// Stored alongside the kperf sample so the UI / aggregator can
+/// diff the two stacks and surface the common-suffix / divergence
+/// for atomic-stitch experiments.
+pub struct ProbeResultRecord {
+    pub tid: u32,
+    /// Mach-tick timestamp of the matching kperf sample (matches
+    /// the `PetSample::timestamp_ns` field on the same tid).
+    pub kperf_ts: u64,
+    /// Mach-tick timestamp at which the probe finished
+    /// `thread_get_state`. Drift = kperf_ts → probe_done_ns.
+    pub probe_done_ns: u64,
+    pub mach_pc: u64,
+    pub mach_lr: u64,
+    pub mach_fp: u64,
+    pub mach_sp: u64,
+    /// Walked return addresses from the suspended thread, leaf-most
+    /// first; PAC-stripped; does not include the leaf PC.
+    pub mach_walked: Box<[u64]>,
+    /// `true` if framehop produced the walk, `false` for FP-walk
+    /// fallback.
+    pub used_framehop: bool,
+}
+
 /// One on-CPU or off-CPU interval, as reported by SCHED-record
 /// transitions. For off-CPU, the stack the thread was on at the
 /// moment it parked is included so the aggregator can attribute the
@@ -210,6 +237,11 @@ pub struct ThreadStats {
     pub(crate) walker_samples: std::collections::VecDeque<WalkerSample>,
     pub(crate) intervals: std::collections::VecDeque<RawInterval>,
     pub(crate) wakeups: std::collections::VecDeque<RawWakeup>,
+    /// Probe results indexed by `kperf_ts` so a UI / query can
+    /// look up "for sample at time T on tid X, what did the
+    /// suspended-thread walk show?". Bounded with the same per-
+    /// thread cap as the other queues.
+    pub(crate) probe_results: std::collections::VecDeque<ProbeResultRecord>,
 }
 
 #[derive(Clone, Copy)]
@@ -308,6 +340,18 @@ impl Aggregator {
             timestamp_ns,
             stack: user_addrs.to_vec().into_boxed_slice(),
         });
+    }
+
+    /// Record a race-against-return probe result. Pairs with the
+    /// kperf `PetSample` that has the same `(tid, kperf_ts)` —
+    /// queries can correlate at read time.
+    pub fn record_probe_result(&mut self, result: ProbeResultRecord) {
+        self.note_timestamp(result.kperf_ts);
+        let stats = self.threads.entry(result.tid).or_default();
+        if stats.probe_results.len() >= MAX_EVENTS_PER_THREAD {
+            stats.probe_results.pop_front();
+        }
+        stats.probe_results.push_back(result);
     }
 
     pub fn record_pet_sample(
