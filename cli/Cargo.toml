@@ -16,7 +16,7 @@ vox = { path = "/Users/amos/bearcove/vox/rust/vox" }
 
 [dependencies.tokio]
 version = "1"
-features = ["rt-multi-thread", "signal"]
+features = ["rt-multi-thread", "signal", "sync"]
 
 [features]
 default = ["addr2line"]

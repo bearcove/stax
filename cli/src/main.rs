@@ -1,5 +1,6 @@
 use std::env;
 use std::error::Error;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::exit;
 
@@ -12,8 +13,9 @@ use stax_core::{
     cmd_setup_mac,
 };
 use stax_live_proto::{
-    FlameNode, FlamegraphUpdate, LiveFilter, OffCpuBreakdown, ProbeDiffEntry, ProbeDiffUpdate,
-    ProfilerClient, RunControlClient, RunSummary, ServerStatus, ThreadsUpdate, TopSort, ViewParams,
+    FlameNode, FlamegraphUpdate, LaunchEnvVar, LaunchRequest, LiveFilter, OffCpuBreakdown,
+    ProbeDiffEntry, ProbeDiffUpdate, ProfilerClient, RunControlClient, RunSummary, ServerStatus,
+    StopReason, TerminalInput, TerminalOutput, TerminalSize, ThreadsUpdate, TopSort, ViewParams,
     WaitCondition, WaitOutcome,
 };
 
@@ -109,6 +111,7 @@ async fn run_record_async(args: RecordArgs) -> Result<(), Box<dyn Error>> {
         frequency_hz: args.frequency,
     };
 
+    let mut terminal_relay = None;
     let run_id = match target {
         stax_core::args::TargetProcess::ByPid(pid) => client
             .start_attach(pid, config, args.daemon_socket.clone(), args.time_limit)
@@ -121,10 +124,35 @@ async fn run_record_async(args: RecordArgs) -> Result<(), Box<dyn Error>> {
             let mut command = Vec::with_capacity(1 + rest.len());
             command.push(program);
             command.extend(rest);
-            client
-                .start_launch(command, config, args.daemon_socket.clone(), args.time_limit)
+            let (terminal_input_tx, terminal_input_rx) = vox::channel::<TerminalInput>();
+            let (terminal_output_tx, terminal_output_rx) = vox::channel::<TerminalOutput>();
+            let terminal_size = current_terminal_size_or_default();
+            let request = LaunchRequest {
+                command,
+                cwd: env::current_dir()?.to_string_lossy().into_owned(),
+                env: env::vars_os()
+                    .filter_map(|(key, value)| {
+                        Some(LaunchEnvVar {
+                            key: key.into_string().ok()?,
+                            value: value.into_string().ok()?,
+                        })
+                    })
+                    .collect(),
+                config,
+                daemon_socket: args.daemon_socket.clone(),
+                time_limit_secs: args.time_limit,
+                terminal_size: Some(terminal_size),
+            };
+            let run_id = client
+                .start_launch(request, terminal_input_rx, terminal_output_tx)
                 .await
-                .map_err(|e| format!("{e:?}"))?
+                .map_err(|e| format!("{e:?}"))?;
+            terminal_relay = Some(TerminalRelay::start(
+                terminal_input_tx,
+                terminal_output_rx,
+                Some(terminal_size),
+            ));
+            run_id
         }
     };
     eprintln!("stax: started run {}", run_id.0);
@@ -134,11 +162,14 @@ async fn run_record_async(args: RecordArgs) -> Result<(), Box<dyn Error>> {
         outcome = wait_client.wait_active(WaitCondition::UntilStopped, None) => {
             match outcome.map_err(|e| format!("{e:?}"))? {
                 WaitOutcome::Stopped { summary } => {
+                    drop(terminal_relay.take());
                     println!("stopped:");
                     print_run_one_line(&summary);
+                    fail_on_recorder_error(&summary)?;
                 }
                 WaitOutcome::NoActiveRun => {
-                    eprintln!("stax: run ended before wait attached");
+                    drop(terminal_relay.take());
+                    print_finished_run_or_message(&client, run_id).await?;
                 }
                 other => {
                     eprintln!("stax: unexpected wait outcome: {other:?}");
@@ -148,11 +179,197 @@ async fn run_record_async(args: RecordArgs) -> Result<(), Box<dyn Error>> {
         signal = tokio::signal::ctrl_c() => {
             signal.map_err(|e| format!("waiting for Ctrl-C: {e}"))?;
             let summary = client.stop_active().await.map_err(|e| format!("{e:?}"))?;
+            drop(terminal_relay.take());
             println!("stopped:");
             print_run_one_line(&summary);
         }
     }
+    drop(terminal_relay);
     Ok(())
+}
+
+async fn print_finished_run_or_message(
+    client: &RunControlClient,
+    run_id: stax_live_proto::RunId,
+) -> Result<(), Box<dyn Error>> {
+    let runs = client.list_runs().await.map_err(|e| format!("{e:?}"))?;
+    let Some(summary) = runs.into_iter().find(|run| run.id == run_id) else {
+        eprintln!("stax: run ended before wait attached");
+        return Ok(());
+    };
+    println!("stopped:");
+    print_run_one_line(&summary);
+    fail_on_recorder_error(&summary)?;
+    Ok(())
+}
+
+fn fail_on_recorder_error(summary: &RunSummary) -> Result<(), Box<dyn Error>> {
+    if let Some(StopReason::RecorderError { message }) = &summary.stop_reason {
+        return Err(format!("recorder failed: {message}").into());
+    }
+    Ok(())
+}
+
+struct TerminalRelay {
+    _raw_mode: Option<RawMode>,
+}
+
+impl TerminalRelay {
+    fn start(
+        terminal_input: vox::Tx<TerminalInput>,
+        mut terminal_output: vox::Rx<TerminalOutput>,
+        initial_size: Option<TerminalSize>,
+    ) -> Self {
+        let raw_mode = RawMode::enable().ok().flatten();
+        let (input_events_tx, mut input_events_rx) =
+            tokio::sync::mpsc::unbounded_channel::<TerminalInput>();
+
+        if let Some(size) = initial_size {
+            let _ = input_events_tx.send(TerminalInput::Resize { size });
+        }
+
+        let stdin_events = input_events_tx.clone();
+        std::thread::spawn(move || {
+            let mut stdin = std::io::stdin();
+            let mut buf = [0u8; 8192];
+            loop {
+                match stdin.read(&mut buf) {
+                    Ok(0) => {
+                        let _ = stdin_events.send(TerminalInput::Close);
+                        break;
+                    }
+                    Ok(n) => {
+                        if stdin_events
+                            .send(TerminalInput::Bytes {
+                                data: buf[..n].to_vec(),
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => {
+                        let _ = stdin_events.send(TerminalInput::Close);
+                        break;
+                    }
+                }
+            }
+        });
+
+        #[cfg(unix)]
+        {
+            let resize_events = input_events_tx.clone();
+            tokio::spawn(async move {
+                if let Ok(mut sigwinch) =
+                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
+                {
+                    while sigwinch.recv().await.is_some() {
+                        if let Some(size) = current_terminal_size() {
+                            let _ = resize_events.send(TerminalInput::Resize { size });
+                        }
+                    }
+                }
+            });
+        }
+
+        tokio::spawn(async move {
+            while let Some(event) = input_events_rx.recv().await {
+                if terminal_input.send(event).await.is_err() {
+                    break;
+                }
+            }
+            let _ = terminal_input.close(Default::default()).await;
+        });
+
+        tokio::spawn(async move {
+            let mut stdout = std::io::stdout();
+            loop {
+                match terminal_output.recv().await {
+                    Ok(Some(output_sref)) => {
+                        let mut output = None;
+                        let _ = output_sref.map(|value| {
+                            output = Some(value);
+                        });
+                        match output.expect("output set") {
+                            TerminalOutput::Bytes { data } => {
+                                let _ = stdout.write_all(&data);
+                                let _ = stdout.flush();
+                            }
+                            TerminalOutput::ExitStatus { .. } => {}
+                            TerminalOutput::Error { message } => {
+                                eprintln!("stax terminal: {message}");
+                            }
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        eprintln!("stax terminal recv failed: {e:?}");
+                        break;
+                    }
+                }
+            }
+        });
+
+        Self {
+            _raw_mode: raw_mode,
+        }
+    }
+}
+
+struct RawMode {
+    fd: libc::c_int,
+    original: libc::termios,
+}
+
+impl RawMode {
+    fn enable() -> std::io::Result<Option<Self>> {
+        let fd = libc::STDIN_FILENO;
+        if unsafe { libc::isatty(fd) } == 0 {
+            return Ok(None);
+        }
+        let mut original = std::mem::MaybeUninit::<libc::termios>::uninit();
+        if unsafe { libc::tcgetattr(fd, original.as_mut_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let original = unsafe { original.assume_init() };
+        let mut raw = original;
+        unsafe {
+            libc::cfmakeraw(&mut raw);
+        }
+        if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Some(Self { fd, original }))
+    }
+}
+
+impl Drop for RawMode {
+    fn drop(&mut self) {
+        unsafe {
+            libc::tcsetattr(self.fd, libc::TCSANOW, &self.original);
+        }
+    }
+}
+
+fn current_terminal_size() -> Option<TerminalSize> {
+    let mut size = std::mem::MaybeUninit::<libc::winsize>::uninit();
+    let r = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, size.as_mut_ptr()) };
+    if r != 0 {
+        return None;
+    }
+    let size = unsafe { size.assume_init() };
+    if size.ws_row == 0 || size.ws_col == 0 {
+        return None;
+    }
+    Some(TerminalSize {
+        rows: size.ws_row,
+        cols: size.ws_col,
+    })
+}
+
+fn current_terminal_size_or_default() -> TerminalSize {
+    current_terminal_size().unwrap_or(TerminalSize { rows: 24, cols: 80 })
 }
 
 fn require_server_socket() -> Result<String, Box<dyn Error>> {

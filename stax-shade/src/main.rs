@@ -55,12 +55,16 @@
 
 #![cfg(target_os = "macos")]
 
+use std::os::fd::RawFd;
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use eyre::WrapErr;
 use facet::Facet;
 use figue as args;
 use stax_core::cmd_record_mac::LiveOnlySink;
+use stax_live_proto::{TerminalBrokerClient, TerminalInput, TerminalOutput, TerminalSize};
 use stax_shade_proto::{ShadeAck, ShadeCapabilities, ShadeInfo, ShadeRegistryClient};
 
 #[derive(Facet, Debug)]
@@ -91,6 +95,18 @@ struct Cli {
     /// Stop sampling after this many seconds. Unlimited by default.
     #[facet(args::named, default)]
     time_limit: Option<u64>,
+
+    /// Working directory to use when launching a target.
+    #[facet(args::named, default)]
+    cwd: Option<String>,
+
+    /// Initial PTY height for launched targets.
+    #[facet(args::named, default)]
+    terminal_rows: Option<u16>,
+
+    /// Initial PTY width for launched targets.
+    #[facet(args::named, default)]
+    terminal_cols: Option<u16>,
 
     /// Launch a fresh process and attach to it before its first
     /// instruction (POSIX_SPAWN_START_SUSPENDED). Mutually
@@ -150,14 +166,32 @@ async fn run(cli: Cli) -> eyre::Result<()> {
                 pid,
                 task,
                 pre_resume: None,
+                terminal: None,
             }
         }
-        AttachMode::Launch(argv) => launch_suspended(argv)?,
+        AttachMode::Launch(argv) => {
+            if let Some(cwd) = &cli.cwd {
+                std::env::set_current_dir(cwd)
+                    .map_err(|e| eyre::eyre!("set cwd to {cwd:?}: {e}"))?;
+            }
+            let terminal_size = match (cli.terminal_rows, cli.terminal_cols) {
+                (Some(rows), Some(cols)) => Some(TerminalSize { rows, cols }),
+                _ => None,
+            };
+            launch_suspended(
+                argv,
+                cli.server_socket
+                    .is_some()
+                    .then_some(terminal_size)
+                    .flatten(),
+            )?
+        }
     };
     let pid = attached.pid;
     let task = attached.task;
 
     let launched_pid = attached.pre_resume.as_ref().map(|_| pid);
+    let terminal = attached.terminal;
     let _ = task;
     let server_socket = cli.server_socket.clone();
 
@@ -169,6 +203,7 @@ async fn run(cli: Cli) -> eyre::Result<()> {
                 stax_live_proto::RunId(run_id),
                 pid,
                 attached.pre_resume,
+                terminal,
                 launched_pid,
             )
             .await?;
@@ -196,11 +231,16 @@ async fn run_recording(
     run_id: stax_live_proto::RunId,
     pid: u32,
     pre_resume: Option<PreResume>,
+    terminal: Option<Pty>,
     launched_pid: Option<u32>,
 ) -> eyre::Result<()> {
     let _server_client = register_with_server(server_socket, run_id.0, pid).await?;
     let (ingest_sink, forwarder) =
         stax_core::ingest_sink::connect_to_existing_run(server_socket, run_id).await?;
+    let terminal_pump = match terminal {
+        Some(pty) => Some(start_terminal_pump(server_socket, run_id, pty).await?),
+        None => None,
+    };
 
     let sink = LiveOnlySink::new(Some(Box::new(ingest_sink)));
     sink.notify_target_attached(pid);
@@ -223,16 +263,20 @@ async fn run_recording(
         pid,
         "shade starting staxd recording pipeline"
     );
-    let mut child_done = false;
+    let child_exit = Arc::new(Mutex::new(None));
+    let child_exit_for_stop = child_exit.clone();
     let result = staxd_client::drive_session(opts, sink, move || {
         if stop_via_sink() {
             return true;
         }
         if let Some(pid) = launched_pid
-            && !child_done
-            && launched_child_exited(pid)
+            && child_exit_for_stop
+                .lock()
+                .expect("child_exit poisoned")
+                .is_none()
+            && let Some(exit) = launched_child_exited(pid)
         {
-            child_done = true;
+            *child_exit_for_stop.lock().expect("child_exit poisoned") = Some(exit);
             return true;
         }
         false
@@ -240,7 +284,18 @@ async fn run_recording(
     .await;
 
     if let Some(pid) = launched_pid {
-        terminate_launched_child(pid);
+        if child_exit.lock().expect("child_exit poisoned").is_none()
+            && let Some(exit) = terminate_launched_child(pid)
+        {
+            *child_exit.lock().expect("child_exit poisoned") = Some(exit);
+        }
+    }
+
+    if let Some(terminal_pump) = terminal_pump {
+        if let Some(exit) = *child_exit.lock().expect("child_exit poisoned") {
+            terminal_pump.report_exit(exit);
+        }
+        terminal_pump.finish().await;
     }
 
     if let Err(e) = forwarder.await {
@@ -263,6 +318,7 @@ struct Attached {
     /// POSIX_SPAWN_START_SUSPENDED and is waiting for us to resume
     /// it. `None` for `--attach`: target was already running.
     pre_resume: Option<PreResume>,
+    terminal: Option<Pty>,
 }
 
 struct PreResume {
@@ -285,6 +341,62 @@ impl PreResume {
     }
 }
 
+struct Pty {
+    master: RawFd,
+    slave: RawFd,
+}
+
+impl Drop for Pty {
+    fn drop(&mut self) {
+        unsafe {
+            if self.master >= 0 {
+                libc::close(self.master);
+            }
+            if self.slave >= 0 {
+                libc::close(self.slave);
+            }
+        }
+    }
+}
+
+fn open_pty(size: TerminalSize) -> eyre::Result<Pty> {
+    use std::ptr;
+
+    let mut master = -1;
+    let mut slave = -1;
+    let mut winsize = libc::winsize {
+        ws_row: size.rows,
+        ws_col: size.cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let r = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut winsize,
+        )
+    };
+    if r != 0 {
+        return Err(std::io::Error::last_os_error()).wrap_err("openpty");
+    }
+    Ok(Pty { master, slave })
+}
+
+fn set_pty_size(fd: RawFd, size: TerminalSize) {
+    let winsize = libc::winsize {
+        ws_row: size.rows,
+        ws_col: size.cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    unsafe {
+        libc::ioctl(fd, libc::TIOCSWINSZ, &winsize);
+    }
+}
+
 /// Spawn a fresh child via `posix_spawn` with
 /// `POSIX_SPAWN_START_SUSPENDED`, acquire its task port, and
 /// hand back the suspended-attachment record. The caller is
@@ -295,7 +407,10 @@ impl PreResume {
 /// Argv: `argv[0]` is the program path; the rest are passed to
 /// the child as-is. `posix_spawnp` keeps CLI behavior aligned with
 /// `std::process::Command`: bare program names resolve through PATH.
-fn launch_suspended(argv: Vec<String>) -> eyre::Result<Attached> {
+fn launch_suspended(
+    argv: Vec<String>,
+    terminal_size: Option<TerminalSize>,
+) -> eyre::Result<Attached> {
     use std::ffi::CString;
     use std::os::raw::c_char;
     use std::ptr;
@@ -313,6 +428,11 @@ fn launch_suspended(argv: Vec<String>) -> eyre::Result<Attached> {
         .map_err(|_| eyre::eyre!("argv contains an interior NUL"))?;
     let mut argv_p: Vec<*mut c_char> = argv_c.iter().map(|c| c.as_ptr() as *mut c_char).collect();
     argv_p.push(ptr::null_mut());
+
+    let mut pty = match terminal_size {
+        Some(size) => Some(open_pty(size)?),
+        None => None,
+    };
 
     let mut attr: libc::posix_spawnattr_t = ptr::null_mut();
     // SAFETY: posix_spawnattr_init writes through the out-pointer.
@@ -334,12 +454,54 @@ fn launch_suspended(argv: Vec<String>) -> eyre::Result<Attached> {
         eyre::bail!("posix_spawnattr_setflags: {r}");
     }
 
+    let mut actions: libc::posix_spawn_file_actions_t = ptr::null_mut();
+    let actions_ptr = if let Some(pty) = &pty {
+        let r = unsafe { libc::posix_spawn_file_actions_init(&mut actions) };
+        if r != 0 {
+            unsafe {
+                libc::posix_spawnattr_destroy(&mut attr);
+            }
+            eyre::bail!("posix_spawn_file_actions_init: {r}");
+        }
+        for fd in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
+            let r = unsafe { libc::posix_spawn_file_actions_adddup2(&mut actions, pty.slave, fd) };
+            if r != 0 {
+                unsafe {
+                    libc::posix_spawn_file_actions_destroy(&mut actions);
+                    libc::posix_spawnattr_destroy(&mut attr);
+                }
+                eyre::bail!("posix_spawn_file_actions_adddup2({fd}): {r}");
+            }
+        }
+        if pty.slave > libc::STDERR_FILENO {
+            let r = unsafe { libc::posix_spawn_file_actions_addclose(&mut actions, pty.slave) };
+            if r != 0 {
+                unsafe {
+                    libc::posix_spawn_file_actions_destroy(&mut actions);
+                    libc::posix_spawnattr_destroy(&mut attr);
+                }
+                eyre::bail!("posix_spawn_file_actions_addclose(slave): {r}");
+            }
+        }
+        let r = unsafe { libc::posix_spawn_file_actions_addclose(&mut actions, pty.master) };
+        if r != 0 {
+            unsafe {
+                libc::posix_spawn_file_actions_destroy(&mut actions);
+                libc::posix_spawnattr_destroy(&mut attr);
+            }
+            eyre::bail!("posix_spawn_file_actions_addclose(master): {r}");
+        }
+        &actions as *const libc::posix_spawn_file_actions_t
+    } else {
+        ptr::null()
+    };
+
     let mut pid: libc::pid_t = 0;
     let r = unsafe {
         libc::posix_spawnp(
             &mut pid,
             program.as_ptr(),
-            ptr::null(),
+            actions_ptr,
             &attr,
             argv_p.as_ptr(),
             // Inherit our environment as-is — we want PATH /
@@ -348,6 +510,9 @@ fn launch_suspended(argv: Vec<String>) -> eyre::Result<Attached> {
         )
     };
     unsafe {
+        if !actions.is_null() {
+            libc::posix_spawn_file_actions_destroy(&mut actions);
+        }
         libc::posix_spawnattr_destroy(&mut attr);
     }
     if r != 0 {
@@ -371,18 +536,34 @@ fn launch_suspended(argv: Vec<String>) -> eyre::Result<Attached> {
         pid: pid_u32,
         task,
         pre_resume: Some(PreResume { task }),
+        terminal: pty.take(),
     })
 }
 
-fn launched_child_exited(pid: u32) -> bool {
+#[derive(Clone, Copy)]
+struct ChildExit {
+    code: Option<i32>,
+    signal: Option<i32>,
+}
+
+fn launched_child_exited(pid: u32) -> Option<ChildExit> {
     let mut status = 0;
     // SAFETY: waitpid is called for the direct child this shade
     // spawned. WNOHANG makes it a polling liveness check.
     let r = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
-    r == pid as libc::pid_t || r == -1
+    if r == pid as libc::pid_t {
+        Some(decode_wait_status(status))
+    } else if r == -1 {
+        Some(ChildExit {
+            code: None,
+            signal: None,
+        })
+    } else {
+        None
+    }
 }
 
-fn terminate_launched_child(pid: u32) {
+fn terminate_launched_child(pid: u32) -> Option<ChildExit> {
     let mut status = 0;
     // SAFETY: same direct child as above.
     let r = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
@@ -394,7 +575,185 @@ fn terminate_launched_child(pid: u32) {
             libc::kill(pid as libc::pid_t, libc::SIGKILL);
             libc::waitpid(pid as libc::pid_t, &mut status, 0);
         }
+        Some(decode_wait_status(status))
+    } else if r == pid as libc::pid_t {
+        Some(decode_wait_status(status))
+    } else {
+        None
     }
+}
+
+fn decode_wait_status(status: libc::c_int) -> ChildExit {
+    if libc::WIFEXITED(status) {
+        ChildExit {
+            code: Some(libc::WEXITSTATUS(status)),
+            signal: None,
+        }
+    } else if libc::WIFSIGNALED(status) {
+        ChildExit {
+            code: None,
+            signal: Some(libc::WTERMSIG(status)),
+        }
+    } else {
+        ChildExit {
+            code: None,
+            signal: None,
+        }
+    }
+}
+
+struct TerminalPump {
+    events: tokio::sync::mpsc::UnboundedSender<TerminalOutput>,
+    output_task: tokio::task::JoinHandle<()>,
+}
+
+impl TerminalPump {
+    fn report_exit(&self, exit: ChildExit) {
+        let _ = self.events.send(TerminalOutput::ExitStatus {
+            code: exit.code,
+            signal: exit.signal,
+        });
+    }
+
+    async fn finish(self) {
+        drop(self.events);
+        let _ = self.output_task.await;
+    }
+}
+
+async fn start_terminal_pump(
+    socket: &str,
+    run_id: stax_live_proto::RunId,
+    mut pty: Pty,
+) -> eyre::Result<TerminalPump> {
+    let url = format!("local://{socket}");
+    let client: TerminalBrokerClient = vox::connect(&url).await?;
+    let (input_to_shade, mut input_from_server) = vox::channel::<TerminalInput>();
+    let (output_to_server, output_from_shade) = vox::channel::<TerminalOutput>();
+
+    client
+        .attach_terminal(run_id, input_to_shade, output_from_shade)
+        .await
+        .map_err(|e| eyre::eyre!("attach_terminal failed: {e:?}"))?;
+
+    let read_fd = pty.master;
+    let write_fd = unsafe { libc::dup(read_fd) };
+    if write_fd < 0 {
+        return Err(std::io::Error::last_os_error()).wrap_err("dup pty master");
+    }
+    unsafe {
+        libc::close(pty.slave);
+    }
+    pty.master = -1;
+    pty.slave = -1;
+
+    let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel::<TerminalOutput>();
+    let events_from_reader = events_tx.clone();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = unsafe { libc::read(read_fd, buf.as_mut_ptr().cast(), buf.len()) };
+            if n > 0 {
+                let data = buf[..n as usize].to_vec();
+                if events_from_reader
+                    .send(TerminalOutput::Bytes { data })
+                    .is_err()
+                {
+                    break;
+                }
+                continue;
+            }
+            if n == 0 {
+                break;
+            }
+            let err = std::io::Error::last_os_error();
+            match err.raw_os_error() {
+                Some(libc::EINTR) => continue,
+                // macOS reports EIO when the slave side of a PTY closes.
+                Some(libc::EIO) => break,
+                _ => {
+                    let _ = events_from_reader.send(TerminalOutput::Error {
+                        message: format!("pty read failed: {err}"),
+                    });
+                    break;
+                }
+            }
+        }
+        unsafe {
+            libc::close(read_fd);
+        }
+    });
+
+    let (input_tx, input_rx) = std::sync::mpsc::channel::<TerminalInput>();
+    std::thread::spawn(move || {
+        for input in input_rx {
+            match input {
+                TerminalInput::Bytes { data } => {
+                    let mut offset = 0;
+                    while offset < data.len() {
+                        let n = unsafe {
+                            libc::write(
+                                write_fd,
+                                data[offset..].as_ptr().cast(),
+                                data.len() - offset,
+                            )
+                        };
+                        if n > 0 {
+                            offset += n as usize;
+                        } else if std::io::Error::last_os_error().raw_os_error()
+                            != Some(libc::EINTR)
+                        {
+                            break;
+                        }
+                    }
+                }
+                TerminalInput::Resize { size } => set_pty_size(write_fd, size),
+                TerminalInput::Close => break,
+            }
+        }
+        unsafe {
+            libc::close(write_fd);
+        }
+    });
+
+    tokio::spawn(async move {
+        loop {
+            match input_from_server.recv().await {
+                Ok(Some(input_sref)) => {
+                    let mut input = None;
+                    let _ = input_sref.map(|value| {
+                        input = Some(value);
+                    });
+                    if input_tx.send(input.expect("input set")).is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => {
+                    let _ = input_tx.send(TerminalInput::Close);
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!("terminal input recv failed: {e:?}");
+                    let _ = input_tx.send(TerminalInput::Close);
+                    break;
+                }
+            }
+        }
+    });
+
+    let output_task = tokio::spawn(async move {
+        while let Some(event) = events_rx.recv().await {
+            if output_to_server.send(event).await.is_err() {
+                break;
+            }
+        }
+        let _ = output_to_server.close(Default::default()).await;
+    });
+
+    Ok(TerminalPump {
+        events: events_tx,
+        output_task,
+    })
 }
 
 unsafe extern "C" {

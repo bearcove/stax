@@ -959,6 +959,52 @@ pub struct RunConfig {
     pub frequency_hz: u32,
 }
 
+#[derive(Clone, Debug, Facet)]
+pub struct LaunchEnvVar {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Clone, Copy, Debug, Facet)]
+pub struct TerminalSize {
+    pub rows: u16,
+    pub cols: u16,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct LaunchRequest {
+    pub command: Vec<String>,
+    pub cwd: String,
+    pub env: Vec<LaunchEnvVar>,
+    pub config: RunConfig,
+    pub daemon_socket: String,
+    pub time_limit_secs: Option<u64>,
+    pub terminal_size: Option<TerminalSize>,
+}
+
+#[derive(Clone, Debug, Facet)]
+#[repr(u8)]
+pub enum TerminalInput {
+    Bytes { data: Vec<u8> },
+    Resize { size: TerminalSize },
+    Close,
+}
+
+#[derive(Clone, Debug, Facet)]
+#[repr(u8)]
+pub enum TerminalOutput {
+    Bytes {
+        data: Vec<u8>,
+    },
+    ExitStatus {
+        code: Option<i32>,
+        signal: Option<i32>,
+    },
+    Error {
+        message: String,
+    },
+}
+
 /// Recorder → server ingest plane. Open one channel per run; close
 /// the channel to signal end-of-recording.
 #[vox::service]
@@ -979,6 +1025,20 @@ pub trait RunIngest {
     /// server-orchestrated path: the server owns lifecycle and shade
     /// owns recording + ingest.
     async fn attach_run(&self, run_id: RunId, events: vox::Rx<IngestEvent>) -> Result<(), String>;
+}
+
+/// Shade-facing terminal broker. The CLI/native UI provides its
+/// terminal channels to `RunControl::start_launch`; the server holds
+/// them until the spawned shade connects here with the PTY-side
+/// channels. The server only relays bytes/events.
+#[vox::service]
+pub trait TerminalBroker {
+    async fn attach_terminal(
+        &self,
+        run_id: RunId,
+        input_to_shade: vox::Tx<TerminalInput>,
+        output_from_shade: vox::Rx<TerminalOutput>,
+    ) -> Result<(), String>;
 }
 
 /// Agent-facing control plane. One service instance per server; runs
@@ -1007,12 +1067,14 @@ pub trait RunControl {
     ) -> Result<RunId, String>;
 
     /// Start a recording by launching a new process under stax-shade.
+    /// `terminal_input` and `terminal_output` are the frontend side
+    /// of the target PTY stream. The CLI merely bridges these to its
+    /// local terminal; native/web UIs can render the same stream.
     async fn start_launch(
         &self,
-        command: Vec<String>,
-        config: RunConfig,
-        daemon_socket: String,
-        time_limit_secs: Option<u64>,
+        request: LaunchRequest,
+        terminal_input: vox::Rx<TerminalInput>,
+        terminal_output: vox::Tx<TerminalOutput>,
     ) -> Result<RunId, String>;
 
     /// Block until `condition` fires, the active run stops, or
@@ -1033,5 +1095,6 @@ pub fn all_services() -> Vec<&'static vox::session::ServiceDescriptor> {
         profiler_service_descriptor(),
         run_control_service_descriptor(),
         run_ingest_service_descriptor(),
+        terminal_broker_service_descriptor(),
     ]
 }

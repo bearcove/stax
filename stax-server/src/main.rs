@@ -8,6 +8,7 @@
 //! - `RunIngest` — recorder pushes IngestEvents into the active run.
 //! - `Profiler`  — query the live aggregator (top, flamegraph, annotate, …).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -19,9 +20,10 @@ use stax_live::{
     Aggregator, BinaryRegistry, IntervalKind, LiveServer, LiveSymbolOwned, LoadedBinary, PmuSample,
 };
 use stax_live_proto::{
-    IngestEvent, ProfilerDispatcher, RunConfig, RunControl, RunControlDispatcher, RunId, RunIngest,
-    RunIngestDispatcher, RunState, RunSummary, ServerStatus, StopReason, WaitCondition,
-    WaitOutcome,
+    IngestEvent, LaunchEnvVar, LaunchRequest, ProfilerDispatcher, RunConfig, RunControl,
+    RunControlDispatcher, RunId, RunIngest, RunIngestDispatcher, RunState, RunSummary,
+    ServerStatus, StopReason, TerminalBroker, TerminalBrokerDispatcher, TerminalInput,
+    TerminalOutput, WaitCondition, WaitOutcome,
 };
 use stax_shade_proto::{ShadeAck, ShadeInfo, ShadeRegistry, ShadeRegistryDispatcher};
 use vox::VoxListener;
@@ -120,6 +122,10 @@ fn build_factory(
                 }
                 "RunIngest" => {
                     connection.handle_with(RunIngestDispatcher::new(server.clone()));
+                    Ok(())
+                }
+                "TerminalBroker" => {
+                    connection.handle_with(TerminalBrokerDispatcher::new(server.clone()));
                     Ok(())
                 }
                 "Profiler" => {
@@ -223,6 +229,7 @@ struct ServerState {
     paused: Arc<AtomicBool>,
     started_at_unix_ns: u64,
     next_run_id: Arc<AtomicU64>,
+    terminal: Arc<Mutex<TerminalState>>,
     /// Local-socket path the server is listening on. Used to tell
     /// auto-spawned stax-shade processes how to dial back in.
     socket_path: Arc<PathBuf>,
@@ -239,18 +246,34 @@ struct Inner {
     /// when stax-shade dials in; cleared when its session closes.
     /// One active run = at most one shade.
     active_shade: Option<ShadeInfo>,
+    ingest_attached: bool,
     /// Process handle for the server-spawned stax-shade child.
     /// Set by RunControl start calls; reaped + cleared by
     /// `stop_active` / `finalize_run` (or when the child exits on
     /// its own and the session-close cleanup fires). One active run
     /// = at most one child.
-    shade_child: Option<std::process::Child>,
+    shade_child: Option<ShadeChild>,
     history: Vec<RunSummary>,
+}
+
+struct ShadeChild {
+    pid: u32,
+    child: Arc<std::sync::Mutex<Option<std::process::Child>>>,
+}
+
+#[derive(Default)]
+struct TerminalState {
+    pending: HashMap<u64, PendingTerminal>,
+}
+
+struct PendingTerminal {
+    input_from_frontend: vox::Rx<TerminalInput>,
+    output_to_frontend: vox::Tx<TerminalOutput>,
 }
 
 enum ShadeTarget {
     Attach(u32),
-    Launch(Vec<String>),
+    Launch(LaunchRequest),
 }
 
 impl ServerState {
@@ -260,6 +283,7 @@ impl ServerState {
                 active: None,
                 cancel: None,
                 active_shade: None,
+                ingest_attached: false,
                 shade_child: None,
                 history: Vec::new(),
             })),
@@ -269,6 +293,7 @@ impl ServerState {
             paused: Arc::new(AtomicBool::new(false)),
             started_at_unix_ns: now_unix_ns(),
             next_run_id: Arc::new(AtomicU64::new(1)),
+            terminal: Arc::new(Mutex::new(TerminalState::default())),
             socket_path: Arc::new(socket_path),
         }
     }
@@ -401,10 +426,14 @@ impl ServerState {
         let mut cmd = std::process::Command::new(&bin);
         let target_log = match &target {
             ShadeTarget::Attach(pid) => format!("pid {pid}"),
-            ShadeTarget::Launch(command) => {
+            ShadeTarget::Launch(request) => {
                 format!(
                     "launch {}",
-                    command.first().map(String::as_str).unwrap_or("<empty>")
+                    request
+                        .command
+                        .first()
+                        .map(String::as_str)
+                        .unwrap_or("<empty>")
                 )
             }
         };
@@ -412,8 +441,20 @@ impl ServerState {
             ShadeTarget::Attach(pid) => {
                 cmd.arg("--attach").arg(pid.to_string());
             }
-            ShadeTarget::Launch(command) => {
-                cmd.arg("--launch").arg("--").args(command);
+            ShadeTarget::Launch(request) => {
+                cmd.arg("--launch").arg("--cwd").arg(&request.cwd);
+                if let Some(size) = request.terminal_size {
+                    cmd.arg("--terminal-rows")
+                        .arg(size.rows.to_string())
+                        .arg("--terminal-cols")
+                        .arg(size.cols.to_string());
+                }
+                cmd.current_dir(&request.cwd);
+                cmd.env_clear();
+                for LaunchEnvVar { key, value } in request.env {
+                    cmd.env(key, value);
+                }
+                cmd.arg("--").args(request.command);
             }
         }
         cmd.arg("--server-socket")
@@ -438,14 +479,20 @@ impl ServerState {
             .stderr(std::process::Stdio::null());
         match cmd.spawn() {
             Ok(child) => {
+                let shade_pid = child.id();
                 tracing::info!(
                     run_id = run_id.0,
                     target = %target_log,
-                    shade_pid = child.id(),
+                    shade_pid,
                     bin = %bin.display(),
                     "spawned stax-shade"
                 );
-                self.inner.lock().shade_child = Some(child);
+                let child = Arc::new(std::sync::Mutex::new(Some(child)));
+                self.inner.lock().shade_child = Some(ShadeChild {
+                    pid: shade_pid,
+                    child: child.clone(),
+                });
+                self.spawn_shade_child_monitor(run_id, shade_pid, child);
                 Ok(())
             }
             Err(e) => Err(format!("failed to spawn {}: {e}", bin.display())),
@@ -458,9 +505,19 @@ impl ServerState {
     /// supposed to notice its vox session close on its own; this
     /// is the belt-and-suspenders.
     fn reap_shade_child(&self) {
-        let mut child = match self.inner.lock().shade_child.take() {
+        let shade_child = match self.inner.lock().shade_child.take() {
             Some(c) => c,
             None => return,
+        };
+        let mut guard = match shade_child.child.lock() {
+            Ok(guard) => guard,
+            Err(e) => {
+                tracing::warn!("stax-shade child mutex poisoned: {e}");
+                return;
+            }
+        };
+        let Some(mut child) = guard.take() else {
+            return;
         };
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -486,11 +543,84 @@ impl ServerState {
             }
         }
         tracing::warn!(
-            shade_pid = child.id(),
+            shade_pid = shade_child.pid,
             "stax-shade didn't exit within 1s of run end; sending SIGTERM"
         );
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    fn spawn_shade_child_monitor(
+        &self,
+        run_id: RunId,
+        shade_pid: u32,
+        child: Arc<std::sync::Mutex<Option<std::process::Child>>>,
+    ) {
+        let state = self.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_millis(100));
+            loop {
+                tick.tick().await;
+                let status = {
+                    let mut guard = match child.lock() {
+                        Ok(guard) => guard,
+                        Err(e) => {
+                            tracing::warn!("stax-shade child mutex poisoned: {e}");
+                            return;
+                        }
+                    };
+                    let Some(child) = guard.as_mut() else {
+                        return;
+                    };
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            *guard = None;
+                            status
+                        }
+                        Ok(None) => continue,
+                        Err(e) => {
+                            tracing::warn!(shade_pid, "try_wait on stax-shade child failed: {e}");
+                            return;
+                        }
+                    }
+                };
+                state.shade_child_exited(run_id, shade_pid, status);
+                return;
+            }
+        });
+    }
+
+    fn shade_child_exited(&self, run_id: RunId, shade_pid: u32, status: std::process::ExitStatus) {
+        let mut inner = self.inner.lock();
+        let Some(active) = inner.active.as_ref() else {
+            return;
+        };
+        if active.id != run_id {
+            return;
+        }
+        tracing::warn!(run_id = run_id.0, shade_pid, ?status, "stax-shade exited");
+        if let Some(child) = inner.shade_child.as_ref()
+            && child.pid == shade_pid
+        {
+            inner.shade_child = None;
+        }
+        if inner.ingest_attached {
+            return;
+        }
+        if inner.cancel.is_none() {
+            return;
+        }
+        let mut summary = inner.active.take().expect("checked above");
+        summary.state = RunState::Stopped;
+        summary.stop_reason = Some(StopReason::RecorderError {
+            message: format!("stax-shade exited: {status}"),
+        });
+        summary.stopped_at_unix_ns = Some(now_unix_ns());
+        inner.cancel = None;
+        inner.active_shade = None;
+        inner.ingest_attached = false;
+        inner.history.push(summary);
+        self.terminal.lock().pending.remove(&run_id.0);
     }
 
     /// Belt-and-suspenders for the case where vox's session
@@ -549,6 +679,7 @@ impl ServerState {
             }
             inner.active = Some(summary);
             inner.cancel = Some(cancel.clone());
+            inner.ingest_attached = false;
         }
 
         *self.aggregator.write() = Aggregator::default();
@@ -608,7 +739,88 @@ impl ServerState {
         });
     }
 
+    fn attach_terminal_channels(
+        &self,
+        run_id: RunId,
+        input_to_shade: vox::Tx<TerminalInput>,
+        mut output_from_shade: vox::Rx<TerminalOutput>,
+    ) -> Result<(), String> {
+        let PendingTerminal {
+            mut input_from_frontend,
+            output_to_frontend,
+        } = self
+            .terminal
+            .lock()
+            .pending
+            .remove(&run_id.0)
+            .ok_or_else(|| format!("no pending terminal for run {}", run_id.0))?;
+
+        tracing::info!(run_id = run_id.0, "terminal channels attached");
+
+        tokio::spawn(async move {
+            loop {
+                match input_from_frontend.recv().await {
+                    Ok(Some(input_sref)) => {
+                        let mut input = None;
+                        let _ = input_sref.map(|value| {
+                            input = Some(value);
+                        });
+                        if input_to_shade
+                            .send(input.expect("input set"))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Ok(None) => {
+                        let _ = input_to_shade.send(TerminalInput::Close).await;
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!("terminal input channel failed: {e:?}");
+                        let _ = input_to_shade.send(TerminalInput::Close).await;
+                        break;
+                    }
+                }
+            }
+        });
+
+        tokio::spawn(async move {
+            loop {
+                match output_from_shade.recv().await {
+                    Ok(Some(output_sref)) => {
+                        let mut output = None;
+                        let _ = output_sref.map(|value| {
+                            output = Some(value);
+                        });
+                        if output_to_frontend
+                            .send(output.expect("output set"))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        tracing::warn!("terminal output channel failed: {e:?}");
+                        let _ = output_to_frontend
+                            .send(TerminalOutput::Error {
+                                message: format!("terminal output channel failed: {e:?}"),
+                            })
+                            .await;
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(())
+    }
+
     fn discard_start_failed(&self, run_id: RunId, message: String) {
+        self.terminal.lock().pending.remove(&run_id.0);
         let mut inner = self.inner.lock();
         let Some(active) = inner.active.as_ref() else {
             return;
@@ -622,6 +834,7 @@ impl ServerState {
         summary.stopped_at_unix_ns = Some(now_unix_ns());
         inner.cancel = None;
         inner.active_shade = None;
+        inner.ingest_attached = false;
         inner.shade_child = None;
         inner.history.push(summary);
     }
@@ -747,19 +960,27 @@ impl RunControl for ServerState {
 
     async fn start_launch(
         &self,
-        command: Vec<String>,
-        config: RunConfig,
-        daemon_socket: String,
-        time_limit_secs: Option<u64>,
+        request: LaunchRequest,
+        terminal_input: vox::Rx<TerminalInput>,
+        terminal_output: vox::Tx<TerminalOutput>,
     ) -> Result<RunId, String> {
-        if command.is_empty() {
+        if request.command.is_empty() {
             return Err("launch command is empty".to_owned());
         }
-        let frequency_hz = config.frequency_hz;
-        let (run_id, _) = self.begin_run(config)?;
+        let frequency_hz = request.config.frequency_hz;
+        let daemon_socket = request.daemon_socket.clone();
+        let time_limit_secs = request.time_limit_secs;
+        let (run_id, _) = self.begin_run(request.config.clone())?;
+        self.terminal.lock().pending.insert(
+            run_id.0,
+            PendingTerminal {
+                input_from_frontend: terminal_input,
+                output_to_frontend: terminal_output,
+            },
+        );
         if let Err(e) = self.spawn_shade(
             run_id,
-            ShadeTarget::Launch(command),
+            ShadeTarget::Launch(request),
             frequency_hz,
             daemon_socket,
             time_limit_secs,
@@ -837,6 +1058,7 @@ impl RunControl for ServerState {
             // tidier to actively detach via the Shade trait once
             // we have a shutdown method on it; for now best-effort.
             inner.active_shade = None;
+            inner.ingest_attached = false;
             (snapshot, inner.cancel.take())
         };
         if let Some(cancel) = cancel {
@@ -871,6 +1093,17 @@ impl ShadeRegistry for ShadeRegistryImpl {
     }
 }
 
+impl TerminalBroker for ServerState {
+    async fn attach_terminal(
+        &self,
+        run_id: RunId,
+        input_to_shade: vox::Tx<TerminalInput>,
+        output_from_shade: vox::Rx<TerminalOutput>,
+    ) -> Result<(), String> {
+        self.attach_terminal_channels(run_id, input_to_shade, output_from_shade)
+    }
+}
+
 impl RunIngest for ServerState {
     async fn start_run(
         &self,
@@ -878,12 +1111,14 @@ impl RunIngest for ServerState {
         events: vox::Rx<IngestEvent>,
     ) -> Result<RunId, String> {
         let (id, cancel) = self.begin_run(config)?;
+        self.inner.lock().ingest_attached = true;
         self.spawn_ingest_drainer(id, cancel, events);
         Ok(id)
     }
 
     async fn attach_run(&self, run_id: RunId, events: vox::Rx<IngestEvent>) -> Result<(), String> {
         let cancel = self.cancel_for_run(run_id)?;
+        self.inner.lock().ingest_attached = true;
         self.spawn_ingest_drainer(run_id, cancel, events);
         Ok(())
     }
@@ -1006,6 +1241,7 @@ impl ServerState {
     }
 
     fn finalize_run(&self, run_id: RunId, default_reason: StopReason) {
+        self.terminal.lock().pending.remove(&run_id.0);
         let mut inner = self.inner.lock();
         let Some(active) = inner.active.as_ref() else {
             return;
@@ -1025,6 +1261,7 @@ impl ServerState {
         inner.cancel = None;
         // Run is over → the shade slot is no longer claimable.
         inner.active_shade = None;
+        inner.ingest_attached = false;
         tracing::info!(
             "stax-server: run {} stopped after {} samples / {} intervals",
             summary.id.0,
