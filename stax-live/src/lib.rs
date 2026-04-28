@@ -620,10 +620,17 @@ fn ticks_to_ns(ticks: i128) -> i128 {
 /// probe result by `(tid, timestamp_ns == kperf_ts)`. Walks both
 /// per-thread queues with a two-pointer merge: both queues are
 /// append-ordered by timestamp, so a single linear scan finds every
-/// pair *and* counts the unmatched ones on either side. Resolves
-/// addresses through the live `BinaryRegistry` so the UI sees the
-/// same module!symbol strings the flame graph does — one resolver
-/// for everything.
+/// pair *and* counts the unmatched ones on either side.
+///
+/// Recent-entry selection: the diff is overwhelmingly dominated by
+/// idle dispatch worker threads stuck at `start_wqthread` —
+/// uninteresting noise. When the caller doesn't pin a tid, we
+/// auto-focus on the most informative thread (highest stitchable
+/// count, ties broken by paired count) and only emit `recent[]`
+/// from there. Histograms / counters still cover the full set.
+/// Frame symbolication is deferred until *after* focus selection
+/// so we don't pay BinaryRegistry::lookup_symbol per frame on the
+/// thousands of samples we'll ultimately discard.
 fn build_probe_diff_update(
     agg: &Aggregator,
     bins: &BinaryRegistry,
@@ -649,8 +656,12 @@ fn build_probe_diff_update(
     let mut fp_walk_n: u64 = 0;
 
     let mut threads_summary: Vec<ProbeDiffThread> = Vec::new();
-    let mut recent: std::collections::VecDeque<ProbeDiffEntry> =
-        std::collections::VecDeque::with_capacity(PROBE_RECENT_CAP);
+
+    // Per-thread bounded ring of *raw* entry references — no
+    // ResolvedFrame allocation yet. After the main pass we pick
+    // the focus thread and resolve only its kept entries.
+    let mut per_thread_recent: std::collections::HashMap<u32, std::collections::VecDeque<RawEntry>> =
+        std::collections::HashMap::new();
 
     for thread_tid in agg.iter_threads() {
         if let Some(want) = only_tid {
@@ -664,8 +675,6 @@ fn build_probe_diff_update(
         total_kperf = total_kperf.saturating_add(stats.pet_samples.len() as u64);
         total_probes = total_probes.saturating_add(stats.probe_results.len() as u64);
 
-        // Per-thread accumulators so we can return a per-thread
-        // breakdown without a second pass.
         let mut t_paired: u64 = 0;
         let mut t_pc_match: u64 = 0;
         let mut t_stitchable: u64 = 0;
@@ -696,7 +705,6 @@ fn build_probe_diff_update(
                         probe_only += 1;
                         continue;
                     }
-                    // Pair found.
                     let pet = pet_iter.next().unwrap();
                     let probe = probe_iter.next().unwrap();
 
@@ -708,11 +716,6 @@ fn build_probe_diff_update(
                         fp_walk_n += 1;
                     }
 
-                    // kperf's user_backtrace shape after parser
-                    // truncation: [leaf, walked_ret0, ..., walked_retN].
-                    // The appended-LR is gone (NULL-truncated). So
-                    // pet.stack[1..] is the FP-walked chain that
-                    // matches probe.mach_walked in shape.
                     let kperf_walk: &[u64] = if !pet.stack.is_empty() {
                         &pet.stack[1..]
                     } else {
@@ -725,9 +728,6 @@ fn build_probe_diff_update(
                     hist[bucket] += 1;
                     t_common_total = t_common_total.saturating_add(common as u64);
 
-                    // Per-depth match heatmap. Counted from the leaf:
-                    // depth 0 = leaf PC (kperf[0] vs mach_pc),
-                    // depth d = walked frame d-1 (kperf[d] vs mach_walked[d-1]).
                     let probe_full_depth = 1 + probe_walk.len();
                     let pet_full_depth = pet.stack.len();
                     let max_depth = pet_full_depth.min(probe_full_depth).min(PROBE_DEPTH_CAP);
@@ -740,10 +740,6 @@ fn build_probe_diff_update(
                         }
                     }
 
-                    // Probe value-add: kperf walked nothing usable
-                    // (parked thread, FP=0 at PMI) but probe got
-                    // ≥1 frame; or probe walked strictly deeper
-                    // than kperf.
                     if pet_full_depth <= 1 && probe_full_depth >= 2 {
                         probe_augmented += 1;
                     }
@@ -751,7 +747,6 @@ fn build_probe_diff_update(
                         probe_deeper += 1;
                     }
 
-                    // Drift bucket (real ns).
                     let drift_ns_signed =
                         ticks_to_ns((probe.probe_done_ns as i128) - (probe.kperf_ts as i128));
                     let drift_abs_ns = drift_ns_signed.unsigned_abs() as u64;
@@ -774,54 +769,28 @@ fn build_probe_diff_update(
                         t_stitchable += 1;
                     }
 
-                    // Drill-down: keep the most recent N entries
-                    // with both stacks symbolicated. Stitched stack
-                    // is the actual deliverable: probe's view since
-                    // we've validated the leaf and the deep tail
-                    // both agree with kperf — we ship the live-
-                    // thread walk because it's atomic-from-target
-                    // and we know it's coherent with the PMI sample.
-                    let kperf_stack: Vec<ResolvedFrame> = pet
-                        .stack
-                        .iter()
-                        .map(|&addr| resolve_frame(bins, addr))
-                        .collect();
-                    let kperf_kernel_stack: Vec<ResolvedFrame> = pet
-                        .kernel_stack
-                        .iter()
-                        .map(|&addr| resolve_frame(bins, addr))
-                        .collect();
-                    let mut probe_stack: Vec<ResolvedFrame> =
-                        Vec::with_capacity(probe_walk.len() + 1);
-                    probe_stack.push(resolve_frame(bins, probe.mach_pc));
-                    for &addr in probe_walk {
-                        probe_stack.push(resolve_frame(bins, addr));
+                    let ring = per_thread_recent
+                        .entry(thread_tid)
+                        .or_insert_with(|| {
+                            std::collections::VecDeque::with_capacity(PROBE_RECENT_CAP)
+                        });
+                    if ring.len() == PROBE_RECENT_CAP {
+                        ring.pop_front();
                     }
-                    let stitched_stack: Vec<ResolvedFrame> = if stitchable {
-                        probe_stack.clone()
-                    } else {
-                        Vec::new()
-                    };
-
-                    let entry = ProbeDiffEntry {
-                        tid: thread_tid,
+                    ring.push_back(RawEntry {
                         timestamp_ns: pet.timestamp_ns.saturating_sub(session_start),
                         drift_ns: drift_ns_signed
                             .clamp(i64::MIN as i128, i64::MAX as i128)
                             as i64,
-                        kperf_stack,
-                        kperf_kernel_stack,
-                        probe_stack,
-                        stitched_stack,
                         common_suffix: common as u32,
                         pc_match,
                         stitchable,
                         used_framehop: probe.used_framehop,
-                    };
-                    if recent.len() == PROBE_RECENT_CAP {
-                        recent.pop_front();
-                    }
-                    recent.push_back(entry);
+                        kperf_stack: pet.stack.to_vec().into_boxed_slice(),
+                        kperf_kernel_stack: pet.kernel_stack.to_vec().into_boxed_slice(),
+                        probe_pc: probe.mach_pc,
+                        probe_walked: probe.mach_walked.to_vec().into_boxed_slice(),
+                    });
                 }
             }
         }
@@ -838,8 +807,60 @@ fn build_probe_diff_update(
         }
     }
 
-    threads_summary.sort_by(|a, b| b.paired.cmp(&a.paired));
+    // Sort threads by stitchable first (the actually-interesting
+    // signal), then paired count. This is also what we use to
+    // pick the focus thread for `recent[]`.
+    threads_summary.sort_by(|a, b| {
+        b.stitchable
+            .cmp(&a.stitchable)
+            .then(b.paired.cmp(&a.paired))
+    });
+    let focus_tid: Option<u32> = only_tid.or_else(|| threads_summary.first().map(|t| t.tid));
     threads_summary.truncate(PROBE_THREADS_CAP);
+
+    // Materialise ResolvedFrames only for the focus thread's ring.
+    let focus_tid_for_recent = focus_tid;
+    let recent: Vec<ProbeDiffEntry> = focus_tid_for_recent
+        .and_then(|t| per_thread_recent.remove(&t))
+        .map(|ring| {
+            ring.into_iter()
+                .map(|raw| {
+                    let mut probe_stack: Vec<ResolvedFrame> =
+                        Vec::with_capacity(raw.probe_walked.len() + 1);
+                    probe_stack.push(resolve_frame(bins, raw.probe_pc));
+                    for &addr in raw.probe_walked.iter() {
+                        probe_stack.push(resolve_frame(bins, addr));
+                    }
+                    let stitched_stack: Vec<ResolvedFrame> = if raw.stitchable {
+                        probe_stack.clone()
+                    } else {
+                        Vec::new()
+                    };
+                    ProbeDiffEntry {
+                        tid: focus_tid_for_recent.unwrap_or(0),
+                        timestamp_ns: raw.timestamp_ns,
+                        drift_ns: raw.drift_ns,
+                        kperf_stack: raw
+                            .kperf_stack
+                            .iter()
+                            .map(|&addr| resolve_frame(bins, addr))
+                            .collect(),
+                        kperf_kernel_stack: raw
+                            .kperf_kernel_stack
+                            .iter()
+                            .map(|&addr| resolve_frame(bins, addr))
+                            .collect(),
+                        probe_stack,
+                        stitched_stack,
+                        common_suffix: raw.common_suffix,
+                        pc_match: raw.pc_match,
+                        stitchable: raw.stitchable,
+                        used_framehop: raw.used_framehop,
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     let mut drift_buckets: Vec<ProbeDiffBucket> =
         Vec::with_capacity(PROBE_DRIFT_BUCKETS_NS.len() + 1);
@@ -884,8 +905,24 @@ fn build_probe_diff_update(
         framehop_used: framehop_n,
         fp_walk_used: fp_walk_n,
         threads: threads_summary,
-        recent: recent.into_iter().collect(),
+        recent,
     }
+}
+
+/// Minimal per-pair record kept during the main scan. Avoids
+/// ResolvedFrame allocation until we know which thread we're going
+/// to keep entries from.
+struct RawEntry {
+    timestamp_ns: u64,
+    drift_ns: i64,
+    common_suffix: u32,
+    pc_match: bool,
+    stitchable: bool,
+    used_framehop: bool,
+    kperf_stack: Box<[u64]>,
+    kperf_kernel_stack: Box<[u64]>,
+    probe_pc: u64,
+    probe_walked: Box<[u64]>,
 }
 
 /// Length of the longest matching suffix between two address

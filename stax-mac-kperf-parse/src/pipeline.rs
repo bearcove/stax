@@ -82,6 +82,12 @@ pub struct Pipeline {
     offcpu: CpuIntervalTracker,
     images: ImageScanner,
     thread_names: ThreadNameCache,
+    /// Set of kernel thread_ids the parser has actually observed in
+    /// the kperf stream. We resolve names against *these* tids
+    /// rather than libproc's `PROC_PIDLISTTHREADS` (which returns
+    /// Mach thread-handles — wrong keyspace for kperf's tids and
+    /// silently leaves every thread unnamed in the live registry).
+    seen_tids: std::collections::HashSet<u32>,
     kernel_image: Option<KernelImage>,
     slide_est: Option<SlideEstimator>,
     jitdump_path: PathBuf,
@@ -129,6 +135,8 @@ impl Pipeline {
             .as_ref()
             .map(|img| SlideEstimator::new(img.exec_segments.clone()));
 
+        // Initial scan pulls names for whatever tids libproc tells
+        // us about; subsequent scans follow the kperf-observed set.
         scan_thread_names(config.pid, sink, &mut thread_names);
 
         let now = Instant::now();
@@ -139,6 +147,7 @@ impl Pipeline {
             offcpu: CpuIntervalTracker::new(),
             images,
             thread_names,
+            seen_tids: std::collections::HashSet::new(),
             kernel_image,
             slide_est,
             jitdump_path,
@@ -166,7 +175,12 @@ impl Pipeline {
             self.next_image = now + IMAGE_RESCAN_PERIOD;
         }
         if now >= self.next_thread {
-            scan_thread_names(self.config.pid, sink, &mut self.thread_names);
+            scan_thread_names_for_observed(
+                self.config.pid,
+                sink,
+                &mut self.thread_names,
+                &self.seen_tids,
+            );
             self.next_thread = now + THREAD_NAME_RESCAN_PERIOD;
         }
         if !self.jitdump_emitted && now >= self.next_jitdump {
@@ -260,7 +274,9 @@ impl Pipeline {
             let pmu_samples = &mut self.pmu_samples;
             let pmu_total_cycles = &mut self.pmu_total_cycles;
             let pmu_total_insns = &mut self.pmu_total_insns;
+            let seen_tids = &mut self.seen_tids;
             self.parser.feed(rec, |sample| {
+                seen_tids.insert(sample.tid);
                 if let Some(est) = slide_est.as_mut() {
                     // The deepest kernel frame is the most stable
                     // entry point, but any kernel-text PC works as
@@ -365,6 +381,7 @@ impl Pipeline {
             offcpu,
             images: _,
             thread_names: _,
+            seen_tids: _,
             kernel_image,
             slide_est,
             jitdump_path: _,
@@ -445,6 +462,10 @@ fn scan_thread_names<S: SampleSink>(
     sink: &mut S,
     cache: &mut ThreadNameCache,
 ) {
+    // Initial scan: ask libproc for whatever it knows. Later
+    // scans (`scan_thread_names_for_observed`) follow kperf's tid
+    // set, which is the only thing the live registry actually
+    // gets keyed by.
     let tids = match libproc::list_thread_ids(pid) {
         Ok(t) => t,
         Err(_) => return,
@@ -452,6 +473,28 @@ fn scan_thread_names<S: SampleSink>(
     for tid64 in tids {
         let tid = tid64 as u32;
         if let Ok(Some(name)) = libproc::thread_name(pid, tid64) {
+            if cache.note_thread(tid, &name) {
+                sink.on_thread_name(ThreadNameEvent { pid, tid, name: &name });
+            }
+        }
+    }
+}
+
+/// Resolve names for the kernel `thread_id`s the parser has
+/// actually observed in the kperf stream. `PROC_PIDLISTTHREADS`
+/// returns Mach thread-handles, which are *not* the same as
+/// kperf's tids — feeding those handles back into thread-name
+/// lookup silently no-ops every entry. Iterating the observed-
+/// tid set with the matching `thread_name_by_id` flavour is the
+/// fix.
+fn scan_thread_names_for_observed<S: SampleSink>(
+    pid: u32,
+    sink: &mut S,
+    cache: &mut ThreadNameCache,
+    seen: &std::collections::HashSet<u32>,
+) {
+    for &tid in seen {
+        if let Ok(Some(name)) = libproc::thread_name_by_id(pid, tid as u64) {
             if cache.note_thread(tid, &name) {
                 sink.on_thread_name(ThreadNameEvent { pid, tid, name: &name });
             }

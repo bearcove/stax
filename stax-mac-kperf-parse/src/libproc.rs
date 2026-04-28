@@ -229,6 +229,12 @@ struct ProcThreadInfoC {
 }
 
 const PROC_PIDTHREADINFO: c_int = 5;
+/// Like `PROC_PIDTHREADINFO` but the `arg` is a kernel
+/// `thread_id` (the same value kperf shipped in `arg5` of every
+/// PERF sample) instead of a Mach thread_handle. PROC_PIDTHREADINFO
+/// silently ESRCH'd every lookup because the recorder fed it
+/// kperf's thread_id, which the kernel parses as a thread_handle.
+const PROC_PIDTHREADID64INFO: c_int = 14;
 
 /// List the system-wide thread ids belonging to `pid`. The TIDs come
 /// out of the kernel as 64-bit values; downstream code in stax
@@ -264,18 +270,30 @@ pub fn list_thread_ids(pid: u32) -> std::io::Result<Vec<u64>> {
     }
 }
 
-/// Look up the name of one thread inside `pid`. The kernel needs
-/// the owning process to find the thread struct, so passing 0
-/// (which I had as a comment claim) actually returns ESRCH and was
-/// silently failing every lookup -- that's the bug behind the
-/// "thread switcher only shows [tid]" symptom.
+/// Look up the name of one thread inside `pid` by Mach
+/// thread-handle (what `PROC_PIDLISTTHREADS` returns). Kept for
+/// the older shade-side path that walks via `list_thread_ids`.
 pub fn thread_name(pid: u32, tid: u64) -> std::io::Result<Option<String>> {
+    thread_name_inner(pid, PROC_PIDTHREADINFO, tid)
+}
+
+/// Look up the name of one thread inside `pid` by *kernel*
+/// `thread_id` — the same identifier kperf records carry in
+/// `arg5` of every PERF sample. Use this when correlating with
+/// the kperf stream; `thread_name` keyed by Mach thread-handle
+/// returns ESRCH for kperf tids and silently leaves every thread
+/// (unnamed) in the live registry.
+pub fn thread_name_by_id(pid: u32, thread_id: u64) -> std::io::Result<Option<String>> {
+    thread_name_inner(pid, PROC_PIDTHREADID64INFO, thread_id)
+}
+
+fn thread_name_inner(pid: u32, flavor: c_int, arg: u64) -> std::io::Result<Option<String>> {
     let mut info: ProcThreadInfoC = unsafe { std::mem::zeroed() };
     let n = unsafe {
         proc_pidinfo(
             pid as c_int,
-            PROC_PIDTHREADINFO,
-            tid,
+            flavor,
+            arg,
             &mut info as *mut _ as *mut c_void,
             std::mem::size_of::<ProcThreadInfoC>() as c_int,
         )
@@ -283,10 +301,16 @@ pub fn thread_name(pid: u32, tid: u64) -> std::io::Result<Option<String>> {
     if n <= 0 {
         return Err(std::io::Error::last_os_error());
     }
-    let nul = info.pth_name.iter().position(|&b| b == 0).unwrap_or(info.pth_name.len());
+    let nul = info
+        .pth_name
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(info.pth_name.len());
     if nul == 0 {
         Ok(None)
     } else {
-        Ok(Some(String::from_utf8_lossy(&info.pth_name[..nul]).into_owned()))
+        Ok(Some(
+            String::from_utf8_lossy(&info.pth_name[..nul]).into_owned(),
+        ))
     }
 }
