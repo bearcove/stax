@@ -424,6 +424,7 @@ impl ServerState {
         };
         let socket = self.socket_path.to_string_lossy().into_owned();
         let mut cmd = std::process::Command::new(&bin);
+        let mut launch_command: Option<Vec<String>> = None;
         let target_log = match &target {
             ShadeTarget::Attach(pid) => format!("pid {pid}"),
             ShadeTarget::Launch(request) => {
@@ -454,7 +455,7 @@ impl ServerState {
                 for LaunchEnvVar { key, value } in request.env {
                     cmd.env(key, value);
                 }
-                cmd.arg("--").args(request.command);
+                launch_command = Some(request.command);
             }
         }
         cmd.arg("--server-socket")
@@ -467,6 +468,9 @@ impl ServerState {
             .arg(frequency_hz.to_string());
         if let Some(limit) = time_limit_secs {
             cmd.arg("--time-limit").arg(limit.to_string());
+        }
+        if let Some(command) = launch_command {
+            cmd.arg("--").args(command);
         }
         cmd
             // Don't inherit our stdin/out/err — the shade logs via
