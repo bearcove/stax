@@ -23,6 +23,7 @@ mod codegen;
 const BIN_NAME: &str = "stax";
 const DAEMON_BIN: &str = "staxd";
 const SERVER_BIN: &str = "stax-server";
+const SHADE_BIN: &str = "stax-shade";
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = env::args().collect();
@@ -65,7 +66,7 @@ fn install() -> Result<(), Box<dyn Error>> {
     let cargo_bin = cargo_bin_dir()?;
     fs::create_dir_all(&cargo_bin)?;
 
-    for bin in [BIN_NAME, DAEMON_BIN, SERVER_BIN] {
+    for bin in [BIN_NAME, DAEMON_BIN, SERVER_BIN, SHADE_BIN] {
         println!(":: Building {bin} (release)...");
         cargo_build_release(&workspace_root, bin)?;
 
@@ -78,12 +79,14 @@ fn install() -> Result<(), Box<dyn Error>> {
         fs::copy(&src, &dst)?;
 
         #[cfg(target_os = "macos")]
-        if bin == BIN_NAME {
-            codesign_macos(&dst)?;
+        if bin == SHADE_BIN {
+            // stax-shade is the only entitled binary in the
+            // architecture: it's the one that holds Mach task port
+            // rights, so it's the one that needs cs.debugger.
+            // stax (CLI) and stax-server are unprivileged.
+            codesign_with_debugger(&dst)?;
         }
-        // DAEMON_BIN: no codesign — runs as root under launchd, no
-        // entitlement needed.
-        // SERVER_BIN: unprivileged user-level LaunchAgent, no codesign.
+        // BIN_NAME, DAEMON_BIN, SERVER_BIN: no codesign needed.
     }
 
     #[cfg(target_os = "macos")]
@@ -191,7 +194,7 @@ fn home_dir() -> PathBuf {
 }
 
 #[cfg(target_os = "macos")]
-fn codesign_macos(binary: &Path) -> Result<(), Box<dyn Error>> {
+fn codesign_with_debugger(binary: &Path) -> Result<(), Box<dyn Error>> {
     const ENTITLEMENTS_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">

@@ -17,23 +17,12 @@ use std::env;
 use std::error::Error;
 use std::ffi::OsStr;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Command;
 
 use crate::args;
-
-/// Entitlements applied to the user-facing `stax` binary.
-const NPERF_ENTITLEMENTS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>com.apple.security.cs.debugger</key>
-	<true/>
-</dict>
-</plist>
-"#;
 
 /// LaunchDaemon plist installed at `/Library/LaunchDaemons/`. Embedded
 /// verbatim as a constant so a freshly-installed `stax` doesn't have
@@ -98,61 +87,26 @@ fn is_root() -> bool {
 // Non-root: codesign self
 // ---------------------------------------------------------------------------
 
-fn codesign_self(args: &args::SetupArgs) -> Result<(), Box<dyn Error>> {
-    let exe = env::current_exe()?;
-
-    if !args.yes {
-        println!(
-            r#"
-On macOS, attaching to an existing process via task_for_pid requires the
-com.apple.security.cs.debugger entitlement. This subcommand will ad-hoc
-codesign your stax binary with that entitlement (signed for your local
-machine only -- not redistributable). The following command will run:
-
-    codesign --force --options runtime --sign - \
-      --entitlements <tempfile> {}
-
-Press Enter to continue, or Ctrl-C to cancel."#,
-            exe.display(),
-        );
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-    }
-
-    let entitlements_path = stage_entitlements()?;
-    let status = Command::new("codesign")
-        .arg("--force")
-        .arg("--options")
-        .arg("runtime")
-        .arg("--sign")
-        .arg("-")
-        .arg("--entitlements")
-        .arg(&entitlements_path)
-        .arg(&exe)
-        .status()?;
-    let _ = fs::remove_file(&entitlements_path);
-
-    if !status.success() {
-        return Err(format!("codesign exited with {}", status).into());
-    }
-
-    println!("Code signing successful: {}", exe.display());
-    println!("You can now run `stax record …` without sudo.");
+/// Non-root entry point: tell the user the modern install path.
+/// We used to codesign `stax` itself with cs.debugger here; that
+/// entitlement now lives on `stax-shade` exclusively (see
+/// stax-shade/src/main.rs for the why) and `cargo xtask install`
+/// handles its codesign automatically. Nothing to do here.
+fn codesign_self(_args: &args::SetupArgs) -> Result<(), Box<dyn Error>> {
+    println!("`stax setup` (no sudo) is a no-op now.");
     println!();
-    println!(
-        "To install staxd as a LaunchDaemon (so the privileged kperf \
-         calls happen there, not in your CLI), run: sudo stax setup",
-    );
+    println!("Build + install everything with:");
+    println!();
+    println!("    cargo xtask install");
+    println!();
+    println!("…that codesigns stax-shade (the only entitlement-bearing");
+    println!("binary in the architecture) and bootstraps stax-server");
+    println!("as a per-user LaunchAgent.");
+    println!();
+    println!("Then, one-time only, install the privileged daemon:");
+    println!();
+    println!("    sudo stax setup");
     Ok(())
-}
-
-fn stage_entitlements() -> io::Result<PathBuf> {
-    let mut path = env::temp_dir();
-    path.push(format!("stax-entitlements-{}.xml", std::process::id()));
-    let mut f = fs::File::create(&path)?;
-    f.write_all(NPERF_ENTITLEMENTS.as_bytes())?;
-    f.flush()?;
-    Ok(path)
 }
 
 // ---------------------------------------------------------------------------

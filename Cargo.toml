@@ -50,6 +50,7 @@ members = [
   "stax-live",
   "stax-live-proto",
   "stax-server",
+  "stax-shade",
   "stax-demangle",
   "staxd-proto",
   "staxd",

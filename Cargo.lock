@@ -2183,6 +2183,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "stax-shade"
+version = "0.1.0"
+dependencies = [
+ "eyre",
+ "facet",
+ "figue",
+ "libc",
+ "log",
+ "mach2",
+ "tracing",
+ "tracing-oslog",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "staxd"
 version = "0.1.0"
 dependencies = [
