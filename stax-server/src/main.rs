@@ -509,45 +509,7 @@ impl ServerState {
             Some(c) => c,
             None => return,
         };
-        let mut guard = match shade_child.child.lock() {
-            Ok(guard) => guard,
-            Err(e) => {
-                tracing::warn!("stax-shade child mutex poisoned: {e}");
-                return;
-            }
-        };
-        let Some(mut child) = guard.take() else {
-            return;
-        };
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                tracing::info!(?status, "stax-shade child already exited");
-                return;
-            }
-            Ok(None) => {}
-            Err(e) => {
-                tracing::warn!("try_wait on stax-shade child: {e}");
-                return;
-            }
-        }
-        // Give it a moment to notice the session close on its
-        // own. The shade's session is closed by the accept loop
-        // when our end of the vox connection drops — that should
-        // happen as soon as `active_shade` clears and we drop our
-        // refs. But polling here is simpler than orchestrating
-        // shutdown signals.
-        for _ in 0..20 {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            if matches!(child.try_wait(), Ok(Some(_))) {
-                return;
-            }
-        }
-        tracing::warn!(
-            shade_pid = shade_child.pid,
-            "stax-shade didn't exit within 1s of run end; sending SIGTERM"
-        );
-        let _ = child.kill();
-        let _ = child.wait();
+        reap_taken_shade_child(shade_child);
     }
 
     fn spawn_shade_child_monitor(
@@ -657,6 +619,30 @@ impl ServerState {
     }
 
     fn begin_run(&self, config: RunConfig) -> Result<(RunId, Arc<tokio::sync::Notify>), String> {
+        let stale_child = {
+            let mut inner = self.inner.lock();
+            match inner.active.as_ref() {
+                Some(active) if active.state == RunState::Stopped => {
+                    let active = inner.active.take().expect("checked above");
+                    tracing::warn!(
+                        run_id = active.id.0,
+                        "stale stopped run was still marked active; clearing it before new run"
+                    );
+                    if !inner.history.iter().any(|run| run.id == active.id) {
+                        inner.history.push(active);
+                    }
+                    inner.cancel = None;
+                    inner.active_shade = None;
+                    inner.ingest_attached = false;
+                    inner.shade_child.take()
+                }
+                _ => None,
+            }
+        };
+        if let Some(shade_child) = stale_child {
+            reap_taken_shade_child(shade_child);
+        }
+
         let id = RunId(self.next_run_id.fetch_add(1, Ordering::Relaxed));
         let summary = RunSummary {
             id,
@@ -838,6 +824,43 @@ impl ServerState {
         inner.shade_child = None;
         inner.history.push(summary);
     }
+}
+
+fn reap_taken_shade_child(shade_child: ShadeChild) {
+    let mut guard = match shade_child.child.lock() {
+        Ok(guard) => guard,
+        Err(e) => {
+            tracing::warn!("stax-shade child mutex poisoned: {e}");
+            return;
+        }
+    };
+    let Some(mut child) = guard.take() else {
+        return;
+    };
+    match child.try_wait() {
+        Ok(Some(status)) => {
+            tracing::info!(?status, "stax-shade child already exited");
+            return;
+        }
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!("try_wait on stax-shade child: {e}");
+            return;
+        }
+    }
+    // Give it a moment to notice the session close on its own.
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+    }
+    tracing::warn!(
+        shade_pid = shade_child.pid,
+        "stax-shade didn't exit within 1s of run end; sending SIGTERM"
+    );
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Find the stax-shade binary. Checks (in order):
