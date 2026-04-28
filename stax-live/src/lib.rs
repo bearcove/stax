@@ -1531,28 +1531,13 @@ impl StringInterner {
 fn compute_flame_update(aggregation: &Aggregation, binaries: &BinaryRegistry) -> FlamegraphUpdate {
     let total_on_cpu_ns = aggregation.total_on_cpu_ns;
     let total_off_cpu = aggregation.total_off_cpu;
-    let total_combined = total_on_cpu_ns.saturating_add(total_off_cpu.total_ns());
-    // 0.05% of total. Lower than the previous 0.5% so that when the
-    // user focuses into a smaller subtree there's still meaningful
-    // per-callsite detail instead of one big "(N small frames)" cell.
-    // Bumps the wire payload roughly 5-10x but the live UI handles
-    // it; the residue cell still catches the truly-tiny tail.
-    let threshold = (total_combined / 2000).max(1);
     let mut interner = StringInterner::new();
-    let (mut children, residue) = build_children_with_residue(
-        &[&aggregation.flame_root],
-        threshold,
-        binaries,
-        &mut interner,
-    );
-    // build_children_with_residue already returns children sorted;
-    // fold_recursion only rewrites a node's children Vec, never the
-    // node's own data, so the top-level order stays correct.
+    let mut children = build_children(&[&aggregation.flame_root], binaries, &mut interner);
+    // build_children already returns children sorted; fold_recursion
+    // only rewrites a node's children Vec, never the node's own data,
+    // so the top-level order stays correct.
     for c in &mut children {
         fold_recursion(c);
-    }
-    if let Some(extra) = residue {
-        children.push(extra);
     }
 
     let unknown_lang = interner.intern_str(stax_demangle::Language::Unknown.as_str());
@@ -1611,27 +1596,21 @@ fn symbol_eq(a: &FlameNode, b: &FlameNode) -> bool {
 
 /// Walk a list of "sibling" StackNodes that should be considered
 /// together, group their children by resolved (function, binary)
-/// symbol, apply a duration threshold, and recurse. The siblings list
-/// lets us fold multiple call-site addresses that map to the same
-/// symbol into one cell without copying subtrees: callers below pass
-/// the borrowed `StackNode`s of the merged group on to the recursive
-/// step.
+/// symbol, and recurse. The siblings list lets us fold multiple
+/// call-site addresses that map to the same symbol into one cell
+/// without copying subtrees: callers below pass the borrowed
+/// `StackNode`s of the merged group on to the recursive step.
 ///
 /// Without this grouping, the flame is keyed by raw PC address —
 /// recursive functions and any function called from multiple sites
 /// fragment into a row of skinny same-name cells, and the same-name
 /// children in the subtree never merge either. The neighbours view
 /// already groups by symbol; the main flame now matches.
-///
-/// Sub-threshold groups are folded into a single greyed-out residue
-/// sibling so the renderer doesn't leave black space where the long
-/// tail used to live.
-fn build_children_with_residue(
+fn build_children(
     sources: &[&StackNode],
-    threshold: u64,
     binaries: &BinaryRegistry,
     interner: &mut StringInterner,
-) -> (Vec<FlameNode>, Option<FlameNode>) {
+) -> Vec<FlameNode> {
     use std::collections::HashMap;
 
     type SymbolKey = (Option<String>, Option<String>);
@@ -1704,73 +1683,26 @@ fn build_children_with_residue(
     });
 
     let mut visible: Vec<FlameNode> = Vec::new();
-    let mut residue_on_cpu_ns: u64 = 0;
-    let mut residue_off_cpu = OffCpuBreakdown::default();
-    let mut residue_pet_samples: u64 = 0;
-    let mut residue_off_cpu_intervals: u64 = 0;
-    let mut residue_dropped: u64 = 0;
     for ((fname, bin), acc) in entries {
-        let acc_total = acc.on_cpu_ns.saturating_add(acc.off_cpu.total_ns());
-        if acc_total >= threshold {
-            let (mut grandchildren, gres) =
-                build_children_with_residue(&acc.sub_sources, threshold, binaries, interner);
-            if let Some(extra) = gres {
-                grandchildren.push(extra);
-            }
-            visible.push(FlameNode {
-                address: acc.rep_addr,
-                on_cpu_ns: acc.on_cpu_ns,
-                off_cpu: acc.off_cpu.to_proto(),
-                pet_samples: acc.pet_samples,
-                off_cpu_intervals: acc.off_cpu_intervals,
-                function_name: interner.intern_opt(fname),
-                binary: interner.intern_opt(bin),
-                is_main: acc.is_main,
-                language: interner.intern_str(acc.language.as_str()),
-                cycles: acc.pmc.cycles,
-                instructions: acc.pmc.instructions,
-                l1d_misses: acc.pmc.l1d_misses,
-                branch_mispreds: acc.pmc.branch_mispreds,
-                children: grandchildren,
-            });
-        } else {
-            residue_on_cpu_ns = residue_on_cpu_ns.saturating_add(acc.on_cpu_ns);
-            residue_off_cpu.add_other(&acc.off_cpu);
-            residue_pet_samples = residue_pet_samples.saturating_add(acc.pet_samples);
-            residue_off_cpu_intervals =
-                residue_off_cpu_intervals.saturating_add(acc.off_cpu_intervals);
-            residue_dropped += 1;
-        }
+        let grandchildren = build_children(&acc.sub_sources, binaries, interner);
+        visible.push(FlameNode {
+            address: acc.rep_addr,
+            on_cpu_ns: acc.on_cpu_ns,
+            off_cpu: acc.off_cpu.to_proto(),
+            pet_samples: acc.pet_samples,
+            off_cpu_intervals: acc.off_cpu_intervals,
+            function_name: interner.intern_opt(fname),
+            binary: interner.intern_opt(bin),
+            is_main: acc.is_main,
+            language: interner.intern_str(acc.language.as_str()),
+            cycles: acc.pmc.cycles,
+            instructions: acc.pmc.instructions,
+            l1d_misses: acc.pmc.l1d_misses,
+            branch_mispreds: acc.pmc.branch_mispreds,
+            children: grandchildren,
+        });
     }
-    let residue_total = residue_on_cpu_ns.saturating_add(residue_off_cpu.total_ns());
-    let residue = if residue_total > 0 && residue_dropped > 0 {
-        let label = interner.intern(format!("({} small frames)", residue_dropped));
-        let unknown_lang = interner.intern_str(stax_demangle::Language::Unknown.as_str());
-        Some(FlameNode {
-            // Sentinel address: the frontend treats any node with
-            // address == 0 as the root "(all)" otherwise; we set
-            // function_name explicitly so the labelFor() takes that
-            // path first, but we also pick u64::MAX here as a defence
-            // in case future renderers fall back to address.
-            address: u64::MAX,
-            on_cpu_ns: residue_on_cpu_ns,
-            off_cpu: residue_off_cpu.to_proto(),
-            pet_samples: residue_pet_samples,
-            off_cpu_intervals: residue_off_cpu_intervals,
-            function_name: Some(label),
-            binary: None,
-            is_main: false,
-            language: unknown_lang,
-            cycles: 0,
-            instructions: 0,
-            l1d_misses: 0,
-            branch_mispreds: 0,
-            children: Vec::new(),
-        })
-    } else {
-        None
-    };
-    (visible, residue)
+    visible
 }
 
 /// `self_lookup` returns `(self_on_cpu_ns, self_pet_samples)` for an
