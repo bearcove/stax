@@ -156,8 +156,8 @@ impl LiveSink for IngestSink {
             .tx
             .send(IngestEvent::ProbeResult(stax_live_proto::WireProbeResult {
                 tid: ev.tid,
-                kperf_ts_ns: ev.kperf_ts,
-                probe_done_ns: ev.probe_done_ns,
+                timing: ev.timing.into(),
+                queue: ev.queue.into(),
                 mach_pc: ev.mach_pc,
                 mach_lr: ev.mach_lr,
                 mach_fp: ev.mach_fp,
@@ -204,6 +204,29 @@ impl LiveSink for IngestSink {
     }
 }
 
+impl From<crate::live_sink::ProbeTiming> for stax_live_proto::ProbeTiming {
+    fn from(t: crate::live_sink::ProbeTiming) -> Self {
+        Self {
+            kperf_ts: t.kperf_ts,
+            enqueued: t.enqueued,
+            worker_started: t.worker_started,
+            thread_lookup_done: t.thread_lookup_done,
+            state_done: t.state_done,
+            resume_done: t.resume_done,
+            walk_done: t.walk_done,
+        }
+    }
+}
+
+impl From<crate::live_sink::ProbeQueueStats> for stax_live_proto::ProbeQueueStats {
+    fn from(q: crate::live_sink::ProbeQueueStats) -> Self {
+        Self {
+            coalesced_requests: q.coalesced_requests,
+            worker_batch_len: q.worker_batch_len,
+        }
+    }
+}
+
 /// Connect to stax-server, register a run, return:
 ///   - the assigned `RunId`
 ///   - a `LiveSink` to hand to the recorder
@@ -224,8 +247,8 @@ pub async fn connect_and_register(
     let (vox_tx, vox_rx) = vox::channel::<IngestEvent>();
     let run_id = match client.start_run(config, vox_rx).await {
         Ok(id) => id,
-        Err(vox::VoxError::User(msg)) => {
-            return Err(eyre::eyre!("server rejected start_run: {msg}"));
+        Err(vox::VoxError::User(err)) => {
+            return Err(eyre::eyre!("server rejected start_run: {err:?}"));
         }
         Err(e) => return Err(eyre::eyre!("vox start_run failed: {e:?}")),
     };
@@ -263,8 +286,8 @@ pub async fn connect_to_existing_run(
     let (vox_tx, vox_rx) = vox::channel::<IngestEvent>();
     match client.attach_run(run_id, vox_rx).await {
         Ok(()) => {}
-        Err(vox::VoxError::User(msg)) => {
-            return Err(eyre::eyre!("server rejected attach_run: {msg}"));
+        Err(vox::VoxError::User(err)) => {
+            return Err(eyre::eyre!("server rejected attach_run: {err:?}"));
         }
         Err(e) => return Err(eyre::eyre!("vox attach_run failed: {e:?}")),
     }

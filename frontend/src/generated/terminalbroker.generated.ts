@@ -27,17 +27,22 @@ export type TerminalOutput =
   | { tag: 'ExitStatus'; code: number | null; signal: number | null }
   | { tag: 'Error'; message: string };
 
+export type TerminalBrokerError =
+  | { tag: 'UnknownRun'; run_id: RunId }
+  | { tag: 'AlreadyAttached'; run_id: RunId }
+  | { tag: 'Internal'; message: string };
+
 // Request/Response type aliases
 export type AttachTerminalRequest = [
   RunId, // run_id
   Tx<TerminalInput>, // input_to_shade
   Rx<TerminalOutput>, // output_from_shade
 ];
-export type AttachTerminalResponse = { ok: true; value: void } | { ok: false; error: string };
+export type AttachTerminalResponse = { ok: true; value: void } | { ok: false; error: TerminalBrokerError };
 
 // Caller interface for TerminalBroker
 export interface TerminalBrokerCaller {
-  attachTerminal(runId: RunId, inputToShade: Tx<TerminalInput>, outputFromShade: Rx<TerminalOutput>): Promise<{ ok: true; value: void } | { ok: false; error: string }>;
+  attachTerminal(runId: RunId, inputToShade: Tx<TerminalInput>, outputFromShade: Rx<TerminalOutput>): Promise<{ ok: true; value: void } | { ok: false; error: TerminalBrokerError }>;
 }
 
 // Client implementation for TerminalBroker
@@ -48,7 +53,7 @@ export class TerminalBrokerClient implements TerminalBrokerCaller {
     this.caller = caller;
   }
 
-  async attachTerminal(runId: RunId, inputToShade: Tx<TerminalInput>, outputFromShade: Rx<TerminalOutput>): Promise<{ ok: true; value: void } | { ok: false; error: string }> {
+  async attachTerminal(runId: RunId, inputToShade: Tx<TerminalInput>, outputFromShade: Rx<TerminalOutput>): Promise<{ ok: true; value: void } | { ok: false; error: TerminalBrokerError }> {
     const descriptor = terminalBroker_attachTerminal_method;
     const sendSchemas = terminalBroker_descriptor.send_schemas;
     const argTypeRefs = argElementRefsForMethod(descriptor.id, sendSchemas);
@@ -72,10 +77,10 @@ export class TerminalBrokerClient implements TerminalBrokerCaller {
           prepareRetry,
           finalizeChannels: () => finalizeBoundChannelsForTypeRefs(argTypeRefs, [runId, inputToShade, outputFromShade], sendSchemas.schemas),
         });
-        return { ok: true, value } as { ok: true; value: void } | { ok: false; error: string };
+        return { ok: true, value } as { ok: true; value: void } | { ok: false; error: TerminalBrokerError };
       } catch (e: any) {
         if (e instanceof RpcError && e.isUserError()) {
-          return { ok: false, error: e.userError } as { ok: true; value: void } | { ok: false; error: string };
+          return { ok: false, error: e.userError } as { ok: true; value: void } | { ok: false; error: TerminalBrokerError };
         }
         throw e;
       }
@@ -98,7 +103,7 @@ export async function connectTerminalBroker(
 
 // Handler interface for TerminalBroker
 export interface TerminalBrokerHandler {
-  attachTerminal(runId: RunId, inputToShade: Tx<TerminalInput>, outputFromShade: Rx<TerminalOutput>): Promise<{ ok: true; value: void } | { ok: false; error: string }> | { ok: true; value: void } | { ok: false; error: string };
+  attachTerminal(runId: RunId, inputToShade: Tx<TerminalInput>, outputFromShade: Rx<TerminalOutput>): Promise<{ ok: true; value: void } | { ok: false; error: TerminalBrokerError }> | { ok: true; value: void } | { ok: false; error: TerminalBrokerError };
 }
 
 // Dispatcher for TerminalBroker
@@ -149,9 +154,10 @@ export const terminalBroker_send_schemas: import("@bearcove/vox-core").ServiceSe
     [0x967a48ac345e2f5en, { id: 0x967a48ac345e2f5en, type_params: ['T'], kind: { tag: 'channel', direction: 'rx', element: { tag: 'var', name: 'T' } } }],
     [0xaa510ab07d34f141n, { id: 0xaa510ab07d34f141n, type_params: ['T0', 'T1', 'T2'], kind: { tag: 'tuple', elements: [{ tag: 'var', name: 'T0' }, { tag: 'var', name: 'T1' }, { tag: 'var', name: 'T2' }] } }],
     [0xbc5c33249a2dc720n, { id: 0xbc5c33249a2dc720n, type_params: [], kind: { tag: 'primitive', primitive_type: 'unit' } }],
+    [0x27a16b3174edf986n, { id: 0x27a16b3174edf986n, type_params: [], kind: { tag: 'enum', name: 'TerminalBrokerError', variants: [{ name: 'UnknownRun', index: 0, payload: { tag: 'struct', fields: [{ name: 'run_id', type_ref: { tag: 'concrete', type_id: 0xde69b13dbe16811bn, args: [] }, required: true }] } }, { name: 'AlreadyAttached', index: 1, payload: { tag: 'struct', fields: [{ name: 'run_id', type_ref: { tag: 'concrete', type_id: 0xde69b13dbe16811bn, args: [] }, required: true }] } }, { name: 'Internal', index: 2, payload: { tag: 'struct', fields: [{ name: 'message', type_ref: { tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }, required: true }] } }] } }],
   ]),
   methods: new Map<bigint, import("@bearcove/vox-core").MethodSendSchemas>([
-    [0xacd350210f1054d1n, { argsRootRef: { tag: 'concrete', type_id: 0xaa510ab07d34f141n, args: [{ tag: 'concrete', type_id: 0xde69b13dbe16811bn, args: [] }, { tag: 'concrete', type_id: 0xc886545a493d06ebn, args: [{ tag: 'concrete', type_id: 0x09e87b3cccb59ecen, args: [] }] }, { tag: 'concrete', type_id: 0x967a48ac345e2f5en, args: [{ tag: 'concrete', type_id: 0x859b682f0385da19n, args: [] }] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0xbc5c33249a2dc720n, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }] }] } }],
+    [0xacd350210f1054d1n, { argsRootRef: { tag: 'concrete', type_id: 0xaa510ab07d34f141n, args: [{ tag: 'concrete', type_id: 0xde69b13dbe16811bn, args: [] }, { tag: 'concrete', type_id: 0xc886545a493d06ebn, args: [{ tag: 'concrete', type_id: 0x09e87b3cccb59ecen, args: [] }] }, { tag: 'concrete', type_id: 0x967a48ac345e2f5en, args: [{ tag: 'concrete', type_id: 0x859b682f0385da19n, args: [] }] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0xbc5c33249a2dc720n, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x27a16b3174edf986n, args: [] }] }] } }],
   ]),
 };
 

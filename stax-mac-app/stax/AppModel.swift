@@ -1,6 +1,8 @@
 import Foundation
+@preconcurrency import NIOCore
 import Observation
 import SwiftUI
+import VoxRuntime
 
 @Observable
 @MainActor
@@ -82,12 +84,7 @@ final class AppModel {
             name ?? "[\(tid)]"
         }
     }
-    var threads: [ThreadInfo] = [
-        .init(tid: 1,    name: "main",     onCPU: 2.40),
-        .init(tid: 1024, name: "worker-1", onCPU: 0.36),
-        .init(tid: 1025, name: "worker-2", onCPU: 0.24),
-        .init(tid: 1026, name: "worker-3", onCPU: 0.06),
-    ]
+    var threads: [ThreadInfo] = []
 
     /// Threads sorted by on-CPU time, descending.
     var threadsSorted: [ThreadInfo] {
@@ -214,4 +211,79 @@ final class AppModel {
         .init(name: "-[IOGPUMetalCommandQueue submitCommandBuffers:count:]",       binary: "IOGPU",                   kind: .objc,  selfTime: 0,         totalTime: 0),
         .init(name: "0x1010728c8",                                                 binary: "(no binary)",             kind: .unknown, selfTime: 0.000991, totalTime: 0.000994),
     ]
+
+    // MARK: - Live data plumbing
+
+    /// Why a connection isn't live (or empty when everything's fine).
+    var connectionStatus: String = "disconnected"
+    private let service = ProfilerService()
+    private var streamTasks: [Task<Void, Never>] = []
+
+    /// Connect to stax-server, then start subscriptions that drive
+    /// live-data fields (`threads`, …). Idempotent.
+    func start() async {
+        guard streamTasks.isEmpty else { return }
+        connectionStatus = "connecting"
+        await service.connect()
+        switch service.state {
+        case .ready(let client):
+            connectionStatus = "connected"
+            streamTasks.append(Task { [weak self] in
+                await self?.runThreadsSubscription(client: client)
+            })
+        case .failed(let why):
+            connectionStatus = why
+        case .idle, .connecting:
+            connectionStatus = "stuck"
+        }
+    }
+
+    private func runThreadsSubscription(client: ProfilerClient) async {
+        // Smoke test: if this fails, vox round-trips aren't working
+        // and there's no point trying the streaming subscription.
+        do {
+            let total = try await client.totalOnCpuNs()
+            NSLog("stax: totalOnCpuNs = %llu", total)
+        } catch {
+            NSLog("stax: totalOnCpuNs failed: %@", "\(error)")
+            connectionStatus = "totalOnCpuNs failed"
+            return
+        }
+
+        let (tx, rx) = channel(
+            serialize: { (val: ThreadsUpdate, buf: inout ByteBuffer) in
+                encodeThreadsUpdate(val, into: &buf)
+            },
+            deserialize: { (buf: inout ByteBuffer) in
+                try decodeThreadsUpdate(from: &buf)
+            }
+        )
+
+        Task {
+            do {
+                try await client.subscribeThreads(output: tx)
+                NSLog("stax: subscribeThreads call returned")
+            } catch {
+                NSLog("stax: subscribeThreads call failed: %@", "\(error)")
+            }
+        }
+
+        do {
+            var count = 0
+            for try await update in rx {
+                count += 1
+                NSLog("stax: threads update #%d (%d threads)", count, update.threads.count)
+                self.threads = update.threads.map { wire in
+                    ThreadInfo(
+                        tid: Int(wire.tid),
+                        name: wire.name,
+                        onCPU: TimeInterval(wire.onCpuNs) / 1_000_000_000
+                    )
+                }
+            }
+            NSLog("stax: threads stream ended")
+        } catch {
+            NSLog("stax: threads stream error: %@", "\(error)")
+        }
+    }
 }

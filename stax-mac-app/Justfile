@@ -15,14 +15,14 @@ build: gen
 
 # Build, then launch from DerivedData (kills any prior instance first)
 run: build
-    pkill -x stax || true
+    pkill -f /stax.app/Contents/MacOS/stax || true
     @sleep 0.2
     @build_dir="$(xcodebuild -project {{project}} -scheme {{scheme}} -configuration {{config}} -showBuildSettings 2>/dev/null | awk '/^ *BUILT_PRODUCTS_DIR =/ { print $3 }')"; \
       open "$build_dir/stax.app"
 
 # Build, copy to /Applications, launch from there
 install: build
-    pkill -x stax || true
+    pkill -f /stax.app/Contents/MacOS/stax || true
     @sleep 0.2
     @build_dir="$(xcodebuild -project {{project}} -scheme {{scheme}} -configuration {{config}} -showBuildSettings 2>/dev/null | awk '/^ *BUILT_PRODUCTS_DIR =/ { print $3 }')"; \
       rm -rf /Applications/stax.app; \

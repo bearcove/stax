@@ -21,11 +21,14 @@ use stax_live::{
 };
 use stax_live_proto::{
     IngestEvent, LaunchEnvVar, LaunchRequest, ProfilerDispatcher, RunConfig, RunControl,
-    RunControlDispatcher, RunId, RunIngest, RunIngestDispatcher, RunState, RunSummary,
-    ServerStatus, StopReason, TerminalBroker, TerminalBrokerDispatcher, TerminalInput,
-    TerminalOutput, WaitCondition, WaitOutcome, WireBinaryLoaded, WireBinaryUnloaded,
+    RunControlDispatcher, RunControlError, RunId, RunIngest, RunIngestDispatcher, RunIngestError,
+    RunState, RunSummary, ServerStatus, StopReason, TerminalBroker, TerminalBrokerDispatcher,
+    TerminalBrokerError, TerminalInput, TerminalOutput, WaitCondition, WaitOutcome,
+    WireBinaryLoaded, WireBinaryUnloaded,
 };
-use stax_shade_proto::{ShadeAck, ShadeCommand, ShadeInfo, ShadeRegistry, ShadeRegistryDispatcher};
+use stax_shade_proto::{
+    ShadeAck, ShadeCommand, ShadeError, ShadeInfo, ShadeRegistry, ShadeRegistryDispatcher,
+};
 use vox::VoxListener;
 
 const DEFAULT_SOCK_NAME: &str = "stax-server.sock";
@@ -208,15 +211,50 @@ fn cleanup_session_shade(server: &ServerState, slot: &ShadeSlot) {
     }
 }
 
+/// macOS app-group container path for the stax-server socket. The
+/// sandboxed Mac client (eu.bearcove.stax) opts into this group via
+/// `com.apple.security.application-groups`; this gives both sides a
+/// shared filesystem location for the unix socket without poking
+/// holes through the sandbox to /tmp.
+const APP_GROUP: &str = "B2N6FSRTPV.eu.bearcove.stax";
+
 fn resolve_socket_path() -> PathBuf {
     if let Ok(p) = std::env::var("STAX_SERVER_SOCKET") {
         return PathBuf::from(p);
+    }
+    if let Some(p) = group_container_socket() {
+        return p;
     }
     if let Ok(rt) = std::env::var("XDG_RUNTIME_DIR") {
         return PathBuf::from(rt).join(DEFAULT_SOCK_NAME);
     }
     let uid = unsafe { libc::getuid() };
     PathBuf::from(format!("/tmp/stax-server-{uid}.sock"))
+}
+
+#[cfg(target_os = "macos")]
+fn group_container_socket() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    let dir = PathBuf::from(home)
+        .join("Library")
+        .join("Group Containers")
+        .join(APP_GROUP);
+    // The container is a regular directory under the user's home;
+    // the app-group entitlement merely *grants access* to sandboxed
+    // peers. Non-sandboxed processes (us) can mkdir it freely.
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!(
+            "stax-server: cannot create group container {}: {e}",
+            dir.display()
+        );
+        return None;
+    }
+    Some(dir.join(DEFAULT_SOCK_NAME))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn group_container_socket() -> Option<PathBuf> {
+    None
 }
 
 /// Shared state. The aggregator + binary registry persist across
@@ -995,7 +1033,7 @@ impl RunControl for ServerState {
         config: RunConfig,
         daemon_socket: String,
         time_limit_secs: Option<u64>,
-    ) -> Result<RunId, String> {
+    ) -> Result<RunId, RunControlError> {
         let frequency_hz = config.frequency_hz;
         let race_kperf = config.race_kperf;
         let (run_id, _) = self.begin_run(config)?;
@@ -1008,7 +1046,7 @@ impl RunControl for ServerState {
             time_limit_secs,
         ) {
             self.discard_start_failed(run_id, e.clone());
-            return Err(e);
+            return Err(e.into());
         }
         Ok(run_id)
     }
@@ -1018,9 +1056,11 @@ impl RunControl for ServerState {
         request: LaunchRequest,
         terminal_input: vox::Rx<TerminalInput>,
         terminal_output: vox::Tx<TerminalOutput>,
-    ) -> Result<RunId, String> {
+    ) -> Result<RunId, RunControlError> {
         if request.command.is_empty() {
-            return Err("launch command is empty".to_owned());
+            return Err(RunControlError::Internal {
+                message: "launch command is empty".to_owned(),
+            });
         }
         let frequency_hz = request.config.frequency_hz;
         let race_kperf = request.config.race_kperf;
@@ -1043,7 +1083,7 @@ impl RunControl for ServerState {
             time_limit_secs,
         ) {
             self.discard_start_failed(run_id, e.clone());
-            return Err(e);
+            return Err(e.into());
         }
         Ok(run_id)
     }
@@ -1089,7 +1129,7 @@ impl RunControl for ServerState {
         }
     }
 
-    async fn stop_active(&self) -> Result<RunSummary, String> {
+    async fn stop_active(&self) -> Result<RunSummary, RunControlError> {
         // Mark as stopped + grab the cancel handle under the lock,
         // then notify outside the lock so the drainer can run
         // freely. The drainer is responsible for moving the run
@@ -1105,7 +1145,7 @@ impl RunControl for ServerState {
                     summary.stopped_at_unix_ns = Some(now_unix_ns());
                     summary.clone()
                 }
-                None => return Err("no active run".to_owned()),
+                None => return Err(RunControlError::NoActiveRun),
             };
             // The shade has nothing left to attach to; release
             // the slot so a follow-up run on the same server can
@@ -1151,7 +1191,7 @@ impl ShadeRegistry for ShadeRegistryImpl {
         &self,
         info: ShadeInfo,
         commands: vox::Tx<ShadeCommand>,
-    ) -> Result<ShadeAck, String> {
+    ) -> Result<ShadeAck, ShadeError> {
         let ack = self.server.try_register_shade(info.clone(), commands);
         if ack.accepted {
             *self.shade_slot.lock() = Some(info.shade_pid);
@@ -1166,8 +1206,9 @@ impl TerminalBroker for ServerState {
         run_id: RunId,
         input_to_shade: vox::Tx<TerminalInput>,
         output_from_shade: vox::Rx<TerminalOutput>,
-    ) -> Result<(), String> {
+    ) -> Result<(), TerminalBrokerError> {
         self.attach_terminal_channels(run_id, input_to_shade, output_from_shade)
+            .map_err(Into::into)
     }
 }
 
@@ -1176,14 +1217,18 @@ impl RunIngest for ServerState {
         &self,
         config: RunConfig,
         events: vox::Rx<IngestEvent>,
-    ) -> Result<RunId, String> {
+    ) -> Result<RunId, RunIngestError> {
         let (id, cancel) = self.begin_run(config)?;
         self.inner.lock().ingest_attached = true;
         self.spawn_ingest_drainer(id, cancel, events);
         Ok(id)
     }
 
-    async fn attach_run(&self, run_id: RunId, events: vox::Rx<IngestEvent>) -> Result<(), String> {
+    async fn attach_run(
+        &self,
+        run_id: RunId,
+        events: vox::Rx<IngestEvent>,
+    ) -> Result<(), RunIngestError> {
         let cancel = self.cancel_for_run(run_id)?;
         self.inner.lock().ingest_attached = true;
         self.spawn_ingest_drainer(run_id, cancel, events);
@@ -1195,15 +1240,16 @@ impl RunIngest for ServerState {
         run_id: RunId,
         pid: u32,
         task_port: u64,
-    ) -> Result<(), String> {
+    ) -> Result<(), RunIngestError> {
         self.apply_target_attached(run_id, pid, task_port)
+            .map_err(Into::into)
     }
 
     async fn publish_binaries_loaded(
         &self,
         run_id: RunId,
         binaries: Vec<WireBinaryLoaded>,
-    ) -> Result<(), String> {
+    ) -> Result<(), RunIngestError> {
         for binary in binaries {
             self.apply_binary_loaded(run_id, binary)?;
         }
@@ -1214,7 +1260,7 @@ impl RunIngest for ServerState {
         &self,
         run_id: RunId,
         binaries: Vec<WireBinaryUnloaded>,
-    ) -> Result<(), String> {
+    ) -> Result<(), RunIngestError> {
         for binary in binaries {
             self.apply_binary_unloaded(run_id, binary.base_avma)?;
         }
@@ -1408,8 +1454,8 @@ impl ServerState {
                     .write()
                     .record_probe_result(stax_live::ProbeResultRecord {
                         tid: p.tid,
-                        kperf_ts: p.kperf_ts_ns,
-                        probe_done_ns: p.probe_done_ns,
+                        timing: p.timing.into(),
+                        queue: p.queue.into(),
                         mach_pc: p.mach_pc,
                         mach_lr: p.mach_lr,
                         mach_fp: p.mach_fp,

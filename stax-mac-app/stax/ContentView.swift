@@ -16,6 +16,7 @@ struct ContentView: View {
             }
             .frame(minWidth: 600, minHeight: 400)
         }
+        .task { await model.start() }
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 Button {

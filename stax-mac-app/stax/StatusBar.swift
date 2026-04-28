@@ -4,7 +4,14 @@ struct StatusBar: View {
     @Bindable var model: AppModel
 
     var body: some View {
-        HStack {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(connectionColor)
+                .frame(width: 7, height: 7)
+            Text(model.connectionStatus)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
             Spacer()
             Text(statsText)
                 .font(.mono(.callout))
@@ -14,6 +21,14 @@ struct StatusBar: View {
         .padding(.vertical, 6)
         .background(.bar)
         .overlay(alignment: .top) { Divider() }
+    }
+
+    private var connectionColor: Color {
+        switch model.connectionStatus {
+        case "connected": .green
+        case "connecting": .orange
+        default: .red
+        }
     }
 
     private var statsText: String {

@@ -11,14 +11,20 @@
 
 #![cfg(target_os = "macos")]
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant};
 
 use log::{info, warn};
 use stax_mac_capture::SampleSink;
 use stax_mac_kperf_parse::pipeline::{Pipeline, PipelineConfig};
 use stax_mac_kperf_sys::bindings::sampler;
-use stax_mac_kperf_sys::kdebug::{self, DBG_MACH, DBG_MACH_SCHED, DBG_PERF, KdBuf};
+use stax_mac_kperf_sys::kdebug::{
+    self, DBG_FUNC_END, DBG_FUNC_START, DBG_MACH, DBG_MACH_SCHED, DBG_PERF, KDBG_TIMESTAMP_MASK,
+    KdBuf, perf,
+};
 use staxd_proto::{KdBufBatch, KdBufWire, SessionConfig, StaxdClient};
 
 /// User-facing options. Mirrors the shape of
@@ -80,8 +86,29 @@ pub enum Error {
 pub async fn drive_session<S: SampleSink + Send + 'static>(
     opts: RemoteOptions,
     sink: S,
-    mut should_stop: impl FnMut() -> bool,
+    should_stop: impl FnMut() -> bool,
 ) -> Result<(), Error> {
+    drive_session_with_hooks(opts, sink, should_stop, || {}, |_, _| {}).await
+}
+
+/// Like [`drive_session`], but calls `on_kperf_sample_start(tid,
+/// timestamp)` from the recv task as soon as the raw kperf records
+/// show that the current sample has a user stack. This hook exists for
+/// race-kperf: stack capture must not wait behind the heavier parser /
+/// symbol / image pipeline.
+pub async fn drive_session_with_hooks<S, Stop, FirstBatch, SampleStart>(
+    opts: RemoteOptions,
+    sink: S,
+    mut should_stop: Stop,
+    mut on_first_batch: FirstBatch,
+    mut on_kperf_sample_start: SampleStart,
+) -> Result<(), Error>
+where
+    S: SampleSink + Send + 'static,
+    Stop: FnMut() -> bool,
+    FirstBatch: FnMut(),
+    SampleStart: FnMut(u32, u64),
+{
     let url = if opts.daemon_socket.starts_with("local://") {
         opts.daemon_socket.clone()
     } else {
@@ -142,9 +169,11 @@ pub async fn drive_session<S: SampleSink + Send + 'static>(
     };
 
     let (worker_tx, worker_rx) = std::sync::mpsc::channel::<WorkerMsg>();
+    let abort_worker_backlog = Arc::new(AtomicBool::new(false));
+    let worker_abort = abort_worker_backlog.clone();
     let worker_handle = std::thread::Builder::new()
         .name("staxd-client-worker".to_owned())
-        .spawn(move || worker_thread(pipeline_config, shared_cache, sink, worker_rx))
+        .spawn(move || worker_thread(pipeline_config, shared_cache, sink, worker_abort, worker_rx))
         .map_err(|e| Error::VoxCall(format!("spawn worker thread: {e}")))?;
 
     // Build the session config the daemon expects. Filter range covers
@@ -174,6 +203,7 @@ pub async fn drive_session<S: SampleSink + Send + 'static>(
     let session_start = Instant::now();
     let mut total_drained: u64 = 0;
     let mut seen_first_batch = false;
+    let mut probe_trigger_scanner = KperfProbeTriggerScanner::default();
 
     loop {
         if should_stop() {
@@ -214,6 +244,12 @@ pub async fn drive_session<S: SampleSink + Send + 'static>(
                     batch.records.len(),
                     session_start.elapsed(),
                 );
+                on_first_batch();
+            }
+            for rec in &batch.records {
+                if let Some((tid, ts)) = probe_trigger_scanner.feed(rec) {
+                    on_kperf_sample_start(tid, ts);
+                }
             }
             total_drained += batch.records.len() as u64;
             // Hand off to the worker thread. send is non-blocking
@@ -232,7 +268,12 @@ pub async fn drive_session<S: SampleSink + Send + 'static>(
     // next send fails with Transport, its drain loop breaks, kperf
     // teardown runs, record() returns with a RecordSummary or error.
     drop(rx);
-    // Tell the worker we're done so it can flush + finish.
+    // The stream is lossy sample data. Do not let a stale local
+    // parser backlog keep the authoritative run lifecycle open after
+    // the daemon has stopped and the target has exited.
+    abort_worker_backlog.store(true, Ordering::Release);
+    // Tell the worker we're done so it can finish and drop the sink,
+    // which closes the ingest channel on the server.
     drop(worker_tx);
 
     let rpc_result = record_fut
@@ -267,6 +308,57 @@ pub async fn drive_session<S: SampleSink + Send + 'static>(
     Ok(())
 }
 
+#[derive(Default)]
+struct KperfProbeTriggerScanner {
+    pending: Option<PendingKperfSample>,
+}
+
+struct PendingKperfSample {
+    tid: u32,
+    timestamp: u64,
+    triggered: bool,
+}
+
+impl KperfProbeTriggerScanner {
+    fn feed(&mut self, rec: &KdBufWire) -> Option<(u32, u64)> {
+        if kdebug::kdbg_class(rec.debugid) != DBG_PERF {
+            return None;
+        }
+
+        let subclass = kdebug::kdbg_subclass(rec.debugid);
+        let code = kdebug::kdbg_code(rec.debugid);
+        let func = kdebug::kdbg_func(rec.debugid);
+
+        match (subclass, code, func) {
+            (perf::sc::GENERIC, 0, DBG_FUNC_START) => {
+                self.pending = Some(PendingKperfSample {
+                    tid: rec.arg5 as u32,
+                    timestamp: rec.timestamp & KDBG_TIMESTAMP_MASK,
+                    triggered: false,
+                });
+                None
+            }
+            (perf::sc::GENERIC, 0, DBG_FUNC_END) => {
+                self.pending = None;
+                None
+            }
+            (perf::sc::CALLSTACK, perf::cs::UHDR, _) => {
+                let pending = self.pending.as_mut()?;
+                if pending.triggered {
+                    return None;
+                }
+                let user_frames = (rec.arg2 as u32).saturating_add(rec.arg4 as u32);
+                if user_frames == 0 {
+                    return None;
+                }
+                pending.triggered = true;
+                Some((pending.tid, pending.timestamp))
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Owned, thread-Send'able mirror of `KdBufBatch`. We can't move
 /// the SelfRef across thread boundaries, so the recv loop pulls
 /// the records out and ships them to the worker via this struct.
@@ -286,6 +378,7 @@ fn worker_thread<S: SampleSink>(
     config: PipelineConfig,
     shared_cache: Option<Arc<stax_mac_shared_cache::SharedCache>>,
     mut sink: S,
+    abort_backlog: Arc<AtomicBool>,
     rx: std::sync::mpsc::Receiver<WorkerMsg>,
 ) {
     let mut pipeline = Pipeline::new(config, shared_cache, &mut sink);
@@ -295,8 +388,18 @@ fn worker_thread<S: SampleSink>(
     const TICK_INTERVAL: Duration = Duration::from_millis(50);
 
     loop {
+        if abort_backlog.load(Ordering::Acquire) {
+            info!("staxd-client-worker: shutdown requested; dropping queued kdebug batches");
+            break;
+        }
         match rx.recv_timeout(TICK_INTERVAL) {
             Ok(WorkerMsg::Batch(batch)) => {
+                if abort_backlog.load(Ordering::Acquire) {
+                    info!(
+                        "staxd-client-worker: shutdown requested; dropping queued kdebug batches"
+                    );
+                    break;
+                }
                 let kdbufs: Vec<KdBuf> = batch.records.iter().map(wire_to_kdbuf).collect();
                 pipeline.process_records(&kdbufs, &mut sink);
             }

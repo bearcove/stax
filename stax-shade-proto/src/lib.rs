@@ -74,6 +74,25 @@ pub enum ShadeCommand {
     Stop,
 }
 
+/// Errors a shade can surface to a client. Variant names map to the
+/// place in the shade where the error originated.
+#[derive(Clone, Debug, Facet)]
+#[repr(u8)]
+pub enum ShadeError {
+    /// `mach_vm_read` failed (bad address, deallocated region, etc.).
+    PeekFailed { detail: String },
+    /// `mach_vm_write` failed.
+    PokeFailed { detail: String },
+    /// Catch-all for errors not yet promoted to a typed variant.
+    Internal { message: String },
+}
+
+impl From<String> for ShadeError {
+    fn from(message: String) -> Self {
+        Self::Internal { message }
+    }
+}
+
 /// Server-side handshake plane. The shade dials in, calls
 /// `register_shade` once, then keeps the session open to accept
 /// reverse calls into the `Shade` service.
@@ -83,7 +102,7 @@ pub trait ShadeRegistry {
         &self,
         info: ShadeInfo,
         commands: vox::Tx<ShadeCommand>,
-    ) -> Result<ShadeAck, String>;
+    ) -> Result<ShadeAck, ShadeError>;
 }
 
 /// Shade-side primitives. Stubs in this commit; implementations
@@ -92,13 +111,13 @@ pub trait ShadeRegistry {
 pub trait Shade {
     /// Read `len` bytes starting at `addr` (target AVMA) via
     /// `mach_vm_read`.
-    async fn peek(&self, addr: u64, len: u32) -> Result<Vec<u8>, String>;
+    async fn peek(&self, addr: u64, len: u32) -> Result<Vec<u8>, ShadeError>;
 
     /// Write `bytes` starting at `addr` (target AVMA) via
     /// `mach_vm_write`. Caller is responsible for restoring the
     /// original bytes — the shade does not maintain a poke
     /// history.
-    async fn poke(&self, addr: u64, bytes: Vec<u8>) -> Result<(), String>;
+    async fn poke(&self, addr: u64, bytes: Vec<u8>) -> Result<(), ShadeError>;
 }
 
 /// All service descriptors exposed by stax-shade-proto.

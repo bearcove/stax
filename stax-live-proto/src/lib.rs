@@ -493,6 +493,8 @@ pub struct ProbeDiffEntry {
     /// in real nanoseconds (converted via mach_timebase_info on
     /// the server side).
     pub drift_ns: i64,
+    pub timing: ProbeTimingBreakdown,
+    pub queue: ProbeQueueStats,
     /// kperf's user backtrace, leaf-most first.
     pub kperf_stack: Vec<ResolvedFrame>,
     /// kperf's kernel backtrace at PMI, leaf-most first. Empty
@@ -543,6 +545,45 @@ pub struct ProbeDiffDepthCell {
     pub total: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, Facet)]
+pub struct ProbeTimingBreakdown {
+    /// kperf sample timestamp -> shade parser enqueue.
+    pub kperf_to_enqueue_ns: u64,
+    /// Waiting behind other pending probe requests.
+    pub queue_wait_ns: u64,
+    /// Worker-start -> thread-port lookup/cache refresh complete.
+    pub lookup_ns: u64,
+    /// Thread-port lookup complete -> thread state captured.
+    pub suspend_state_ns: u64,
+    /// thread_resume duration after state capture.
+    pub resume_ns: u64,
+    /// Remote FP walk duration after resuming the target thread.
+    pub walk_ns: u64,
+    /// Worker-start -> FP walk complete.
+    pub probe_total_ns: u64,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct ProbeTimingSummary {
+    pub samples: u64,
+    pub avg_kperf_to_enqueue_ns: u64,
+    pub max_kperf_to_enqueue_ns: u64,
+    pub avg_queue_wait_ns: u64,
+    pub max_queue_wait_ns: u64,
+    pub avg_lookup_ns: u64,
+    pub max_lookup_ns: u64,
+    pub avg_suspend_state_ns: u64,
+    pub max_suspend_state_ns: u64,
+    pub avg_resume_ns: u64,
+    pub max_resume_ns: u64,
+    pub avg_walk_ns: u64,
+    pub max_walk_ns: u64,
+    pub avg_probe_total_ns: u64,
+    pub max_probe_total_ns: u64,
+    pub coalesced_requests: u64,
+    pub max_worker_batch_len: u32,
+}
+
 /// Per-thread breakdown for the probe diff.
 #[derive(Clone, Debug, Facet)]
 pub struct ProbeDiffThread {
@@ -585,6 +626,8 @@ pub struct ProbeDiffUpdate {
     pub depth_match: Vec<ProbeDiffDepthCell>,
     /// Drift histogram in real nanoseconds.
     pub drift_buckets: Vec<ProbeDiffBucket>,
+    /// Self-profiled timing breakdown for paired probe results.
+    pub timing: ProbeTimingSummary,
     pub pc_match: u64,
     /// Paired samples where `pc_match && common_suffix >=
     /// STITCH_MIN_SUFFIX`. The "deliverable" count: how many
@@ -901,11 +944,8 @@ pub struct WireWakeup {
 #[derive(Clone, Debug, Facet)]
 pub struct WireProbeResult {
     pub tid: u32,
-    /// Kdebug timestamp of the matching kperf sample (mach ticks),
-    /// converted to ns by the recorder before shipping.
-    pub kperf_ts_ns: u64,
-    /// Wall-clock-ns timestamp of when the probe completed.
-    pub probe_done_ns: u64,
+    pub timing: ProbeTiming,
+    pub queue: ProbeQueueStats,
     /// User PC at suspend (PAC-stripped).
     pub mach_pc: u64,
     /// Link register at suspend (PAC-stripped).
@@ -921,6 +961,32 @@ pub struct WireProbeResult {
     /// fallback. Lets the server label "DWARF-accurate" vs
     /// "best-effort" frames in the UI.
     pub used_framehop: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Facet)]
+pub struct ProbeTiming {
+    /// Kdebug timestamp of the matching kperf sample (mach ticks).
+    pub kperf_ts: u64,
+    /// mach_absolute_time when the parser enqueued this probe.
+    pub enqueued: u64,
+    /// mach_absolute_time when a probe worker started this request.
+    pub worker_started: u64,
+    /// mach_absolute_time after thread-port lookup/cache refresh.
+    pub thread_lookup_done: u64,
+    /// mach_absolute_time after thread_get_state completed.
+    pub state_done: u64,
+    /// mach_absolute_time after thread_resume returned.
+    pub resume_done: u64,
+    /// mach_absolute_time after the remote FP walk completed.
+    pub walk_done: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Facet)]
+pub struct ProbeQueueStats {
+    /// Stale same-tid pending requests collapsed into this request.
+    pub coalesced_requests: u64,
+    /// Number of tids popped by the worker in this batch.
+    pub worker_batch_len: u32,
 }
 
 /// One ingest event the recorder ships to the server. Mirrors the
@@ -949,7 +1015,7 @@ pub enum IngestEvent {
     },
     Wakeup(WireWakeup),
     /// Race-against-return probe result for one kperf sample.
-    /// Correlate against a `Sample` by `(tid, kperf_ts_ns)`.
+    /// Correlate against a `Sample` by `(tid, timing.kperf_ts)`.
     ProbeResult(WireProbeResult),
 }
 
@@ -1012,6 +1078,66 @@ pub enum TerminalOutput {
     },
 }
 
+/// Errors the recorder ingest plane can surface to a client. Variant
+/// names map to the place in the server where the error originated,
+/// so a UI can render distinct messages for each case.
+#[derive(Clone, Debug, Facet)]
+#[repr(u8)]
+pub enum RunIngestError {
+    /// Another run is currently active. Callers should
+    /// `RunControl::wait_active` or `stop_active` before retrying.
+    AlreadyActive,
+    /// The given `RunId` doesn't match any known run.
+    UnknownRun { run_id: RunId },
+    /// Catch-all for errors that haven't been promoted to a typed
+    /// variant yet.
+    Internal { message: String },
+}
+
+impl From<String> for RunIngestError {
+    fn from(message: String) -> Self {
+        Self::Internal { message }
+    }
+}
+
+/// Errors the server-side run-control plane can surface to a client.
+#[derive(Clone, Debug, Facet)]
+#[repr(u8)]
+pub enum RunControlError {
+    /// No run is currently active.
+    NoActiveRun,
+    /// A run is already active; only one run at a time is supported.
+    AlreadyActive,
+    /// Spawning the recording shade failed.
+    SpawnFailed { detail: String },
+    /// Catch-all for errors not yet promoted to a typed variant.
+    Internal { message: String },
+}
+
+impl From<String> for RunControlError {
+    fn from(message: String) -> Self {
+        Self::Internal { message }
+    }
+}
+
+/// Errors the terminal broker can surface to a client.
+#[derive(Clone, Debug, Facet)]
+#[repr(u8)]
+pub enum TerminalBrokerError {
+    /// The given `RunId` doesn't match any known run.
+    UnknownRun { run_id: RunId },
+    /// The terminal channels were already attached for this run.
+    AlreadyAttached { run_id: RunId },
+    /// Catch-all for errors not yet promoted to a typed variant.
+    Internal { message: String },
+}
+
+impl From<String> for TerminalBrokerError {
+    fn from(message: String) -> Self {
+        Self::Internal { message }
+    }
+}
+
 /// Recorder → server ingest plane. Open one channel per run; close
 /// the channel to signal end-of-recording.
 #[vox::service]
@@ -1025,13 +1151,17 @@ pub trait RunIngest {
         &self,
         config: RunConfig,
         events: vox::Rx<IngestEvent>,
-    ) -> Result<RunId, String>;
+    ) -> Result<RunId, RunIngestError>;
 
     /// Attach an ingest channel to a run that was already created by
     /// `RunControl::start_attach` / `start_launch`. This is the
     /// server-orchestrated path: the server owns lifecycle and shade
     /// owns recording + ingest.
-    async fn attach_run(&self, run_id: RunId, events: vox::Rx<IngestEvent>) -> Result<(), String>;
+    async fn attach_run(
+        &self,
+        run_id: RunId,
+        events: vox::Rx<IngestEvent>,
+    ) -> Result<(), RunIngestError>;
 
     /// Reliable, request/response target attachment notification.
     /// Channel sends are not a durability boundary; this method
@@ -1041,7 +1171,7 @@ pub trait RunIngest {
         run_id: RunId,
         pid: u32,
         task_port: u64,
-    ) -> Result<(), String>;
+    ) -> Result<(), RunIngestError>;
 
     /// Reliable, request/response image-load ingest. Binaries define
     /// the address space used by all later symbolication, so they
@@ -1050,7 +1180,7 @@ pub trait RunIngest {
         &self,
         run_id: RunId,
         binaries: Vec<WireBinaryLoaded>,
-    ) -> Result<(), String>;
+    ) -> Result<(), RunIngestError>;
 
     /// Reliable, request/response image-unload ingest. The current
     /// server retains mappings for historical samples, but keep the
@@ -1060,7 +1190,7 @@ pub trait RunIngest {
         &self,
         run_id: RunId,
         binaries: Vec<WireBinaryUnloaded>,
-    ) -> Result<(), String>;
+    ) -> Result<(), RunIngestError>;
 }
 
 /// Shade-facing terminal broker. The CLI/native UI provides its
@@ -1074,7 +1204,7 @@ pub trait TerminalBroker {
         run_id: RunId,
         input_to_shade: vox::Tx<TerminalInput>,
         output_from_shade: vox::Rx<TerminalOutput>,
-    ) -> Result<(), String>;
+    ) -> Result<(), TerminalBrokerError>;
 }
 
 /// Agent-facing control plane. One service instance per server; runs
@@ -1100,7 +1230,7 @@ pub trait RunControl {
         config: RunConfig,
         daemon_socket: String,
         time_limit_secs: Option<u64>,
-    ) -> Result<RunId, String>;
+    ) -> Result<RunId, RunControlError>;
 
     /// Start a recording by launching a new process under stax-shade.
     /// `terminal_input` and `terminal_output` are the frontend side
@@ -1111,7 +1241,7 @@ pub trait RunControl {
         request: LaunchRequest,
         terminal_input: vox::Rx<TerminalInput>,
         terminal_output: vox::Tx<TerminalOutput>,
-    ) -> Result<RunId, String>;
+    ) -> Result<RunId, RunControlError>;
 
     /// Block until `condition` fires, the active run stops, or
     /// `timeout_ms` elapses (whichever comes first). Returns
@@ -1121,7 +1251,7 @@ pub trait RunControl {
     /// Ask the recorder to stop the active run cleanly. Returns the
     /// final `RunSummary` once the run has transitioned to `Stopped`.
     /// Errors if no run is active.
-    async fn stop_active(&self) -> Result<RunSummary, String>;
+    async fn stop_active(&self) -> Result<RunSummary, RunControlError>;
 }
 
 /// All service descriptors exposed by stax-live; the codegen iterates over

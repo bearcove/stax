@@ -54,3 +54,10 @@ targets:
         com.apple.security.app-sandbox: true
         com.apple.security.network.client: true
         com.apple.security.files.user-selected.read-only: true
+        # The Mac client and stax-server share a unix socket at
+        # ~/Library/Group Containers/B2N6FSRTPV.eu.bearcove.stax/stax-server.sock.
+        # This is the sandbox-friendly alternative to /tmp/...sock —
+        # both sides agree on the path; the sandbox grants this app
+        # access to the group container.
+        com.apple.security.application-groups:
+          - B2N6FSRTPV.eu.bearcove.stax

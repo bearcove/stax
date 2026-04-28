@@ -84,6 +84,17 @@ fn stax_server_socket() -> Option<PathBuf> {
         let p = PathBuf::from(p);
         return p.exists().then_some(p);
     }
+    #[cfg(target_os = "macos")]
+    if let Some(home) = env::var_os("HOME") {
+        let p = PathBuf::from(home)
+            .join("Library")
+            .join("Group Containers")
+            .join("B2N6FSRTPV.eu.bearcove.stax")
+            .join("stax-server.sock");
+        if p.exists() {
+            return Some(p);
+        }
+    }
     if let Ok(rt) = env::var("XDG_RUNTIME_DIR") {
         let p = PathBuf::from(rt).join("stax-server.sock");
         if p.exists() {
@@ -457,7 +468,7 @@ async fn run_stop() -> Result<(), Box<dyn Error>> {
             println!("stopped:");
             print_run_one_line(&summary);
         }
-        Err(vox::VoxError::User(msg)) => return Err(format!("{msg}").into()),
+        Err(vox::VoxError::User(err)) => return Err(format!("{err:?}").into()),
         Err(e) => return Err(format!("{e:?}").into()),
     }
     Ok(())
@@ -705,6 +716,50 @@ fn print_probe_diff(update: &ProbeDiffUpdate, recent_limit: u32) {
         prev = b.upper_ns;
     }
 
+    let t = &update.timing;
+    if t.samples > 0 {
+        println!("\nprobe timing breakdown (avg / max):");
+        println!(
+            "  kperf→enqueue      {:>9} / {:>9}",
+            fmt_ns(t.avg_kperf_to_enqueue_ns),
+            fmt_ns(t.max_kperf_to_enqueue_ns)
+        );
+        println!(
+            "  queue wait         {:>9} / {:>9}",
+            fmt_ns(t.avg_queue_wait_ns),
+            fmt_ns(t.max_queue_wait_ns)
+        );
+        println!(
+            "  thread lookup      {:>9} / {:>9}",
+            fmt_ns(t.avg_lookup_ns),
+            fmt_ns(t.max_lookup_ns)
+        );
+        println!(
+            "  suspend+state      {:>9} / {:>9}",
+            fmt_ns(t.avg_suspend_state_ns),
+            fmt_ns(t.max_suspend_state_ns)
+        );
+        println!(
+            "  resume             {:>9} / {:>9}",
+            fmt_ns(t.avg_resume_ns),
+            fmt_ns(t.max_resume_ns)
+        );
+        println!(
+            "  fp walk            {:>9} / {:>9}",
+            fmt_ns(t.avg_walk_ns),
+            fmt_ns(t.max_walk_ns)
+        );
+        println!(
+            "  worker total       {:>9} / {:>9}",
+            fmt_ns(t.avg_probe_total_ns),
+            fmt_ns(t.max_probe_total_ns)
+        );
+        println!(
+            "  coalesced stale requests: {} · max worker batch: {}",
+            t.coalesced_requests, t.max_worker_batch_len
+        );
+    }
+
     if !update.threads.is_empty() {
         println!("\ntop threads by paired count:");
         println!(
@@ -754,6 +809,18 @@ fn print_probe_diff(update: &ProbeDiffUpdate, recent_limit: u32) {
             entry.pc_match,
             entry.stitchable,
             entry.used_framehop,
+        );
+        println!(
+            "    timing: kperf→enqueue={} queue={} lookup={} suspend+state={} resume={} walk={} total={} coalesced={} batch={}",
+            fmt_ns(entry.timing.kperf_to_enqueue_ns),
+            fmt_ns(entry.timing.queue_wait_ns),
+            fmt_ns(entry.timing.lookup_ns),
+            fmt_ns(entry.timing.suspend_state_ns),
+            fmt_ns(entry.timing.resume_ns),
+            fmt_ns(entry.timing.walk_ns),
+            fmt_ns(entry.timing.probe_total_ns),
+            entry.queue.coalesced_requests,
+            entry.queue.worker_batch_len,
         );
         println!("    kperf_stack:");
         for f in &entry.kperf_stack {
