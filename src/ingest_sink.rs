@@ -74,29 +74,9 @@ impl IngestSink {
         }
     }
 
-    fn reliable_call(&self, msg: ReliableIngestMsg) {
-        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
-        if self
-            .reliable_tx
-            .send(ReliableIngest {
-                msg,
-                reply: reply_tx,
-            })
-            .is_err()
-        {
+    fn enqueue_reliable(&self, msg: ReliableIngestMsg) {
+        if self.reliable_tx.send(ReliableIngest { msg }).is_err() {
             self.stop_requested.store(true, Ordering::Relaxed);
-            return;
-        }
-        match reply_rx.recv() {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => {
-                tracing::warn!(error = %err, "reliable ingest call failed");
-                self.stop_requested.store(true, Ordering::Relaxed);
-            }
-            Err(err) => {
-                tracing::warn!(error = %err, "reliable ingest reply channel closed");
-                self.stop_requested.store(true, Ordering::Relaxed);
-            }
         }
     }
 }
@@ -123,7 +103,7 @@ impl LiveSink for IngestSink {
     }
 
     async fn on_target_attached(&self, ev: &TargetAttached) {
-        self.reliable_call(ReliableIngestMsg::TargetAttached {
+        self.enqueue_reliable(ReliableIngestMsg::TargetAttached {
             pid: ev.pid,
             task_port: ev.task_port,
         });
@@ -139,7 +119,7 @@ impl LiveSink for IngestSink {
                 name: s.name.to_vec(),
             })
             .collect();
-        self.reliable_call(ReliableIngestMsg::BinaryLoaded(WireBinaryLoaded {
+        self.enqueue_reliable(ReliableIngestMsg::BinaryLoaded(WireBinaryLoaded {
             path: ev.path.to_owned(),
             base_avma: ev.base_avma,
             vmsize: ev.vmsize,
@@ -152,7 +132,7 @@ impl LiveSink for IngestSink {
     }
 
     async fn on_binary_unloaded(&self, ev: &BinaryUnloadedEvent) {
-        self.reliable_call(ReliableIngestMsg::BinaryUnloaded(WireBinaryUnloaded {
+        self.enqueue_reliable(ReliableIngestMsg::BinaryUnloaded(WireBinaryUnloaded {
             path: ev.path.to_owned(),
             base_avma: ev.base_avma,
         }));
@@ -426,7 +406,6 @@ fn spawn_forwarders(
                 );
                 reliable_stop.store(true, Ordering::Relaxed);
             }
-            let _ = request.reply.send(result);
         }
         tracing::info!(run_id = run_id.0, "ingest_sink: reliable forwarder exiting");
     });
@@ -542,7 +521,6 @@ fn ingest_event_kind(event: &IngestEvent) -> &'static str {
 
 struct ReliableIngest {
     msg: ReliableIngestMsg,
-    reply: std::sync::mpsc::SyncSender<Result<(), String>>,
 }
 
 enum ReliableIngestMsg {
