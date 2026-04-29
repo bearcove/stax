@@ -20,15 +20,16 @@ use stax_live::{
     Aggregator, BinaryRegistry, IntervalKind, LiveServer, LiveSymbolOwned, LoadedBinary, PmuSample,
 };
 use stax_live_proto::{
-    IngestEvent, LaunchEnvVar, LaunchRequest, ProfilerDispatcher, RunConfig, RunControl,
-    RunControlDispatcher, RunControlError, RunId, RunIngest, RunIngestDispatcher, RunIngestError,
-    RunState, RunSummary, ServerStatus, StopReason, TerminalBroker, TerminalBrokerDispatcher,
-    TerminalBrokerError, TerminalInput, TerminalOutput, WaitCondition, WaitOutcome,
-    WireBinaryLoaded, WireBinaryUnloaded,
+    DiagnosticsSnapshot, IngestEvent, LaunchEnvVar, LaunchRequest, ProfilerDispatcher, RunConfig,
+    RunControl, RunControlDispatcher, RunControlError, RunId, RunIngest, RunIngestDispatcher,
+    RunIngestError, RunState, RunSummary, ServerStatus, StopReason, TerminalBroker,
+    TerminalBrokerDispatcher, TerminalBrokerError, TerminalInput, TerminalOutput, WaitCondition,
+    WaitOutcome, WireBinaryLoaded, WireBinaryUnloaded,
 };
 use stax_shade_proto::{
     ShadeAck, ShadeCommand, ShadeError, ShadeInfo, ShadeRegistry, ShadeRegistryDispatcher,
 };
+use stax_telemetry::{CounterHandle, GaugeHandle, HistogramHandle, PhaseHandle, TelemetryRegistry};
 use vox::VoxListener;
 
 const DEFAULT_SOCK_NAME: &str = "stax-server.sock";
@@ -162,13 +163,11 @@ fn build_factory(
 fn spawn_session_local(server: ServerState, link: vox::transport::local::LocalLink) {
     let shade_slot: ShadeSlot = Arc::new(parking_lot::Mutex::new(None));
     let factory = build_factory(server.clone(), shade_slot.clone());
+    let observer = server.telemetry.vox_observer("local");
     tokio::spawn(async move {
         let result = vox::acceptor_on(link)
             .channel_capacity(STAX_SERVER_CHANNEL_CAPACITY)
-            .observer(stax_vox_observe::VoxObserverLogger::new(
-                "stax-server",
-                "local",
-            ))
+            .observer(observer)
             .non_resumable()
             .keepalive(vox::SessionKeepaliveConfig {
                 ping_interval: std::time::Duration::from_secs(5),
@@ -194,13 +193,11 @@ fn spawn_session_local(server: ServerState, link: vox::transport::local::LocalLi
 fn spawn_session_ws(server: ServerState, link: <vox::WsListener as vox::VoxListener>::Link) {
     let shade_slot: ShadeSlot = Arc::new(parking_lot::Mutex::new(None));
     let factory = build_factory(server.clone(), shade_slot.clone());
+    let observer = server.telemetry.vox_observer("ws");
     tokio::spawn(async move {
         let result = vox::acceptor_on(link)
             .channel_capacity(STAX_SERVER_CHANNEL_CAPACITY)
-            .observer(stax_vox_observe::VoxObserverLogger::new(
-                "stax-server",
-                "ws",
-            ))
+            .observer(observer)
             .on_connection(factory)
             .establish::<vox::NoopClient>()
             .await;
@@ -280,12 +277,100 @@ struct ServerState {
     revision: Arc<AtomicU64>,
     source: Arc<Mutex<SourceResolver>>,
     paused: Arc<AtomicBool>,
+    telemetry: ServerTelemetry,
     started_at_unix_ns: u64,
     next_run_id: Arc<AtomicU64>,
     terminal: Arc<Mutex<TerminalState>>,
     /// Local-socket path the server is listening on. Used to tell
     /// auto-spawned stax-shade processes how to dial back in.
     socket_path: Arc<PathBuf>,
+}
+
+#[derive(Clone)]
+struct ServerTelemetry {
+    registry: TelemetryRegistry,
+    run_phase: PhaseHandle,
+    ingest_phase: PhaseHandle,
+    reliable_phase: PhaseHandle,
+    runs_started: CounterHandle,
+    runs_stopped: CounterHandle,
+    ingest_recv_errors: CounterHandle,
+    ingest_channel_closed: CounterHandle,
+    ingest_samples: CounterHandle,
+    ingest_probe_results: CounterHandle,
+    ingest_on_cpu: CounterHandle,
+    ingest_off_cpu: CounterHandle,
+    ingest_binaries_loaded: CounterHandle,
+    ingest_binaries_unloaded: CounterHandle,
+    ingest_target_attached: CounterHandle,
+    ingest_thread_names: CounterHandle,
+    ingest_wakeups: CounterHandle,
+    reliable_target_attached: CounterHandle,
+    reliable_binaries_loaded: CounterHandle,
+    reliable_binaries_unloaded: CounterHandle,
+    active_run_id: GaugeHandle,
+    active_pet_samples: GaugeHandle,
+    active_off_cpu_intervals: GaugeHandle,
+    ingest_drainer_active: GaugeHandle,
+    reliable_call_latency: HistogramHandle,
+}
+
+impl ServerTelemetry {
+    fn new() -> Self {
+        let registry = TelemetryRegistry::new("stax-server");
+        Self {
+            run_phase: registry.phase("run.lifecycle"),
+            ingest_phase: registry.phase("ingest.drainer"),
+            reliable_phase: registry.phase("ingest.reliable"),
+            runs_started: registry.counter("runs.started"),
+            runs_stopped: registry.counter("runs.stopped"),
+            ingest_recv_errors: registry.counter("ingest.recv_errors"),
+            ingest_channel_closed: registry.counter("ingest.channel_closed"),
+            ingest_samples: registry.counter("ingest.events.sample"),
+            ingest_probe_results: registry.counter("ingest.events.probe_result"),
+            ingest_on_cpu: registry.counter("ingest.events.on_cpu"),
+            ingest_off_cpu: registry.counter("ingest.events.off_cpu"),
+            ingest_binaries_loaded: registry.counter("ingest.events.binary_loaded"),
+            ingest_binaries_unloaded: registry.counter("ingest.events.binary_unloaded"),
+            ingest_target_attached: registry.counter("ingest.events.target_attached"),
+            ingest_thread_names: registry.counter("ingest.events.thread_name"),
+            ingest_wakeups: registry.counter("ingest.events.wakeup"),
+            reliable_target_attached: registry.counter("ingest.reliable.target_attached"),
+            reliable_binaries_loaded: registry.counter("ingest.reliable.binary_loaded"),
+            reliable_binaries_unloaded: registry.counter("ingest.reliable.binary_unloaded"),
+            active_run_id: registry.gauge("active.run_id"),
+            active_pet_samples: registry.gauge("active.pet_samples"),
+            active_off_cpu_intervals: registry.gauge("active.off_cpu_intervals"),
+            ingest_drainer_active: registry.gauge("ingest.drainer.active"),
+            reliable_call_latency: registry.histogram("ingest.reliable.latency_ns"),
+            registry,
+        }
+    }
+
+    fn record_ingest_event(&self, event: &IngestEvent) {
+        match event {
+            IngestEvent::Sample(_) => self.ingest_samples.inc(1),
+            IngestEvent::ProbeResult(_) => self.ingest_probe_results.inc(1),
+            IngestEvent::OnCpuInterval(_) => self.ingest_on_cpu.inc(1),
+            IngestEvent::OffCpuInterval(_) => self.ingest_off_cpu.inc(1),
+            IngestEvent::BinaryLoaded(_) => self.ingest_binaries_loaded.inc(1),
+            IngestEvent::BinaryUnloaded(_) => self.ingest_binaries_unloaded.inc(1),
+            IngestEvent::TargetAttached { .. } => self.ingest_target_attached.inc(1),
+            IngestEvent::ThreadName { .. } => self.ingest_thread_names.inc(1),
+            IngestEvent::Wakeup(_) => self.ingest_wakeups.inc(1),
+        }
+    }
+
+    fn set_active_counts(&self, pet_samples: u64, off_cpu_intervals: u64) {
+        self.active_pet_samples.set(saturating_i64(pet_samples));
+        self.active_off_cpu_intervals
+            .set(saturating_i64(off_cpu_intervals));
+    }
+
+    fn vox_observer(&self, surface: &'static str) -> stax_vox_observe::VoxObserverLogger {
+        stax_vox_observe::VoxObserverLogger::new("stax-server", surface)
+            .with_telemetry(self.registry.clone())
+    }
 }
 
 struct Inner {
@@ -350,6 +435,7 @@ impl ServerState {
             revision: Arc::new(AtomicU64::new(1)),
             source: Arc::new(Mutex::new(SourceResolver::new())),
             paused: Arc::new(AtomicBool::new(false)),
+            telemetry: ServerTelemetry::new(),
             started_at_unix_ns: now_unix_ns(),
             next_run_id: Arc::new(AtomicU64::new(1)),
             terminal: Arc::new(Mutex::new(TerminalState::default())),
@@ -751,6 +837,26 @@ impl ServerState {
             id.0,
             config.frequency_hz
         );
+        self.telemetry.runs_started.inc(1);
+        self.telemetry.active_run_id.set(saturating_i64(id.0));
+        self.telemetry.set_active_counts(0, 0);
+        self.telemetry.run_phase.enter(
+            "recording",
+            format!("run_id={} frequency_hz={}", id.0, config.frequency_hz),
+        );
+        self.telemetry.registry.event(
+            "run.started",
+            format!(
+                "run_id={} label={}",
+                id.0,
+                self.inner
+                    .lock()
+                    .active
+                    .as_ref()
+                    .map(|run| run.label.as_str())
+                    .unwrap_or("")
+            ),
+        );
         Ok((id, cancel))
     }
 
@@ -778,22 +884,89 @@ impl ServerState {
         mut events: vox::Rx<IngestEvent>,
     ) {
         let state = self.clone();
+        let telemetry = self.telemetry.clone();
         tokio::spawn(async move {
+            let mut counts = IngestDrainCounts::default();
+            let mut first_event_logged = false;
+            let mut last_log = std::time::Instant::now();
+            let exit_reason: &'static str;
+            telemetry.ingest_drainer_active.set(1);
+            telemetry
+                .ingest_phase
+                .enter("waiting", format!("run_id={}", id.0));
+            telemetry
+                .registry
+                .event("ingest.drainer.started", format!("run_id={}", id.0));
+            tracing::info!(run_id = id.0, "stax-server: ingest drainer started");
             loop {
                 tokio::select! {
                     biased;
-                    _ = cancel.notified() => break,
+                    _ = cancel.notified() => {
+                        exit_reason = "cancel";
+                        telemetry.ingest_phase.enter("cancelled", format!("run_id={}", id.0));
+                        break;
+                    }
                     recv = events.recv() => match recv {
                         Ok(Some(event_sref)) => {
                             let state = state.clone();
                             let _ = event_sref.map(|event| {
+                                let kind = ingest_event_kind(&event);
+                                counts.record(&event);
+                                telemetry.record_ingest_event(&event);
+                                if !first_event_logged {
+                                    first_event_logged = true;
+                                    telemetry.ingest_phase.enter("draining", format!("run_id={} first_kind={kind}", id.0));
+                                    telemetry.registry.event("ingest.first_event", format!("run_id={} kind={kind}", id.0));
+                                    tracing::info!(
+                                        run_id = id.0,
+                                        kind,
+                                        counts = %counts.summary(),
+                                        "stax-server: ingest drainer received first event"
+                                    );
+                                }
                                 state.apply_event(id, event);
                             });
+                            if last_log.elapsed() >= Duration::from_secs(2) {
+                                tracing::info!(
+                                    run_id = id.0,
+                                    counts = %counts.summary(),
+                                    "stax-server: ingest drainer progress"
+                                );
+                                last_log = std::time::Instant::now();
+                            }
                         }
-                        _ => break,
+                        Ok(None) => {
+                            exit_reason = "channel_closed";
+                            telemetry.ingest_channel_closed.inc(1);
+                            telemetry.ingest_phase.enter("channel_closed", format!("run_id={}", id.0));
+                            break;
+                        }
+                        Err(err) => {
+                            telemetry.ingest_recv_errors.inc(1);
+                            telemetry.ingest_phase.enter("recv_error", format!("run_id={} error={err:?}", id.0));
+                            tracing::warn!(
+                                run_id = id.0,
+                                error = ?err,
+                                counts = %counts.summary(),
+                                "stax-server: ingest drainer recv failed"
+                            );
+                            exit_reason = "recv_error";
+                            break;
+                        }
                     },
                 }
             }
+            tracing::info!(
+                run_id = id.0,
+                reason = exit_reason,
+                counts = %counts.summary(),
+                "stax-server: ingest drainer exiting"
+            );
+            telemetry.ingest_drainer_active.set(0);
+            telemetry.registry.event(
+                "ingest.drainer.exiting",
+                format!("run_id={} reason={exit_reason}", id.0),
+            );
             drop(events);
             state.finalize_run(id, StopReason::TargetExited);
         });
@@ -902,6 +1075,72 @@ impl ServerState {
         inner.ingest_attached = false;
         inner.shade_child = None;
         inner.history.push(summary);
+        self.telemetry.active_run_id.set(0);
+        self.telemetry.runs_stopped.inc(1);
+        self.telemetry
+            .run_phase
+            .enter("start_failed", format!("run_id={}", run_id.0));
+        self.telemetry
+            .registry
+            .event("run.start_failed", format!("run_id={}", run_id.0));
+    }
+}
+
+#[derive(Default)]
+struct IngestDrainCounts {
+    samples: u64,
+    probe_results: u64,
+    on_cpu: u64,
+    off_cpu: u64,
+    binaries_loaded: u64,
+    binaries_unloaded: u64,
+    target_attached: u64,
+    thread_names: u64,
+    wakeups: u64,
+}
+
+impl IngestDrainCounts {
+    fn record(&mut self, event: &IngestEvent) {
+        match event {
+            IngestEvent::Sample(_) => self.samples += 1,
+            IngestEvent::ProbeResult(_) => self.probe_results += 1,
+            IngestEvent::OnCpuInterval(_) => self.on_cpu += 1,
+            IngestEvent::OffCpuInterval(_) => self.off_cpu += 1,
+            IngestEvent::BinaryLoaded(_) => self.binaries_loaded += 1,
+            IngestEvent::BinaryUnloaded(_) => self.binaries_unloaded += 1,
+            IngestEvent::TargetAttached { .. } => self.target_attached += 1,
+            IngestEvent::ThreadName { .. } => self.thread_names += 1,
+            IngestEvent::Wakeup(_) => self.wakeups += 1,
+        }
+    }
+
+    fn summary(&self) -> String {
+        format!(
+            "samples={} probes={} on_cpu={} off_cpu={} bin_load={} bin_unload={} target={} threads={} wakeups={}",
+            self.samples,
+            self.probe_results,
+            self.on_cpu,
+            self.off_cpu,
+            self.binaries_loaded,
+            self.binaries_unloaded,
+            self.target_attached,
+            self.thread_names,
+            self.wakeups,
+        )
+    }
+}
+
+fn ingest_event_kind(event: &IngestEvent) -> &'static str {
+    match event {
+        IngestEvent::Sample(_) => "sample",
+        IngestEvent::ProbeResult(_) => "probe_result",
+        IngestEvent::OnCpuInterval(_) => "on_cpu",
+        IngestEvent::OffCpuInterval(_) => "off_cpu",
+        IngestEvent::BinaryLoaded(_) => "binary_loaded",
+        IngestEvent::BinaryUnloaded(_) => "binary_unloaded",
+        IngestEvent::TargetAttached { .. } => "target_attached",
+        IngestEvent::ThreadName { .. } => "thread_name",
+        IngestEvent::Wakeup(_) => "wakeup",
     }
 }
 
@@ -1017,6 +1256,10 @@ fn now_unix_ns() -> u64 {
         .unwrap_or(0)
 }
 
+fn saturating_i64(value: u64) -> i64 {
+    value.min(i64::MAX as u64) as i64
+}
+
 impl RunControl for ServerState {
     async fn status(&self) -> ServerStatus {
         let inner = self.inner.lock();
@@ -1033,6 +1276,15 @@ impl RunControl for ServerState {
             out.push(active);
         }
         out
+    }
+
+    async fn diagnostics(&self) -> DiagnosticsSnapshot {
+        let inner = self.inner.lock();
+        DiagnosticsSnapshot {
+            server_started_at_unix_ns: self.started_at_unix_ns,
+            active: inner.active.clone().into_iter().collect(),
+            telemetry: self.telemetry.registry.snapshot(),
+        }
     }
 
     async fn start_attach(
@@ -1175,6 +1427,12 @@ impl RunControl for ServerState {
         if let Some(cancel) = cancel {
             cancel.notify_waiters();
         }
+        self.telemetry
+            .run_phase
+            .enter("stopping", format!("run_id={}", snapshot.id.0));
+        self.telemetry
+            .registry
+            .event("run.stop_requested", format!("run_id={}", snapshot.id.0));
         // Reap the auto-spawned shade (if any). Has to happen
         // outside the inner lock — reap_shade_child takes it
         // again and may sleep up to 1s waiting for the child to
@@ -1249,8 +1507,19 @@ impl RunIngest for ServerState {
         pid: u32,
         task_port: u64,
     ) -> Result<(), RunIngestError> {
-        self.apply_target_attached(run_id, pid, task_port)
-            .map_err(Into::into)
+        let started = std::time::Instant::now();
+        self.telemetry
+            .reliable_phase
+            .enter("target_attached", format!("run_id={}", run_id.0));
+        self.telemetry.reliable_target_attached.inc(1);
+        let result: Result<(), RunIngestError> = self
+            .apply_target_attached(run_id, pid, task_port)
+            .map_err(Into::into);
+        self.telemetry
+            .reliable_call_latency
+            .record_duration(started.elapsed());
+        self.telemetry.reliable_phase.enter("idle", "");
+        result
     }
 
     async fn publish_binaries_loaded(
@@ -1258,10 +1527,24 @@ impl RunIngest for ServerState {
         run_id: RunId,
         binaries: Vec<WireBinaryLoaded>,
     ) -> Result<(), RunIngestError> {
-        for binary in binaries {
-            self.apply_binary_loaded(run_id, binary)?;
-        }
-        Ok(())
+        let started = std::time::Instant::now();
+        let count = binaries.len() as u64;
+        self.telemetry.reliable_phase.enter(
+            "binaries_loaded",
+            format!("run_id={} count={count}", run_id.0),
+        );
+        self.telemetry.reliable_binaries_loaded.inc(count);
+        let result: Result<(), RunIngestError> = (|| {
+            for binary in binaries {
+                self.apply_binary_loaded(run_id, binary)?;
+            }
+            Ok(())
+        })();
+        self.telemetry
+            .reliable_call_latency
+            .record_duration(started.elapsed());
+        self.telemetry.reliable_phase.enter("idle", "");
+        result
     }
 
     async fn publish_binaries_unloaded(
@@ -1269,10 +1552,24 @@ impl RunIngest for ServerState {
         run_id: RunId,
         binaries: Vec<WireBinaryUnloaded>,
     ) -> Result<(), RunIngestError> {
-        for binary in binaries {
-            self.apply_binary_unloaded(run_id, binary.base_avma)?;
-        }
-        Ok(())
+        let started = std::time::Instant::now();
+        let count = binaries.len() as u64;
+        self.telemetry.reliable_phase.enter(
+            "binaries_unloaded",
+            format!("run_id={} count={count}", run_id.0),
+        );
+        self.telemetry.reliable_binaries_unloaded.inc(count);
+        let result: Result<(), RunIngestError> = (|| {
+            for binary in binaries {
+                self.apply_binary_unloaded(run_id, binary.base_avma)?;
+            }
+            Ok(())
+        })();
+        self.telemetry
+            .reliable_call_latency
+            .record_duration(started.elapsed());
+        self.telemetry.reliable_phase.enter("idle", "");
+        result
     }
 }
 
@@ -1387,6 +1684,8 @@ impl ServerState {
                 }
                 _ => {}
             }
+            self.telemetry
+                .set_active_counts(active.pet_samples, active.off_cpu_intervals);
         }
         match event {
             IngestEvent::Sample(s) => {
@@ -1505,6 +1804,16 @@ impl ServerState {
             summary.pet_samples,
             summary.off_cpu_intervals
         );
+        self.telemetry.runs_stopped.inc(1);
+        self.telemetry.active_run_id.set(0);
+        self.telemetry
+            .set_active_counts(summary.pet_samples, summary.off_cpu_intervals);
+        self.telemetry
+            .run_phase
+            .enter("stopped", format!("run_id={}", summary.id.0));
+        self.telemetry
+            .registry
+            .event("run.stopped", format!("run_id={}", summary.id.0));
         inner.history.push(summary);
         drop(inner); // release before reaping
         self.reap_shade_child();

@@ -1,13 +1,54 @@
 use std::time::Duration;
 
+use stax_telemetry::{CounterHandle, GaugeHandle, HistogramHandle, TelemetryRegistry};
+
 const SLOW_CHANNEL_SEND: Duration = Duration::from_millis(10);
 const SLOW_REQUEST: Duration = Duration::from_millis(10);
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone)]
 pub struct VoxObserverLogger {
     component: &'static str,
     surface: &'static str,
     pid: Option<u32>,
+    telemetry: Option<VoxObserverTelemetry>,
+}
+
+#[derive(Clone)]
+struct VoxObserverTelemetry {
+    registry: TelemetryRegistry,
+    rpc_started: CounterHandle,
+    rpc_finished: CounterHandle,
+    rpc_failed: CounterHandle,
+    rpc_elapsed: HistogramHandle,
+    connections_opened: CounterHandle,
+    connections_closed: CounterHandle,
+    active_connections: GaugeHandle,
+    driver_requests_started: CounterHandle,
+    driver_requests_finished: CounterHandle,
+    driver_requests_failed: CounterHandle,
+    driver_request_elapsed: HistogramHandle,
+    outbound_queue_full: CounterHandle,
+    outbound_queue_closed: CounterHandle,
+    driver_frame_read_bytes: CounterHandle,
+    driver_frame_written_bytes: CounterHandle,
+    driver_errors: CounterHandle,
+    channel_opened: CounterHandle,
+    channel_closed: CounterHandle,
+    channel_reset: CounterHandle,
+    channel_send_started: CounterHandle,
+    channel_send_waiting_for_credit: CounterHandle,
+    channel_send_finished: CounterHandle,
+    channel_send_failed: CounterHandle,
+    channel_send_elapsed: HistogramHandle,
+    channel_try_send: CounterHandle,
+    channel_try_send_failed: CounterHandle,
+    channel_credit_grants: CounterHandle,
+    channel_credit_granted: CounterHandle,
+    channel_item_received: CounterHandle,
+    channel_item_consumed: CounterHandle,
+    transport_frame_read_bytes: CounterHandle,
+    transport_frame_written_bytes: CounterHandle,
+    transport_closed: CounterHandle,
 }
 
 impl VoxObserverLogger {
@@ -16,6 +57,7 @@ impl VoxObserverLogger {
             component,
             surface,
             pid: None,
+            telemetry: None,
         }
     }
 
@@ -23,10 +65,225 @@ impl VoxObserverLogger {
         self.pid = Some(pid);
         self
     }
+
+    pub fn with_telemetry(mut self, registry: TelemetryRegistry) -> Self {
+        self.telemetry = Some(VoxObserverTelemetry::new(registry));
+        self
+    }
+}
+
+impl VoxObserverTelemetry {
+    fn new(registry: TelemetryRegistry) -> Self {
+        Self {
+            rpc_started: registry.counter("vox.rpc.started"),
+            rpc_finished: registry.counter("vox.rpc.finished"),
+            rpc_failed: registry.counter("vox.rpc.failed"),
+            rpc_elapsed: registry.histogram("vox.rpc.elapsed_ns"),
+            connections_opened: registry.counter("vox.connection.opened"),
+            connections_closed: registry.counter("vox.connection.closed"),
+            active_connections: registry.gauge("vox.connection.active"),
+            driver_requests_started: registry.counter("vox.driver.request.started"),
+            driver_requests_finished: registry.counter("vox.driver.request.finished"),
+            driver_requests_failed: registry.counter("vox.driver.request.failed"),
+            driver_request_elapsed: registry.histogram("vox.driver.request.elapsed_ns"),
+            outbound_queue_full: registry.counter("vox.driver.outbound_queue.full"),
+            outbound_queue_closed: registry.counter("vox.driver.outbound_queue.closed"),
+            driver_frame_read_bytes: registry.counter("vox.driver.frame_read.bytes"),
+            driver_frame_written_bytes: registry.counter("vox.driver.frame_written.bytes"),
+            driver_errors: registry.counter("vox.driver.errors"),
+            channel_opened: registry.counter("vox.channel.opened"),
+            channel_closed: registry.counter("vox.channel.closed"),
+            channel_reset: registry.counter("vox.channel.reset"),
+            channel_send_started: registry.counter("vox.channel.send.started"),
+            channel_send_waiting_for_credit: registry
+                .counter("vox.channel.send.waiting_for_credit"),
+            channel_send_finished: registry.counter("vox.channel.send.finished"),
+            channel_send_failed: registry.counter("vox.channel.send.failed"),
+            channel_send_elapsed: registry.histogram("vox.channel.send.elapsed_ns"),
+            channel_try_send: registry.counter("vox.channel.try_send"),
+            channel_try_send_failed: registry.counter("vox.channel.try_send.failed"),
+            channel_credit_grants: registry.counter("vox.channel.credit_grants"),
+            channel_credit_granted: registry.counter("vox.channel.credit_granted"),
+            channel_item_received: registry.counter("vox.channel.item_received"),
+            channel_item_consumed: registry.counter("vox.channel.item_consumed"),
+            transport_frame_read_bytes: registry.counter("vox.transport.frame_read.bytes"),
+            transport_frame_written_bytes: registry.counter("vox.transport.frame_written.bytes"),
+            transport_closed: registry.counter("vox.transport.closed"),
+            registry,
+        }
+    }
+
+    fn rpc_event(&self, surface: &'static str, event: vox::RpcEvent) {
+        match event {
+            vox::RpcEvent::Started { .. } => self.rpc_started.inc(1),
+            vox::RpcEvent::Finished {
+                outcome, elapsed, ..
+            } => {
+                self.rpc_finished.inc(1);
+                self.rpc_elapsed.record_duration(elapsed);
+                if outcome != vox::RpcOutcome::Ok {
+                    self.rpc_failed.inc(1);
+                    self.registry.event(
+                        "vox.rpc.failed",
+                        format!("surface={surface} outcome={outcome:?}"),
+                    );
+                }
+            }
+        }
+    }
+
+    fn channel_event(&self, surface: &'static str, event: vox::ChannelEvent) {
+        match event {
+            vox::ChannelEvent::Opened { .. } => self.channel_opened.inc(1),
+            vox::ChannelEvent::SendStarted { .. } => self.channel_send_started.inc(1),
+            vox::ChannelEvent::SendWaitingForCredit { channel } => {
+                self.channel_send_waiting_for_credit.inc(1);
+                self.registry.event(
+                    "vox.channel.waiting_for_credit",
+                    channel_detail(surface, channel),
+                );
+            }
+            vox::ChannelEvent::SendFinished {
+                channel,
+                outcome,
+                elapsed,
+            } => {
+                self.channel_send_finished.inc(1);
+                self.channel_send_elapsed.record_duration(elapsed);
+                if outcome != vox::ChannelSendOutcome::Sent {
+                    self.channel_send_failed.inc(1);
+                    self.registry.event(
+                        "vox.channel.send_failed",
+                        format!("{} outcome={outcome:?}", channel_detail(surface, channel)),
+                    );
+                }
+            }
+            vox::ChannelEvent::TrySend { channel, outcome } => {
+                self.channel_try_send.inc(1);
+                if outcome != vox::ChannelTrySendOutcome::Sent {
+                    self.channel_try_send_failed.inc(1);
+                    self.registry.event(
+                        "vox.channel.try_send_failed",
+                        format!("{} outcome={outcome:?}", channel_detail(surface, channel)),
+                    );
+                }
+            }
+            vox::ChannelEvent::CreditGranted { amount, .. } => {
+                self.channel_credit_grants.inc(1);
+                self.channel_credit_granted.inc(u64::from(amount));
+            }
+            vox::ChannelEvent::ItemReceived { .. } => self.channel_item_received.inc(1),
+            vox::ChannelEvent::ItemConsumed { .. } => self.channel_item_consumed.inc(1),
+            vox::ChannelEvent::Closed { channel, reason } => {
+                self.channel_closed.inc(1);
+                self.registry.event(
+                    "vox.channel.closed",
+                    format!("{} reason={reason:?}", channel_detail(surface, channel)),
+                );
+            }
+            vox::ChannelEvent::Reset { channel, reason } => {
+                self.channel_reset.inc(1);
+                self.registry.event(
+                    "vox.channel.reset",
+                    format!("{} reason={reason:?}", channel_detail(surface, channel)),
+                );
+            }
+        }
+    }
+
+    fn driver_event(&self, surface: &'static str, event: vox::DriverEvent) {
+        match event {
+            vox::DriverEvent::ConnectionOpened { connection_id } => {
+                self.connections_opened.inc(1);
+                self.active_connections.inc(1);
+                self.registry.event(
+                    "vox.connection.opened",
+                    format!("surface={surface} connection_id={connection_id:?}"),
+                );
+            }
+            vox::DriverEvent::ConnectionClosed {
+                connection_id,
+                reason,
+            } => {
+                self.connections_closed.inc(1);
+                self.active_connections.dec(1);
+                self.registry.event(
+                    "vox.connection.closed",
+                    format!("surface={surface} connection_id={connection_id:?} reason={reason:?}"),
+                );
+            }
+            vox::DriverEvent::RequestStarted { .. } => self.driver_requests_started.inc(1),
+            vox::DriverEvent::RequestFinished {
+                outcome, elapsed, ..
+            } => {
+                self.driver_requests_finished.inc(1);
+                self.driver_request_elapsed.record_duration(elapsed);
+                if outcome != vox::RpcOutcome::Ok {
+                    self.driver_requests_failed.inc(1);
+                }
+            }
+            vox::DriverEvent::OutboundQueueFull { connection_id } => {
+                self.outbound_queue_full.inc(1);
+                self.registry.event(
+                    "vox.outbound_queue.full",
+                    format!("surface={surface} connection_id={connection_id:?}"),
+                );
+            }
+            vox::DriverEvent::OutboundQueueClosed { connection_id } => {
+                self.outbound_queue_closed.inc(1);
+                self.registry.event(
+                    "vox.outbound_queue.closed",
+                    format!("surface={surface} connection_id={connection_id:?}"),
+                );
+            }
+            vox::DriverEvent::FrameRead { bytes, .. } => {
+                self.driver_frame_read_bytes.inc(bytes as u64);
+            }
+            vox::DriverEvent::FrameWritten { bytes, .. } => {
+                self.driver_frame_written_bytes.inc(bytes as u64);
+            }
+            vox::DriverEvent::DecodeError { .. }
+            | vox::DriverEvent::EncodeError { .. }
+            | vox::DriverEvent::ProtocolError { .. } => {
+                self.driver_errors.inc(1);
+            }
+        }
+    }
+
+    fn transport_event(&self, surface: &'static str, event: vox::TransportEvent) {
+        match event {
+            vox::TransportEvent::FrameRead { bytes, .. } => {
+                self.transport_frame_read_bytes.inc(bytes as u64);
+            }
+            vox::TransportEvent::FrameWritten { bytes, .. } => {
+                self.transport_frame_written_bytes.inc(bytes as u64);
+            }
+            vox::TransportEvent::Closed {
+                connection_id,
+                reason,
+            } => {
+                self.transport_closed.inc(1);
+                self.registry.event(
+                    "vox.transport.closed",
+                    format!("surface={surface} connection_id={connection_id:?} reason={reason:?}"),
+                );
+            }
+        }
+    }
+}
+
+fn channel_detail(surface: &'static str, channel: vox::ChannelEventContext) -> String {
+    format!(
+        "surface={} connection_id={:?} channel_id={:?} debug={:?}",
+        surface, channel.connection_id, channel.channel_id, channel.debug
+    )
 }
 
 impl vox::VoxObserver for VoxObserverLogger {
     fn rpc_event(&self, event: vox::RpcEvent) {
+        if let Some(telemetry) = &self.telemetry {
+            telemetry.rpc_event(self.surface, event);
+        }
         match event {
             vox::RpcEvent::Started {
                 service,
@@ -82,9 +339,12 @@ impl vox::VoxObserver for VoxObserverLogger {
     }
 
     fn channel_event(&self, event: vox::ChannelEvent) {
+        if let Some(telemetry) = &self.telemetry {
+            telemetry.channel_event(self.surface, event);
+        }
         match event {
             vox::ChannelEvent::Opened {
-                channel_id,
+                channel,
                 direction,
                 initial_credit,
             } => {
@@ -92,23 +352,27 @@ impl vox::VoxObserver for VoxObserverLogger {
                     component = self.component,
                     surface = self.surface,
                     pid = ?self.pid,
-                    channel_id = ?channel_id,
+                    connection_id = ?channel.connection_id,
+                    channel_id = ?channel.channel_id,
+                    channel_debug = ?channel.debug,
                     direction = ?direction,
                     initial_credit,
                     "vox channel opened"
                 );
             }
-            vox::ChannelEvent::SendWaitingForCredit { channel_id } => {
+            vox::ChannelEvent::SendWaitingForCredit { channel } => {
                 tracing::info!(
                     component = self.component,
                     surface = self.surface,
                     pid = ?self.pid,
-                    channel_id = ?channel_id,
+                    connection_id = ?channel.connection_id,
+                    channel_id = ?channel.channel_id,
+                    channel_debug = ?channel.debug,
                     "vox channel waiting for credit"
                 );
             }
             vox::ChannelEvent::SendFinished {
-                channel_id,
+                channel,
                 outcome,
                 elapsed,
             } => {
@@ -117,7 +381,9 @@ impl vox::VoxObserver for VoxObserverLogger {
                         component = self.component,
                         surface = self.surface,
                         pid = ?self.pid,
-                        channel_id = ?channel_id,
+                        connection_id = ?channel.connection_id,
+                        channel_id = ?channel.channel_id,
+                        channel_debug = ?channel.debug,
                         outcome = ?outcome,
                         elapsed = ?elapsed,
                         "vox channel send finished"
@@ -127,82 +393,95 @@ impl vox::VoxObserver for VoxObserverLogger {
                         component = self.component,
                         surface = self.surface,
                         pid = ?self.pid,
-                        channel_id = ?channel_id,
+                        connection_id = ?channel.connection_id,
+                        channel_id = ?channel.channel_id,
+                        channel_debug = ?channel.debug,
                         outcome = ?outcome,
                         elapsed = ?elapsed,
                         "vox channel send finished"
                     );
                 }
             }
-            vox::ChannelEvent::TrySend {
-                channel_id,
-                outcome,
-            } => {
+            vox::ChannelEvent::TrySend { channel, outcome } => {
                 if outcome != vox::ChannelTrySendOutcome::Sent {
                     tracing::warn!(
                         component = self.component,
                         surface = self.surface,
                         pid = ?self.pid,
-                        channel_id = ?channel_id,
+                        connection_id = ?channel.connection_id,
+                        channel_id = ?channel.channel_id,
+                        channel_debug = ?channel.debug,
                         outcome = ?outcome,
                         "vox channel try_send failed"
                     );
                 }
             }
-            vox::ChannelEvent::Closed { channel_id, reason } => {
+            vox::ChannelEvent::Closed { channel, reason } => {
                 tracing::info!(
                     component = self.component,
                     surface = self.surface,
                     pid = ?self.pid,
-                    channel_id = ?channel_id,
+                    connection_id = ?channel.connection_id,
+                    channel_id = ?channel.channel_id,
+                    channel_debug = ?channel.debug,
                     reason = ?reason,
                     "vox channel closed"
                 );
             }
-            vox::ChannelEvent::Reset { channel_id, reason } => {
+            vox::ChannelEvent::Reset { channel, reason } => {
                 tracing::warn!(
                     component = self.component,
                     surface = self.surface,
                     pid = ?self.pid,
-                    channel_id = ?channel_id,
+                    connection_id = ?channel.connection_id,
+                    channel_id = ?channel.channel_id,
+                    channel_debug = ?channel.debug,
                     reason = ?reason,
                     "vox channel reset"
                 );
             }
-            vox::ChannelEvent::SendStarted { channel_id } => {
+            vox::ChannelEvent::SendStarted { channel } => {
                 tracing::trace!(
                     component = self.component,
                     surface = self.surface,
                     pid = ?self.pid,
-                    channel_id = ?channel_id,
+                    connection_id = ?channel.connection_id,
+                    channel_id = ?channel.channel_id,
+                    channel_debug = ?channel.debug,
                     "vox channel send started"
                 );
             }
-            vox::ChannelEvent::CreditGranted { channel_id, amount } => {
+            vox::ChannelEvent::CreditGranted { channel, amount } => {
                 tracing::trace!(
                     component = self.component,
                     surface = self.surface,
                     pid = ?self.pid,
-                    channel_id = ?channel_id,
+                    connection_id = ?channel.connection_id,
+                    channel_id = ?channel.channel_id,
+                    channel_debug = ?channel.debug,
                     amount,
                     "vox channel credit granted"
                 );
             }
-            vox::ChannelEvent::ItemReceived { channel_id } => {
+            vox::ChannelEvent::ItemReceived { channel } => {
                 tracing::trace!(
                     component = self.component,
                     surface = self.surface,
                     pid = ?self.pid,
-                    channel_id = ?channel_id,
+                    connection_id = ?channel.connection_id,
+                    channel_id = ?channel.channel_id,
+                    channel_debug = ?channel.debug,
                     "vox channel item received"
                 );
             }
-            vox::ChannelEvent::ItemConsumed { channel_id } => {
+            vox::ChannelEvent::ItemConsumed { channel } => {
                 tracing::trace!(
                     component = self.component,
                     surface = self.surface,
                     pid = ?self.pid,
-                    channel_id = ?channel_id,
+                    connection_id = ?channel.connection_id,
+                    channel_id = ?channel.channel_id,
+                    channel_debug = ?channel.debug,
                     "vox channel item consumed"
                 );
             }
@@ -210,6 +489,9 @@ impl vox::VoxObserver for VoxObserverLogger {
     }
 
     fn driver_event(&self, event: vox::DriverEvent) {
+        if let Some(telemetry) = &self.telemetry {
+            telemetry.driver_event(self.surface, event);
+        }
         match event {
             vox::DriverEvent::ConnectionOpened { connection_id } => {
                 tracing::info!(
@@ -365,6 +647,9 @@ impl vox::VoxObserver for VoxObserverLogger {
     }
 
     fn transport_event(&self, event: vox::TransportEvent) {
+        if let Some(telemetry) = &self.telemetry {
+            telemetry.transport_event(self.surface, event);
+        }
         tracing::trace!(
             component = self.component,
             surface = self.surface,

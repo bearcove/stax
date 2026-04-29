@@ -8,6 +8,10 @@
 //! that `stax-live` pulls in.
 
 use facet::Facet;
+pub use stax_telemetry::{
+    CounterSnapshot, GaugeSnapshot, HistogramBucketSnapshot, HistogramSnapshot, PhaseSnapshot,
+    RecentEventSnapshot, TelemetrySnapshot,
+};
 
 /// Off-CPU time at a stack node, broken down by why the thread was
 /// off-CPU. Sum across all fields = total off-CPU time.
@@ -843,6 +847,13 @@ pub struct ServerStatus {
     pub active: Vec<RunSummary>,
 }
 
+#[derive(Clone, Debug, Facet)]
+pub struct DiagnosticsSnapshot {
+    pub server_started_at_unix_ns: u64,
+    pub active: Vec<RunSummary>,
+    pub telemetry: TelemetrySnapshot,
+}
+
 /// Agent-side wait condition: which event makes `wait_active` return.
 /// First-fired wins; `wait_active` always also returns once the run
 /// transitions to `Stopped`, regardless of which condition was set.
@@ -1250,6 +1261,10 @@ pub trait RunControl {
     /// in-memory archive). Bounded by the server's eviction policy
     /// (in-memory only for now; on-disk persistence is a follow-up).
     async fn list_runs(&self) -> Vec<RunSummary>;
+
+    /// Point-in-time server diagnostics: current run plus stax-owned
+    /// telemetry counters, phases, histograms, and recent events.
+    async fn diagnostics(&self) -> DiagnosticsSnapshot;
 
     /// Start a recording by attaching stax-shade to an existing pid.
     async fn start_attach(

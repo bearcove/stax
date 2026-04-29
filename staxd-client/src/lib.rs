@@ -17,7 +17,6 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use log::{info, warn};
 use mach2::mach_time::mach_absolute_time;
 use stax_mac_capture::SampleSink;
 use stax_mac_kperf_parse::pipeline::{Pipeline, PipelineConfig};
@@ -27,6 +26,7 @@ use stax_mac_kperf_sys::kdebug::{
     KdBuf, perf,
 };
 use staxd_proto::{KdBufBatch, KdBufWire, SessionConfig, StaxdClient};
+use tracing::{info, warn};
 
 /// User-facing options. Mirrors the shape of
 /// `stax_mac_kperf::RecordOptions` so plumbing through the existing

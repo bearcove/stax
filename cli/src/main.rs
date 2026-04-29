@@ -13,10 +13,10 @@ use stax_core::{
     cmd_setup_mac,
 };
 use stax_live_proto::{
-    FlameNode, FlamegraphUpdate, LaunchEnvVar, LaunchRequest, LiveFilter, OffCpuBreakdown,
-    ProbeDiffEntry, ProbeDiffUpdate, ProfilerClient, RunControlClient, RunSummary, ServerStatus,
-    StopReason, TerminalInput, TerminalOutput, TerminalSize, ThreadsUpdate, TopSort, ViewParams,
-    WaitCondition, WaitOutcome,
+    DiagnosticsSnapshot, FlameNode, FlamegraphUpdate, HistogramSnapshot, LaunchEnvVar,
+    LaunchRequest, LiveFilter, OffCpuBreakdown, ProbeDiffEntry, ProbeDiffUpdate, ProfilerClient,
+    RunControlClient, RunSummary, ServerStatus, StopReason, TelemetrySnapshot, TerminalInput,
+    TerminalOutput, TerminalSize, ThreadsUpdate, TopSort, ViewParams, WaitCondition, WaitOutcome,
 };
 
 fn main_impl() -> Result<(), Box<dyn Error>> {
@@ -48,6 +48,7 @@ fn main_impl() -> Result<(), Box<dyn Error>> {
         Command::Setup(args) => cmd_setup_mac::main(args)?,
         Command::Status => block_on_async(async { run_status().await })?,
         Command::List => block_on_async(async { run_list().await })?,
+        Command::Diagnose => block_on_async(async { run_diagnose().await })?,
         Command::Wait(args) => block_on_async(async { run_wait(args).await })?,
         Command::Stop => block_on_async(async { run_stop().await })?,
         Command::Top(args) => block_on_async(async { run_top(args).await })?,
@@ -416,6 +417,14 @@ async fn run_list() -> Result<(), Box<dyn Error>> {
             print_run_one_line(&run);
         }
     }
+    Ok(())
+}
+
+async fn run_diagnose() -> Result<(), Box<dyn Error>> {
+    let url = require_server_socket()?;
+    let client: RunControlClient = vox::connect(&url).await?;
+    let snapshot = client.diagnostics().await.map_err(|e| format!("{e:?}"))?;
+    print_diagnostics(&snapshot);
     Ok(())
 }
 
@@ -1147,6 +1156,100 @@ fn print_server_status(status: &ServerStatus) {
         print_run_one_line(active);
     } else {
         println!("no active run");
+    }
+}
+
+fn print_diagnostics(snapshot: &DiagnosticsSnapshot) {
+    println!("stax diagnostics");
+    if let Some(active) = snapshot.active.first() {
+        println!("active run:");
+        print_run_one_line(active);
+    } else {
+        println!("active run: none");
+    }
+    print_telemetry(&snapshot.telemetry);
+}
+
+fn print_telemetry(snapshot: &TelemetrySnapshot) {
+    println!();
+    println!("telemetry: {}", snapshot.component);
+
+    if !snapshot.phases.is_empty() {
+        println!("phases:");
+        for phase in &snapshot.phases {
+            println!(
+                "  {:24} {:18} {:>8}  {}",
+                phase.name,
+                phase.state,
+                format_duration_ns(phase.elapsed_ns),
+                phase.detail
+            );
+        }
+    }
+
+    if !snapshot.gauges.is_empty() {
+        println!("gauges:");
+        for gauge in &snapshot.gauges {
+            println!("  {:32} {}", gauge.name, gauge.value);
+        }
+    }
+
+    if !snapshot.counters.is_empty() {
+        println!("counters:");
+        for counter in &snapshot.counters {
+            println!("  {:32} {}", counter.name, counter.value);
+        }
+    }
+
+    if !snapshot.histograms.is_empty() {
+        println!("histograms:");
+        for histogram in &snapshot.histograms {
+            print_histogram(histogram);
+        }
+    }
+
+    if !snapshot.recent_events.is_empty() {
+        println!("recent events:");
+        for event in &snapshot.recent_events {
+            println!("  {}  {:24} {}", event.at_unix_ns, event.name, event.detail);
+        }
+    }
+}
+
+fn print_histogram(histogram: &HistogramSnapshot) {
+    let avg = if histogram.count == 0 {
+        0
+    } else {
+        histogram.sum / histogram.count
+    };
+    println!(
+        "  {} count={} avg={} max={} overflow={}",
+        histogram.name,
+        histogram.count,
+        format_duration_ns(avg),
+        format_duration_ns(histogram.max),
+        histogram.overflow
+    );
+    for bucket in &histogram.buckets {
+        if bucket.count != 0 {
+            println!(
+                "    <= {:>8}: {}",
+                format_duration_ns(bucket.le),
+                bucket.count
+            );
+        }
+    }
+}
+
+fn format_duration_ns(ns: u64) -> String {
+    if ns >= 1_000_000_000 {
+        format!("{:.2}s", ns as f64 / 1_000_000_000.0)
+    } else if ns >= 1_000_000 {
+        format!("{:.2}ms", ns as f64 / 1_000_000.0)
+    } else if ns >= 1_000 {
+        format!("{:.2}µs", ns as f64 / 1_000.0)
+    } else {
+        format!("{ns}ns")
     }
 }
 

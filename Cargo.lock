@@ -2119,6 +2119,7 @@ dependencies = [
  "stax-vox-observe",
  "staxd-client",
  "tokio",
+ "tracing",
  "vox",
 ]
 
@@ -2158,6 +2159,7 @@ name = "stax-live-proto"
 version = "0.1.0"
 dependencies = [
  "facet",
+ "stax-telemetry",
  "vox",
 ]
 
@@ -2211,6 +2213,7 @@ dependencies = [
  "stax-mac-capture",
  "stax-mac-shared-cache",
  "stax-shade-proto",
+ "stax-telemetry",
  "stax-vox-observe",
  "tokio",
  "tracing",
@@ -2261,9 +2264,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "stax-telemetry"
+version = "0.1.0"
+dependencies = [
+ "facet",
+]
+
+[[package]]
 name = "stax-vox-observe"
 version = "0.1.0"
 dependencies = [
+ "stax-telemetry",
  "tracing",
  "vox",
 ]
@@ -2300,6 +2311,7 @@ dependencies = [
  "staxd-proto",
  "thiserror",
  "tokio",
+ "tracing",
  "tracing-subscriber",
  "vox",
 ]

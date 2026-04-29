@@ -35,6 +35,10 @@ pub enum Command {
     /// List every run stax-server has hosted (active + history).
     List,
 
+    /// Dump stax-server diagnostics: telemetry phases, counters,
+    /// histograms, and recent events.
+    Diagnose,
+
     /// Block until a condition fires, the active run stops, or the
     /// timeout elapses.
     Wait(WaitArgs),

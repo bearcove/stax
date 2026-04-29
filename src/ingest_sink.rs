@@ -6,7 +6,8 @@
 //! the wire allows.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use stax_live_proto::{
     IngestEvent, RunId, RunIngestClient, WireBinaryLoaded, WireBinaryUnloaded, WireMachOSymbol,
@@ -36,6 +37,7 @@ pub struct IngestSink {
     tx: UnboundedSender<IngestEvent>,
     reliable_tx: std::sync::mpsc::Sender<ReliableIngest>,
     stop_requested: Arc<AtomicBool>,
+    enqueued: Arc<AtomicU64>,
 }
 
 impl IngestSink {
@@ -43,11 +45,32 @@ impl IngestSink {
         tx: UnboundedSender<IngestEvent>,
         reliable_tx: std::sync::mpsc::Sender<ReliableIngest>,
         stop_requested: Arc<AtomicBool>,
+        enqueued: Arc<AtomicU64>,
     ) -> Self {
         Self {
             tx,
             reliable_tx,
             stop_requested,
+            enqueued,
+        }
+    }
+
+    fn enqueue_event(&self, event: IngestEvent) {
+        let kind = ingest_event_kind(&event);
+        let queued = self.enqueued.fetch_add(1, Ordering::Relaxed) + 1;
+        if queued == 1 {
+            tracing::info!(kind, queued, "ingest_sink: first event enqueued");
+        } else if queued.is_multiple_of(1024) {
+            tracing::debug!(kind, queued, "ingest_sink: events enqueued");
+        }
+        if let Err(err) = self.tx.send(event) {
+            tracing::warn!(
+                kind,
+                queued,
+                error = ?err,
+                "ingest_sink: event enqueue failed; forwarder channel is closed"
+            );
+            self.stop_requested.store(true, Ordering::Relaxed);
         }
     }
 
@@ -67,11 +90,11 @@ impl IngestSink {
         match reply_rx.recv() {
             Ok(Ok(())) => {}
             Ok(Err(err)) => {
-                log::warn!("reliable ingest call failed: {err}");
+                tracing::warn!(error = %err, "reliable ingest call failed");
                 self.stop_requested.store(true, Ordering::Relaxed);
             }
             Err(err) => {
-                log::warn!("reliable ingest reply channel closed: {err}");
+                tracing::warn!(error = %err, "reliable ingest reply channel closed");
                 self.stop_requested.store(true, Ordering::Relaxed);
             }
         }
@@ -86,7 +109,7 @@ impl LiveSink for IngestSink {
 
     async fn on_sample(&self, ev: &SampleEvent) {
         let user_backtrace = ev.user_backtrace.iter().map(|f| f.address).collect();
-        let _ = self.tx.send(IngestEvent::Sample(WireSampleEvent {
+        self.enqueue_event(IngestEvent::Sample(WireSampleEvent {
             timestamp_ns: ev.timestamp,
             pid: ev.pid,
             tid: ev.tid,
@@ -136,7 +159,7 @@ impl LiveSink for IngestSink {
     }
 
     async fn on_thread_name(&self, ev: &ThreadName) {
-        let _ = self.tx.send(IngestEvent::ThreadName {
+        self.enqueue_event(IngestEvent::ThreadName {
             pid: ev.pid,
             tid: ev.tid,
             name: ev.name.to_owned(),
@@ -144,7 +167,7 @@ impl LiveSink for IngestSink {
     }
 
     async fn on_wakeup(&self, ev: &WakeupEvent) {
-        let _ = self.tx.send(IngestEvent::Wakeup(WireWakeup {
+        self.enqueue_event(IngestEvent::Wakeup(WireWakeup {
             timestamp_ns: ev.timestamp,
             waker_tid: ev.waker_tid,
             wakee_tid: ev.wakee_tid,
@@ -154,25 +177,23 @@ impl LiveSink for IngestSink {
     }
 
     async fn on_probe_result<'a>(&self, ev: &crate::live_sink::ProbeResultEvent<'a>) {
-        let _ = self
-            .tx
-            .send(IngestEvent::ProbeResult(stax_live_proto::WireProbeResult {
-                tid: ev.tid,
-                timing: ev.timing.into(),
-                queue: ev.queue.into(),
-                mach_pc: ev.mach_pc,
-                mach_lr: ev.mach_lr,
-                mach_fp: ev.mach_fp,
-                mach_sp: ev.mach_sp,
-                mach_walked: ev.mach_walked.to_vec(),
-                used_framehop: ev.used_framehop,
-            }));
+        self.enqueue_event(IngestEvent::ProbeResult(stax_live_proto::WireProbeResult {
+            tid: ev.tid,
+            timing: ev.timing.into(),
+            queue: ev.queue.into(),
+            mach_pc: ev.mach_pc,
+            mach_lr: ev.mach_lr,
+            mach_fp: ev.mach_fp,
+            mach_sp: ev.mach_sp,
+            mach_walked: ev.mach_walked.to_vec(),
+            used_framehop: ev.used_framehop,
+        }));
     }
 
     async fn on_cpu_interval(&self, ev: &CpuIntervalEvent) {
         match &ev.kind {
             CpuIntervalKind::OnCpu => {
-                let _ = self.tx.send(IngestEvent::OnCpuInterval(WireOnCpuInterval {
+                self.enqueue_event(IngestEvent::OnCpuInterval(WireOnCpuInterval {
                     tid: ev.tid,
                     start_ns: ev.start_ns,
                     end_ns: ev.end_ns,
@@ -183,16 +204,14 @@ impl LiveSink for IngestSink {
                 waker_tid,
                 waker_user_stack,
             } => {
-                let _ = self
-                    .tx
-                    .send(IngestEvent::OffCpuInterval(WireOffCpuInterval {
-                        tid: ev.tid,
-                        start_ns: ev.start_ns,
-                        end_ns: ev.end_ns,
-                        stack: stack.iter().map(|f| f.address).collect(),
-                        waker_tid: *waker_tid,
-                        waker_user_stack: waker_user_stack.map(|s| s.to_vec()),
-                    }));
+                self.enqueue_event(IngestEvent::OffCpuInterval(WireOffCpuInterval {
+                    tid: ev.tid,
+                    start_ns: ev.start_ns,
+                    end_ns: ev.end_ns,
+                    stack: stack.iter().map(|f| f.address).collect(),
+                    waker_tid: *waker_tid,
+                    waker_user_stack: waker_user_stack.map(|s| s.to_vec()),
+                }));
             }
         }
     }
@@ -268,6 +287,7 @@ pub async fn connect_and_register(
     let (sync_tx, sync_rx) = mpsc::unbounded_channel::<IngestEvent>();
     let (reliable_tx, reliable_rx) = std::sync::mpsc::channel::<ReliableIngest>();
     let stop_requested = Arc::new(AtomicBool::new(false));
+    let enqueued = Arc::new(AtomicU64::new(0));
     let forwarder = spawn_forwarders(
         client,
         run_id,
@@ -275,11 +295,12 @@ pub async fn connect_and_register(
         sync_rx,
         reliable_rx,
         stop_requested.clone(),
+        enqueued.clone(),
     );
 
     Ok((
         run_id,
-        IngestSink::new(sync_tx, reliable_tx, stop_requested),
+        IngestSink::new(sync_tx, reliable_tx, stop_requested, enqueued),
         forwarder,
     ))
 }
@@ -313,6 +334,7 @@ pub async fn connect_to_existing_run(
     let (sync_tx, sync_rx) = mpsc::unbounded_channel::<IngestEvent>();
     let (reliable_tx, reliable_rx) = std::sync::mpsc::channel::<ReliableIngest>();
     let stop_requested = Arc::new(AtomicBool::new(false));
+    let enqueued = Arc::new(AtomicU64::new(0));
     let forwarder = spawn_forwarders(
         client,
         run_id,
@@ -320,10 +342,11 @@ pub async fn connect_to_existing_run(
         sync_rx,
         reliable_rx,
         stop_requested.clone(),
+        enqueued.clone(),
     );
 
     Ok((
-        IngestSink::new(sync_tx, reliable_tx, stop_requested),
+        IngestSink::new(sync_tx, reliable_tx, stop_requested, enqueued),
         forwarder,
     ))
 }
@@ -335,11 +358,13 @@ fn spawn_forwarders(
     sync_rx: mpsc::UnboundedReceiver<IngestEvent>,
     reliable_rx: std::sync::mpsc::Receiver<ReliableIngest>,
     stop_requested: Arc<AtomicBool>,
+    enqueued: Arc<AtomicU64>,
 ) -> tokio::task::JoinHandle<()> {
     let event_stop = stop_requested.clone();
-    let event_forwarder = tokio::spawn(forward_events(vox_tx, sync_rx, event_stop));
+    let event_forwarder = tokio::spawn(forward_events(vox_tx, sync_rx, event_stop, enqueued));
     let reliable_stop = stop_requested.clone();
     let reliable_forwarder = tokio::task::spawn_blocking(move || {
+        tracing::info!(run_id = run_id.0, "ingest_sink: reliable forwarder started");
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -363,10 +388,16 @@ fn spawn_forwarders(
                 Ok::<(), String>(())
             });
             if result.is_err() {
+                tracing::warn!(
+                    run_id = run_id.0,
+                    error = ?result,
+                    "ingest_sink: reliable ingest call failed"
+                );
                 reliable_stop.store(true, Ordering::Relaxed);
             }
             let _ = request.reply.send(result);
         }
+        tracing::info!(run_id = run_id.0, "ingest_sink: reliable forwarder exiting");
     });
     tokio::spawn(async move {
         let _ = event_forwarder.await;
@@ -378,17 +409,54 @@ async fn forward_events(
     vox_tx: vox::Tx<IngestEvent>,
     mut sync_rx: mpsc::UnboundedReceiver<IngestEvent>,
     stop_requested: Arc<AtomicBool>,
+    enqueued: Arc<AtomicU64>,
 ) {
     let mut forwarded: u64 = 0;
     let mut counts = ForwardCounts::default();
-    let mut last_log = std::time::Instant::now();
+    let mut last_log = Instant::now();
+    tracing::info!("ingest_sink: event forwarder started");
     while let Some(event) = sync_rx.recv().await {
+        let kind = ingest_event_kind(&event);
+        let queued_total = enqueued.load(Ordering::Relaxed);
         counts.record(&event);
+        if forwarded == 0 {
+            tracing::info!(
+                kind,
+                queued = sync_rx.len(),
+                queued_total,
+                "ingest_sink: forwarder received first event"
+            );
+        }
+        let send_start = Instant::now();
         match vox_tx.send(event).await {
             Ok(()) => {
                 forwarded = forwarded.saturating_add(1);
-                if last_log.elapsed() >= std::time::Duration::from_secs(2) {
-                    log::info!(
+                let send_elapsed = send_start.elapsed();
+                if forwarded == 1 {
+                    tracing::info!(
+                        kind,
+                        forwarded,
+                        queued = sync_rx.len(),
+                        queued_total,
+                        elapsed = ?send_elapsed,
+                        "ingest_sink: forwarder sent first event"
+                    );
+                } else if send_elapsed >= Duration::from_millis(10) {
+                    tracing::warn!(
+                        kind,
+                        forwarded,
+                        queued = sync_rx.len(),
+                        queued_total,
+                        elapsed = ?send_elapsed,
+                        "ingest_sink: slow vox event send"
+                    );
+                }
+                if last_log.elapsed() >= Duration::from_secs(2) {
+                    tracing::info!(
+                        forwarded,
+                        queued = sync_rx.len(),
+                        queued_total,
+                        counts = %counts.summary(),
                         "ingest_sink: forwarder progress: forwarded={} queued={} {}",
                         forwarded,
                         sync_rx.len(),
@@ -398,7 +466,12 @@ async fn forward_events(
                 }
             }
             Err(e) => {
-                log::warn!(
+                tracing::warn!(
+                    kind,
+                    forwarded,
+                    queued = sync_rx.len(),
+                    queued_total,
+                    error = ?e,
                     "ingest_sink: vox send failed (server dropped Rx?) after forwarded={} queued={} err={:?}",
                     forwarded,
                     sync_rx.len(),
@@ -409,13 +482,30 @@ async fn forward_events(
             }
         }
     }
-    log::info!(
+    tracing::info!(
+        forwarded,
+        queued_total = enqueued.load(Ordering::Relaxed),
+        counts = %counts.summary(),
         "ingest_sink: forwarder exiting (sync_rx closed) after forwarded={} {}; flushing vox",
         forwarded,
         counts.summary(),
     );
     let _ = vox_tx.close(Default::default()).await;
     stop_requested.store(true, Ordering::Relaxed);
+}
+
+fn ingest_event_kind(event: &IngestEvent) -> &'static str {
+    match event {
+        IngestEvent::Sample(_) => "sample",
+        IngestEvent::ProbeResult(_) => "probe_result",
+        IngestEvent::OnCpuInterval(_) => "on_cpu",
+        IngestEvent::OffCpuInterval(_) => "off_cpu",
+        IngestEvent::BinaryLoaded(_) => "binary_loaded",
+        IngestEvent::BinaryUnloaded(_) => "binary_unloaded",
+        IngestEvent::TargetAttached { .. } => "target_attached",
+        IngestEvent::ThreadName { .. } => "thread_name",
+        IngestEvent::Wakeup(_) => "wakeup",
+    }
 }
 
 struct ReliableIngest {

@@ -451,8 +451,21 @@ async fn run_recording(
         tracing::warn!(
             run_id = run_id.0,
             elapsed = ?recording_start.elapsed(),
-            "shade skipping ingest forwarder await because parser worker was detached"
+            "shade parser worker detached; waiting briefly for ingest forwarder to drain"
         );
+        match tokio::time::timeout(Duration::from_secs(5), forwarder).await {
+            Ok(Ok(())) => tracing::info!(
+                run_id = run_id.0,
+                elapsed = ?recording_start.elapsed(),
+                "shade ingest forwarder drained after parser detach"
+            ),
+            Ok(Err(e)) => tracing::warn!("ingest forwarder task ended unexpectedly: {e}"),
+            Err(_) => tracing::warn!(
+                run_id = run_id.0,
+                elapsed = ?recording_start.elapsed(),
+                "shade ingest forwarder still blocked after parser detach drain timeout"
+            ),
+        }
     } else if let Err(e) = forwarder.await {
         tracing::warn!("ingest forwarder task ended unexpectedly: {e}");
     }
