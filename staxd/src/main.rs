@@ -255,9 +255,6 @@ impl Staxd for StaxdServer {
 ///    `/var/log/staxd.log` is also written via the plist's
 ///    StandardErrorPath, but tailing it requires sudo and the file
 ///    can lag behind buffered stdio.
-/// 2. The standard `fmt` layer (stderr), useful when running the
-///    daemon in foreground for development. No-op when stderr is
-///    redirected by launchd.
 fn init_logging() {
     use tracing_subscriber::EnvFilter;
     use tracing_subscriber::layer::SubscriberExt;
@@ -270,7 +267,6 @@ fn init_logging() {
 
     tracing_subscriber::registry()
         .with(filter)
-        .with(tracing_subscriber::fmt::layer())
         .with(oslog)
         .init();
 }

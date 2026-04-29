@@ -1025,7 +1025,6 @@ fn init_logging() {
 
     tracing_subscriber::registry()
         .with(filter)
-        .with(tracing_subscriber::fmt::layer())
         .with(oslog)
         .init();
 }

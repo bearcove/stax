@@ -16,6 +16,7 @@ vox = { path = "/Users/amos/bearcove/vox/rust/vox" }
 tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
 log = "0.4"
 thiserror = "2"
+flume = "0.11"
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"], default-features = false }

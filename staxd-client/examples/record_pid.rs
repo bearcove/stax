@@ -14,19 +14,19 @@
 
 #[cfg(target_os = "macos")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use stax_mac_capture::{
         BinaryLoadedEvent, BinaryUnloadedEvent, SampleEvent, SampleSink, ThreadNameEvent,
     };
     use staxd_client::{RemoteOptions, drive_session};
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "staxd_client=info,record_pid=info".into()),
-        )
-        .init();
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "staxd_client=info,record_pid=info".into());
+    tracing_subscriber::registry().with(filter).init();
 
     let mut pid: Option<u32> = None;
     let mut duration_secs: u64 = 5;
@@ -55,13 +55,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         wakeups: u64,
         first_few_samples: u32,
     }
-    impl SampleSink for CountingSink {
+
+    #[derive(Clone)]
+    struct CountingSinkHandle(Arc<Mutex<CountingSink>>);
+
+    impl SampleSink for CountingSinkHandle {
         fn on_sample(&mut self, ev: SampleEvent<'_>) {
-            self.samples += 1;
-            if self.first_few_samples < 3
+            let mut sink = self.0.lock().expect("counting sink mutex poisoned");
+            sink.samples += 1;
+            if sink.first_few_samples < 3
                 && (!ev.backtrace.is_empty() || !ev.kernel_backtrace.is_empty())
             {
-                self.first_few_samples += 1;
+                sink.first_few_samples += 1;
                 println!(
                     "[sample] tid={} ts={} u={} k={} cycles={} insns={}",
                     ev.tid,
@@ -74,8 +79,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         fn on_binary_loaded(&mut self, ev: BinaryLoadedEvent<'_>) {
-            self.binaries_loaded += 1;
-            if self.binaries_loaded <= 3 {
+            let mut sink = self.0.lock().expect("counting sink mutex poisoned");
+            sink.binaries_loaded += 1;
+            if sink.binaries_loaded <= 3 {
                 println!(
                     "[binary] {} ({} bytes, {} symbols)",
                     ev.path,
@@ -86,13 +92,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         fn on_binary_unloaded(&mut self, _: BinaryUnloadedEvent<'_>) {}
         fn on_thread_name(&mut self, ev: ThreadNameEvent<'_>) {
-            self.thread_names += 1;
-            if self.thread_names <= 3 {
+            let mut sink = self.0.lock().expect("counting sink mutex poisoned");
+            sink.thread_names += 1;
+            if sink.thread_names <= 3 {
                 println!("[thread] tid={} name={}", ev.tid, ev.name);
             }
         }
         fn on_wakeup(&mut self, _: stax_mac_capture::WakeupEvent<'_>) {
-            self.wakeups += 1;
+            let mut sink = self.0.lock().expect("counting sink mutex poisoned");
+            sink.wakeups += 1;
         }
     }
 
@@ -104,19 +112,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
-    let mut sink = CountingSink {
+    let sink = Arc::new(Mutex::new(CountingSink {
         samples: 0,
         binaries_loaded: 0,
         thread_names: 0,
         wakeups: 0,
         first_few_samples: 0,
-    };
+    }));
+    let sink_for_session = CountingSinkHandle(Arc::clone(&sink));
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    rt.block_on(drive_session(opts, &mut sink, || false))?;
+    rt.block_on(drive_session(opts, sink_for_session, || false))?;
 
+    let sink = sink.lock().expect("counting sink mutex poisoned");
     println!();
     println!(":: record_pid done");
     println!("   samples           : {}", sink.samples);

@@ -983,8 +983,6 @@ fn pid_is_alive(pid: u32) -> bool {
 ///    even when the daemon was started by launchd. This is the
 ///    always-on production path; we deliberately don't write a
 ///    log file to disk.
-/// 2. The standard `fmt` layer (stderr), useful when running in
-///    foreground for development.
 fn init_logging() {
     use tracing_subscriber::EnvFilter;
     use tracing_subscriber::layer::SubscriberExt;
@@ -997,7 +995,6 @@ fn init_logging() {
 
     tracing_subscriber::registry()
         .with(filter)
-        .with(tracing_subscriber::fmt::layer())
         .with(oslog)
         .init();
 }

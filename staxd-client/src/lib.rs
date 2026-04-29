@@ -13,7 +13,7 @@
 
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
 
@@ -74,7 +74,7 @@ pub enum Error {
     #[error("vox call returned an error: {0}")]
     VoxCall(String),
 
-    #[error("parser worker did not stop within {budget:?}; detached")]
+    #[error("parser worker did not stop within {budget:?}")]
     WorkerShutdownTimedOut { budget: Duration },
 }
 
@@ -185,13 +185,24 @@ where
         pmc_idx_brmiss: None,
     };
 
-    let (worker_tx, worker_rx) = std::sync::mpsc::sync_channel::<WorkerMsg>(WORKER_QUEUE_CAPACITY);
+    let parser_queue = ParserQueue::new(WORKER_QUEUE_CAPACITY);
+    let worker_rx = parser_queue.receiver();
+    let worker_counters = parser_queue.counters();
     let abort_worker_backlog = Arc::new(AtomicBool::new(false));
     let worker_abort = abort_worker_backlog.clone();
     let phase_start = Instant::now();
     let worker_handle = std::thread::Builder::new()
         .name("staxd-client-worker".to_owned())
-        .spawn(move || worker_thread(pipeline_config, shared_cache, sink, worker_abort, worker_rx))
+        .spawn(move || {
+            worker_thread(
+                pipeline_config,
+                shared_cache,
+                sink,
+                worker_abort,
+                worker_rx,
+                worker_counters,
+            )
+        })
         .map_err(|e| Error::VoxCall(format!("spawn worker thread: {e}")))?;
     info!(
         "staxd-client: parser worker spawned elapsed={:?}",
@@ -306,7 +317,7 @@ where
                 }
             }
             total_drained += batch.records.len() as u64;
-            enqueue_worker_batches(&worker_tx, batch.records);
+            parser_queue.enqueue_records(batch.records);
         });
     }
 
@@ -315,11 +326,11 @@ where
     // next send fails with Transport, its drain loop breaks, kperf
     // teardown runs, record() returns with a RecordSummary or error.
     drop(rx);
-    // Tell the worker we're done so it can flush queued records and
-    // drop the sink, which closes the ingest channel on the server.
-    // If the parser backlog is pathological, bound shutdown latency
-    // and then ask the worker to skip whatever remains.
-    drop(worker_tx);
+    // Tell the worker we're done by closing the sender. The worker
+    // gets first shot at draining the bounded backlog; we only ask it
+    // to drop queued parser work if shutdown exceeds the budget.
+    let queue_counters = parser_queue.counters();
+    drop(parser_queue);
 
     let rpc_result = record_fut
         .await
@@ -342,17 +353,26 @@ where
     }
 
     if !join_worker_with_deadline(worker_handle, abort_worker_backlog).await {
+        let queue_stats = queue_counters.stats();
+        log_parser_queue_stats(queue_stats);
         return Err(Error::WorkerShutdownTimedOut {
             budget: WORKER_SHUTDOWN_BUDGET,
         });
     }
 
     info!("staxd-client: locally drained {total_drained} records");
+    let queue_stats = queue_counters.stats();
+    log_parser_queue_stats(queue_stats);
     info!(
-        "staxd-client: session finished total_elapsed={:?} records={} probe_triggers={}",
+        "staxd-client: session finished total_elapsed={:?} records={} probe_triggers={} parser_dropped_chunks={} parser_dropped_records={} parser_dropped_kperf_samples={} parser_max_queue_depth={} parser_max_queue_age_ns={}",
         client_start.elapsed(),
         total_drained,
-        probe_trigger_count
+        probe_trigger_count,
+        queue_stats.dropped_chunks,
+        queue_stats.dropped_records,
+        queue_stats.dropped_kperf_samples,
+        queue_stats.max_depth,
+        queue_stats.max_age_ns
     );
     Ok(())
 }
@@ -361,6 +381,189 @@ const WORKER_QUEUE_CAPACITY: usize = 16;
 const WORKER_BATCH_CHUNK_RECORDS: usize = 16 * 1024;
 const WORKER_SHUTDOWN_BUDGET: Duration = Duration::from_secs(2);
 const WORKER_ABORT_GRACE: Duration = Duration::from_millis(250);
+
+#[derive(Clone, Copy, Default)]
+struct ParserQueueStats {
+    dropped_chunks: u64,
+    dropped_records: u64,
+    dropped_kperf_samples: u64,
+    max_depth: u64,
+    max_age_ns: u64,
+}
+
+#[derive(Clone, Copy, Default)]
+struct ParserDropSummary {
+    chunks: u64,
+    records: u64,
+    kperf_samples: u64,
+}
+
+impl ParserDropSummary {
+    fn add(&mut self, other: Self) {
+        self.chunks = self.chunks.saturating_add(other.chunks);
+        self.records = self.records.saturating_add(other.records);
+        self.kperf_samples = self.kperf_samples.saturating_add(other.kperf_samples);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.records == 0 && self.chunks == 0 && self.kperf_samples == 0
+    }
+}
+
+#[derive(Default)]
+struct ParserQueueCounters {
+    dropped_chunks: AtomicU64,
+    dropped_records: AtomicU64,
+    dropped_kperf_samples: AtomicU64,
+    max_depth: AtomicU64,
+    max_age_ns: AtomicU64,
+}
+
+impl ParserQueueCounters {
+    fn record_drop(&self, drop: ParserDropSummary) {
+        self.dropped_chunks
+            .fetch_add(drop.chunks, Ordering::Relaxed);
+        self.dropped_records
+            .fetch_add(drop.records, Ordering::Relaxed);
+        self.dropped_kperf_samples
+            .fetch_add(drop.kperf_samples, Ordering::Relaxed);
+    }
+
+    fn update_max_depth(&self, depth: usize) {
+        update_max(&self.max_depth, u64::try_from(depth).unwrap_or(u64::MAX));
+    }
+
+    fn update_max_age(&self, age: Duration) {
+        update_max(&self.max_age_ns, age.as_nanos() as u64);
+    }
+
+    fn stats(&self) -> ParserQueueStats {
+        ParserQueueStats {
+            dropped_chunks: self.dropped_chunks.load(Ordering::Relaxed),
+            dropped_records: self.dropped_records.load(Ordering::Relaxed),
+            dropped_kperf_samples: self.dropped_kperf_samples.load(Ordering::Relaxed),
+            max_depth: self.max_depth.load(Ordering::Relaxed),
+            max_age_ns: self.max_age_ns.load(Ordering::Relaxed),
+        }
+    }
+}
+
+struct ParserQueue {
+    tx: flume::Sender<WorkerMsg>,
+    drop_rx: flume::Receiver<WorkerMsg>,
+    counters: Arc<ParserQueueCounters>,
+}
+
+impl ParserQueue {
+    fn new(capacity: usize) -> Self {
+        let (tx, drop_rx) = flume::bounded(capacity);
+        Self {
+            tx,
+            drop_rx,
+            counters: Arc::new(ParserQueueCounters::default()),
+        }
+    }
+
+    fn receiver(&self) -> flume::Receiver<WorkerMsg> {
+        self.drop_rx.clone()
+    }
+
+    fn counters(&self) -> Arc<ParserQueueCounters> {
+        self.counters.clone()
+    }
+
+    fn enqueue_records(&self, records: Vec<KdBufWire>) {
+        for chunk in records.chunks(WORKER_BATCH_CHUNK_RECORDS) {
+            let msg = WorkerMsg::Batch(OwnedBatch {
+                enqueued_at: Instant::now(),
+                records: chunk.to_vec(),
+            });
+            self.enqueue_chunk_drop_oldest(msg);
+        }
+    }
+
+    fn enqueue_chunk_drop_oldest(&self, mut msg: WorkerMsg) {
+        loop {
+            match self.tx.try_send(msg) {
+                Ok(()) => {
+                    self.counters.update_max_depth(self.drop_rx.len());
+                    return;
+                }
+                Err(flume::TrySendError::Full(returned)) => {
+                    msg = returned;
+                    match self.drop_rx.try_recv() {
+                        Ok(dropped) => self.record_drop(dropped),
+                        Err(flume::TryRecvError::Empty) => continue,
+                        Err(flume::TryRecvError::Disconnected) => return,
+                    }
+                }
+                Err(flume::TrySendError::Disconnected(_)) => return,
+            }
+        }
+    }
+
+    fn record_drop(&self, msg: WorkerMsg) {
+        self.counters.record_drop(drop_summary(msg));
+    }
+}
+
+fn log_parser_queue_stats(stats: ParserQueueStats) {
+    if stats.dropped_records > 0 || stats.dropped_chunks > 0 {
+        warn!(
+            "staxd-client-worker: parser queue lost data chunks={} records={} kperf_samples={} max_depth={} max_age_ns={}",
+            stats.dropped_chunks,
+            stats.dropped_records,
+            stats.dropped_kperf_samples,
+            stats.max_depth,
+            stats.max_age_ns
+        );
+    }
+}
+
+fn drain_parser_backlog_for_abort(
+    rx: &flume::Receiver<WorkerMsg>,
+    counters: &ParserQueueCounters,
+) -> ParserDropSummary {
+    let mut summary = ParserDropSummary::default();
+    while let Ok(msg) = rx.try_recv() {
+        summary.add(drop_summary(msg));
+    }
+    if !summary.is_empty() {
+        counters.record_drop(summary);
+    }
+    summary
+}
+
+fn drop_summary(msg: WorkerMsg) -> ParserDropSummary {
+    match msg {
+        WorkerMsg::Batch(batch) => ParserDropSummary {
+            chunks: 1,
+            records: batch.records.len() as u64,
+            kperf_samples: count_kperf_samples(&batch.records),
+        },
+    }
+}
+
+fn count_kperf_samples(records: &[KdBufWire]) -> u64 {
+    let mut scanner = KperfProbeTriggerScanner::default();
+    let mut count = 0u64;
+    for rec in records {
+        if scanner.feed(rec).is_some() {
+            count += 1;
+        }
+    }
+    count
+}
+
+fn update_max(max: &AtomicU64, value: u64) {
+    let mut old = max.load(Ordering::Relaxed);
+    while value > old {
+        match max.compare_exchange_weak(old, value, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(next) => old = next,
+        }
+    }
+}
 
 async fn join_worker_with_deadline(
     worker_handle: std::thread::JoinHandle<()>,
@@ -425,33 +628,6 @@ async fn wait_for_worker_join(
     }
 }
 
-fn enqueue_worker_batches(
-    worker_tx: &std::sync::mpsc::SyncSender<WorkerMsg>,
-    records: Vec<KdBufWire>,
-) {
-    let mut dropped_chunks = 0u64;
-    let mut dropped_records = 0u64;
-    for chunk in records.chunks(WORKER_BATCH_CHUNK_RECORDS) {
-        let msg = WorkerMsg::Batch(OwnedBatch {
-            records: chunk.to_vec(),
-        });
-        match worker_tx.try_send(msg) {
-            Ok(()) => {}
-            Err(std::sync::mpsc::TrySendError::Full(WorkerMsg::Batch(batch))) => {
-                dropped_chunks += 1;
-                dropped_records += batch.records.len() as u64;
-            }
-            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => return,
-        }
-    }
-    if dropped_chunks > 0 {
-        warn!(
-            "staxd-client-worker: parser queue full; dropped kdebug chunks chunks={} records={} queue_capacity={}",
-            dropped_chunks, dropped_records, WORKER_QUEUE_CAPACITY
-        );
-    }
-}
-
 #[derive(Default)]
 struct KperfProbeTriggerScanner {
     pending: Option<PendingKperfSample>,
@@ -507,6 +683,7 @@ impl KperfProbeTriggerScanner {
 /// the SelfRef across thread boundaries, so the recv loop pulls
 /// the records out and ships them to the worker via this struct.
 struct OwnedBatch {
+    enqueued_at: Instant,
     records: Vec<KdBufWire>,
 }
 
@@ -523,7 +700,8 @@ fn worker_thread<S: SampleSink>(
     shared_cache: Option<Arc<stax_mac_shared_cache::SharedCache>>,
     mut sink: S,
     abort_backlog: Arc<AtomicBool>,
-    rx: std::sync::mpsc::Receiver<WorkerMsg>,
+    rx: flume::Receiver<WorkerMsg>,
+    counters: Arc<ParserQueueCounters>,
 ) {
     let worker_start = Instant::now();
     info!(
@@ -551,19 +729,26 @@ fn worker_thread<S: SampleSink>(
 
     loop {
         if abort_backlog.load(Ordering::Acquire) {
-            info!("staxd-client-worker: shutdown requested; dropping queued kdebug batches");
+            let dropped = drain_parser_backlog_for_abort(&rx, &counters);
+            info!(
+                "staxd-client-worker: shutdown requested; dropped queued parser backlog chunks={} records={} kperf_samples={}",
+                dropped.chunks, dropped.records, dropped.kperf_samples
+            );
             aborted = true;
             break;
         }
         match rx.recv_timeout(TICK_INTERVAL) {
             Ok(WorkerMsg::Batch(batch)) => {
                 if abort_backlog.load(Ordering::Acquire) {
+                    let dropped = drain_parser_backlog_for_abort(&rx, &counters);
                     info!(
-                        "staxd-client-worker: shutdown requested; dropping queued kdebug batches"
+                        "staxd-client-worker: shutdown requested; dropped queued parser backlog chunks={} records={} kperf_samples={}",
+                        dropped.chunks, dropped.records, dropped.kperf_samples
                     );
                     aborted = true;
                     break;
                 }
+                counters.update_max_age(batch.enqueued_at.elapsed());
                 let kdbufs: Vec<KdBuf> = batch.records.iter().map(wire_to_kdbuf).collect();
                 if !first_batch_logged {
                     first_batch_logged = true;
@@ -589,8 +774,8 @@ fn worker_thread<S: SampleSink>(
                     );
                 }
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(flume::RecvTimeoutError::Timeout) => {}
+            Err(flume::RecvTimeoutError::Disconnected) => break,
         }
         // Periodic libproc scans — sync, may do disk IO. That's
         // fine *here*: this thread is dedicated, so a slow scan
@@ -612,6 +797,15 @@ fn worker_thread<S: SampleSink>(
             worker_start.elapsed(),
             processed_batches,
             processed_records
+        );
+        return;
+    }
+
+    if abort_backlog.load(Ordering::Acquire) {
+        let dropped = drain_parser_backlog_for_abort(&rx, &counters);
+        info!(
+            "staxd-client-worker: shutdown requested before finish; skipped finish chunks={} records={} kperf_samples={}",
+            dropped.chunks, dropped.records, dropped.kperf_samples
         );
         return;
     }
