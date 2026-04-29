@@ -49,6 +49,11 @@ final class AppModel {
     /// top of the unfiltered timeline.
     var timeline: TimelineUpdate? = nil
 
+    /// The (filtered) flame graph backing the top pane when no
+    /// function is focused. Held in the wire shape; the renderer
+    /// resolves string-table indices on draw.
+    var flamegraph: FlamegraphUpdate? = nil
+
     enum CPUMode: String, CaseIterable, Identifiable {
         case onCPU = "on-cpu"
         case offCPU = "off-cpu"
@@ -280,6 +285,9 @@ final class AppModel {
             streamTasks.append(Task { [weak self] in
                 await self?.runTimelineSubscription(client: client)
             })
+            streamTasks.append(Task { [weak self] in
+                await self?.runFlamegraphSubscription(client: client)
+            })
         case .failed(let why):
             connectionStatus = why
         case .idle, .connecting:
@@ -384,6 +392,48 @@ final class AppModel {
             NSLog("stax: top stream ended")
         } catch {
             NSLog("stax: top stream error: %@", "\(error)")
+        }
+    }
+
+    private func runFlamegraphSubscription(client: ProfilerClient) async {
+        let (tx, rx) = channel(
+            serialize: { (val: FlamegraphUpdate, buf: inout ByteBuffer) in
+                encodeFlamegraphUpdate(val, into: &buf)
+            },
+            deserialize: { (buf: inout ByteBuffer) in
+                try decodeFlamegraphUpdate(from: &buf)
+            }
+        )
+
+        let params = ViewParams(
+            tid: model_tidFilterAsU32(),
+            filter: LiveFilter(timeRange: nil, excludeSymbols: [])
+        )
+
+        Task {
+            do {
+                try await client.subscribeFlamegraph(params: params, output: tx)
+                NSLog("stax: subscribeFlamegraph call returned")
+            } catch {
+                NSLog("stax: subscribeFlamegraph call failed: %@", "\(error)")
+            }
+        }
+
+        do {
+            var count = 0
+            for try await update in rx {
+                count += 1
+                NSLog(
+                    "stax: flamegraph update #%d (%d strings, root.children=%d)",
+                    count,
+                    update.strings.count,
+                    update.root.children.count
+                )
+                self.flamegraph = update
+            }
+            NSLog("stax: flamegraph stream ended")
+        } catch {
+            NSLog("stax: flamegraph stream error: %@", "\(error)")
         }
     }
 
