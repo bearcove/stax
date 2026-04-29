@@ -1,9 +1,37 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use stax_telemetry::{CounterHandle, GaugeHandle, HistogramHandle, TelemetryRegistry};
 
 const SLOW_CHANNEL_SEND: Duration = Duration::from_millis(10);
 const SLOW_REQUEST: Duration = Duration::from_millis(10);
+
+static GLOBAL_DEBUG_REGISTRY: OnceLock<VoxDebugRegistry> = OnceLock::new();
+
+#[derive(Clone)]
+pub struct VoxDebugRegistry {
+    inner: Arc<VoxDebugRegistryInner>,
+}
+
+struct VoxDebugRegistryInner {
+    next_id: AtomicU64,
+    entries: Mutex<Vec<VoxDebugEntry>>,
+}
+
+#[derive(Clone)]
+struct VoxDebugEntry {
+    id: u64,
+    component: &'static str,
+    surface: &'static str,
+    role: &'static str,
+    caller: vox::Caller,
+}
+
+pub struct VoxDebugRegistration {
+    id: u64,
+    inner: Weak<VoxDebugRegistryInner>,
+}
 
 #[derive(Clone)]
 pub struct VoxObserverLogger {
@@ -49,6 +77,142 @@ struct VoxObserverTelemetry {
     transport_frame_read_bytes: CounterHandle,
     transport_frame_written_bytes: CounterHandle,
     transport_closed: CounterHandle,
+}
+
+pub fn global_debug_registry() -> &'static VoxDebugRegistry {
+    GLOBAL_DEBUG_REGISTRY.get_or_init(VoxDebugRegistry::new)
+}
+
+pub fn register_global_caller(
+    component: &'static str,
+    surface: &'static str,
+    role: &'static str,
+    caller: &vox::Caller,
+) -> VoxDebugRegistration {
+    global_debug_registry().register_caller(component, surface, role, caller)
+}
+
+#[must_use]
+pub fn install_global_sigusr1_dump(
+    process_name: &'static str,
+) -> Option<tokio::task::JoinHandle<()>> {
+    global_debug_registry().install_sigusr1_dump(process_name)
+}
+
+impl VoxDebugRegistry {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(VoxDebugRegistryInner {
+                next_id: AtomicU64::new(1),
+                entries: Mutex::new(Vec::new()),
+            }),
+        }
+    }
+
+    pub fn register_caller(
+        &self,
+        component: &'static str,
+        surface: &'static str,
+        role: &'static str,
+        caller: &vox::Caller,
+    ) -> VoxDebugRegistration {
+        let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .entries
+            .lock()
+            .expect("vox debug registry mutex poisoned")
+            .push(VoxDebugEntry {
+                id,
+                component,
+                surface,
+                role,
+                caller: caller.clone(),
+            });
+        VoxDebugRegistration {
+            id,
+            inner: Arc::downgrade(&self.inner),
+        }
+    }
+
+    pub fn dump_debug_snapshots(&self, process_name: &'static str, reason: &'static str) {
+        let entries = self
+            .inner
+            .entries
+            .lock()
+            .expect("vox debug registry mutex poisoned")
+            .clone();
+        tracing::info!(
+            process = process_name,
+            reason,
+            handles = entries.len(),
+            "dumping registered vox debug snapshots"
+        );
+        if entries.is_empty() {
+            return;
+        }
+        for entry in entries {
+            tracing::info!(
+                process = process_name,
+                reason,
+                component = entry.component,
+                surface = entry.surface,
+                role = entry.role,
+                registration_id = entry.id,
+                "dumping vox debug snapshot"
+            );
+            let _ = entry.caller.dump_debug_snapshot();
+        }
+    }
+
+    #[must_use]
+    pub fn install_sigusr1_dump(
+        &self,
+        process_name: &'static str,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        #[cfg(unix)]
+        {
+            let registry = self.clone();
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1()) {
+                Ok(mut signal) => Some(tokio::spawn(async move {
+                    while signal.recv().await.is_some() {
+                        registry.dump_debug_snapshots(process_name, "SIGUSR1");
+                    }
+                })),
+                Err(error) => {
+                    tracing::warn!(
+                        process = process_name,
+                        ?error,
+                        "failed to install SIGUSR1 vox debug dump handler"
+                    );
+                    None
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = process_name;
+            None
+        }
+    }
+}
+
+impl Default for VoxDebugRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for VoxDebugRegistration {
+    fn drop(&mut self) {
+        let Some(inner) = self.inner.upgrade() else {
+            return;
+        };
+        inner
+            .entries
+            .lock()
+            .expect("vox debug registry mutex poisoned")
+            .retain(|entry| entry.id != self.id);
+    }
 }
 
 impl VoxObserverLogger {

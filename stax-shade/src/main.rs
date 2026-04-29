@@ -130,6 +130,7 @@ struct Cli {
 #[tokio::main]
 async fn main() -> ExitCode {
     init_logging();
+    let _vox_sigusr1_dump = stax_vox_observe::install_global_sigusr1_dump("stax-shade");
 
     let cli: Cli = args::Driver::new(
         args::builder::<Cli>()
@@ -259,7 +260,8 @@ async fn run_recording(
     );
 
     let phase_start = Instant::now();
-    let (_server_client, mut commands) = register_with_server(server_socket, run_id.0, pid).await?;
+    let (_server_client, mut commands, _server_debug_registration) =
+        register_with_server(server_socket, run_id.0, pid).await?;
     tracing::info!(
         run_id = run_id.0,
         elapsed = ?phase_start.elapsed(),
@@ -773,6 +775,7 @@ fn decode_wait_status(status: libc::c_int) -> ChildExit {
 struct TerminalPump {
     events: tokio::sync::mpsc::UnboundedSender<TerminalOutput>,
     output_task: tokio::task::JoinHandle<()>,
+    _debug_registration: stax_vox_observe::VoxDebugRegistration,
 }
 
 impl TerminalPump {
@@ -796,6 +799,12 @@ async fn start_terminal_pump(
 ) -> eyre::Result<TerminalPump> {
     let url = format!("local://{socket}");
     let client: TerminalBrokerClient = vox::connect(&url).await?;
+    let debug_registration = stax_vox_observe::register_global_caller(
+        "stax-shade",
+        "terminal",
+        "TerminalBroker",
+        &client.caller,
+    );
     let (input_to_shade, mut input_from_server) = vox::channel::<TerminalInput>();
     let (output_to_server, output_from_shade) = vox::channel::<TerminalOutput>();
 
@@ -921,6 +930,7 @@ async fn start_terminal_pump(
     Ok(TerminalPump {
         events: events_tx,
         output_task,
+        _debug_registration: debug_registration,
     })
 }
 
@@ -939,9 +949,19 @@ async fn register_with_server(
     socket: &str,
     run_id: u64,
     target_pid: u32,
-) -> eyre::Result<(ShadeRegistryClient, vox::Rx<ShadeCommand>)> {
+) -> eyre::Result<(
+    ShadeRegistryClient,
+    vox::Rx<ShadeCommand>,
+    stax_vox_observe::VoxDebugRegistration,
+)> {
     let url = format!("local://{socket}");
     let client: ShadeRegistryClient = vox::connect(&url).await?;
+    let debug_registration = stax_vox_observe::register_global_caller(
+        "stax-shade",
+        "shade-registry",
+        "ShadeRegistry",
+        &client.caller,
+    );
     let (commands_to_shade, commands_from_server) = vox::channel::<ShadeCommand>();
     let info = ShadeInfo {
         run_id,
@@ -959,7 +979,7 @@ async fn register_with_server(
     match client.register_shade(info, commands_to_shade).await {
         Ok(ShadeAck { accepted: true, .. }) => {
             tracing::info!(run_id, "registered with stax-server");
-            Ok((client, commands_from_server))
+            Ok((client, commands_from_server, debug_registration))
         }
         Ok(ShadeAck {
             accepted: false,

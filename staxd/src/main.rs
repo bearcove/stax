@@ -47,6 +47,7 @@ const STAXD_RECORD_CHANNEL_CAPACITY: u32 = 64;
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<()> {
     init_logging();
+    let _vox_sigusr1_dump = stax_vox_observe::install_global_sigusr1_dump("staxd");
 
     let socket_path = parse_socket_arg();
 
@@ -114,6 +115,12 @@ async fn main() -> Result<()> {
                     .await;
                 match result {
                     Ok(client) => {
+                        let _debug_registration = stax_vox_observe::register_global_caller(
+                            "staxd",
+                            "local",
+                            "root",
+                            &client.caller,
+                        );
                         client.caller.closed().await;
                     }
                     Err(e) => warn!("staxd: session establish failed: {e:?}"),

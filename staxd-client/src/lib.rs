@@ -168,6 +168,12 @@ where
             });
         }
     };
+    let _debug_registration = stax_vox_observe::register_global_caller(
+        "staxd-client",
+        "staxd-records",
+        "Staxd",
+        &client.caller,
+    );
     info!(
         "staxd-client: connected to daemon elapsed={:?}",
         phase_start.elapsed()

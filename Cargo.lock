@@ -2236,6 +2236,7 @@ dependencies = [
  "stax-live-proto",
  "stax-mac-capture",
  "stax-shade-proto",
+ "stax-vox-observe",
  "staxd-client",
  "tokio",
  "tracing",
@@ -2275,6 +2276,7 @@ name = "stax-vox-observe"
 version = "0.1.0"
 dependencies = [
  "stax-telemetry",
+ "tokio",
  "tracing",
  "vox",
 ]

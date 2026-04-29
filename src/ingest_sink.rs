@@ -290,6 +290,7 @@ pub async fn connect_and_register(
     let enqueued = Arc::new(AtomicU64::new(0));
     let forwarder = spawn_forwarders(
         client,
+        "start_run",
         run_id,
         vox_tx,
         sync_rx,
@@ -337,6 +338,7 @@ pub async fn connect_to_existing_run(
     let enqueued = Arc::new(AtomicU64::new(0));
     let forwarder = spawn_forwarders(
         client,
+        "attach_run",
         run_id,
         vox_tx,
         sync_rx,
@@ -353,6 +355,7 @@ pub async fn connect_to_existing_run(
 
 fn spawn_forwarders(
     client: RunIngestClient,
+    surface: &'static str,
     run_id: RunId,
     vox_tx: vox::Tx<IngestEvent>,
     sync_rx: mpsc::UnboundedReceiver<IngestEvent>,
@@ -360,6 +363,12 @@ fn spawn_forwarders(
     stop_requested: Arc<AtomicBool>,
     enqueued: Arc<AtomicU64>,
 ) -> tokio::task::JoinHandle<()> {
+    let debug_registration = stax_vox_observe::register_global_caller(
+        "ingest-sink",
+        surface,
+        "RunIngest",
+        &client.caller,
+    );
     let event_stop = stop_requested.clone();
     let event_forwarder = tokio::spawn(forward_events(vox_tx, sync_rx, event_stop, enqueued));
     let reliable_stop = stop_requested.clone();
@@ -400,6 +409,7 @@ fn spawn_forwarders(
         tracing::info!(run_id = run_id.0, "ingest_sink: reliable forwarder exiting");
     });
     tokio::spawn(async move {
+        let _debug_registration = debug_registration;
         let _ = event_forwarder.await;
         let _ = reliable_forwarder.await;
     })

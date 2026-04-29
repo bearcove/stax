@@ -39,6 +39,7 @@ const STAX_SERVER_CHANNEL_CAPACITY: u32 = 64;
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
     init_logging();
+    let _vox_sigusr1_dump = stax_vox_observe::install_global_sigusr1_dump("stax-server");
 
     let socket = resolve_socket_path();
     if socket.exists() {
@@ -177,7 +178,15 @@ fn spawn_session_local(server: ServerState, link: vox::transport::local::LocalLi
             .establish::<vox::NoopClient>()
             .await;
         match result {
-            Ok(client) => client.caller.closed().await,
+            Ok(client) => {
+                let _debug_registration = stax_vox_observe::register_global_caller(
+                    "stax-server",
+                    "local",
+                    "root",
+                    &client.caller,
+                );
+                client.caller.closed().await;
+            }
             Err(e) => tracing::warn!("stax-server: local session establish failed: {e:?}"),
         }
         cleanup_session_shade(&server, &shade_slot);
@@ -202,7 +211,15 @@ fn spawn_session_ws(server: ServerState, link: <vox::WsListener as vox::VoxListe
             .establish::<vox::NoopClient>()
             .await;
         match result {
-            Ok(client) => client.caller.closed().await,
+            Ok(client) => {
+                let _debug_registration = stax_vox_observe::register_global_caller(
+                    "stax-server",
+                    "ws",
+                    "root",
+                    &client.caller,
+                );
+                client.caller.closed().await;
+            }
             Err(e) => tracing::warn!("stax-server: ws session establish failed: {e:?}"),
         }
         cleanup_session_shade(&server, &shade_slot);
