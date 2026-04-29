@@ -28,14 +28,80 @@ final class AppModel {
     /// Plain text → fuzzy substring.
     var searchQuery: String = ""
 
-    /// `nil` → top pane shows the flame graph. Non-nil → top pane shows the
-    /// call graph centered on the focused function.
-    var focusedFunctionId: FunctionEntry.ID? = nil {
+    /// Stored AVMA we're currently focused on. Drives the annotated +
+    /// neighbors subscriptions; can be set both by clicking a row in
+    /// the function table (via `focusedFunctionId.didSet` mirror)
+    /// and by clicking a frame in the flame graph (which doesn't go
+    /// through the table at all).
+    var focusedAddress: UInt64? = nil {
         didSet {
-            guard oldValue != focusedFunctionId else { return }
+            guard oldValue != focusedAddress else { return }
             restartAnnotatedSubscription()
             restartNeighborsSubscription()
         }
+    }
+
+    /// What to render in the NavHeader / call-graph nodes for the
+    /// currently focused address. Can come from either a FunctionEntry
+    /// (table click) or a FlameNode (flame click); kept normalized so
+    /// the view layer doesn't care which side originated the focus.
+    var focusedDisplay: FocusedDisplay? = nil
+
+    struct FocusedDisplay: Hashable {
+        let name: String
+        let binary: String
+        let kind: SymbolKind
+    }
+
+    /// `nil` → top pane shows the flame graph. Non-nil → top pane shows the
+    /// call graph centered on the focused function. Kept in sync with
+    /// `focusedAddress`/`focusedDisplay` via didSet.
+    var focusedFunctionId: FunctionEntry.ID? = nil {
+        didSet {
+            guard oldValue != focusedFunctionId else { return }
+            if let id = focusedFunctionId,
+                let fn = functions.first(where: { $0.id == id })
+            {
+                let display = FocusedDisplay(
+                    name: fn.name, binary: fn.binary, kind: fn.kind)
+                if focusedDisplay != display { focusedDisplay = display }
+                if focusedAddress != fn.address { focusedAddress = fn.address }
+            } else {
+                if focusedDisplay != nil { focusedDisplay = nil }
+                if focusedAddress != nil { focusedAddress = nil }
+            }
+        }
+    }
+
+    /// Focus on the given flame-graph frame. The matching table row
+    /// is highlighted if the address happens to be in the current
+    /// top-N; otherwise the table stays unselected but the call graph
+    /// + disassembly still drive off `focusedAddress`.
+    func focusOnFlameNode(_ node: FlameNode, strings: [String]) {
+        func resolve(_ idx: UInt32?) -> String? {
+            guard let i = idx, Int(i) < strings.count else { return nil }
+            return strings[Int(i)]
+        }
+        let name = resolve(node.functionName)
+            ?? String(format: "0x%llx", node.address)
+        let binary = resolve(node.binary) ?? "(no binary)"
+        let lang = Int(node.language) < strings.count
+            ? strings[Int(node.language)]
+            : ""
+        let display = FocusedDisplay(
+            name: name, binary: binary, kind: symbolKind(forLanguage: lang))
+
+        if focusedDisplay != display { focusedDisplay = display }
+        if focusedAddress != node.address { focusedAddress = node.address }
+        let matchingId = functions.first(where: { $0.address == node.address })?.id
+        if focusedFunctionId != matchingId { focusedFunctionId = matchingId }
+    }
+
+    /// Clear the focus and return the top pane to the flame graph.
+    func clearFocus() {
+        if focusedFunctionId != nil { focusedFunctionId = nil }
+        if focusedAddress != nil { focusedAddress = nil }
+        if focusedDisplay != nil { focusedDisplay = nil }
     }
 
     /// Live disassembly + source view for the focused function.
@@ -207,17 +273,6 @@ final class AppModel {
             case .other:   Color(red: 0.95, green: 0.55, blue: 0.43)
             }
         }
-        var fakeStat: TimeInterval {
-            switch self {
-            case .ipc:     0.0000197
-            case .read:    0.0000105
-            case .write:   0.0000047
-            case .ready:   0.0000093
-            case .connect: 0.0000163
-            case .idle:    0.1999
-            case .other:   0.5874
-            }
-        }
     }
 
     struct Interval: Identifiable, Hashable {
@@ -228,19 +283,9 @@ final class AppModel {
         let tid: Int
         let wokenBy: Int?
     }
-    var intervals: [Interval] = {
-        let durations: [TimeInterval] = [
-            0.1387, 0.000000113, 0.0000013, 0.0000043, 0.0000027,
-            0.0000044, 0.0000017, 0.0000053, 0.0000023, 0.0000057,
-            0.0000031, 0.0000040, 0.000000595, 0.0000038, 0.0000036,
-            0.0000036, 0.0000019, 0.0000060,
-        ]
-        return durations.map {
-            Interval(start: 0.254, duration: $0, reason: .other, tid: 6360176, wokenBy: nil)
-        }
-    }()
-    var intervalsTotalCount: Int = 20577
-    var intervalsTotalDuration: TimeInterval = 0.7874
+    var intervals: [Interval] = []
+    var intervalsTotalCount: Int = 0
+    var intervalsTotalDuration: TimeInterval = 0
 
     var functions: [FunctionEntry] = []
 
@@ -442,39 +487,28 @@ final class AppModel {
     }
 
     /// Cancel any in-flight annotated subscription and start a new
-    /// one for the currently-focused function (if any).
+    /// one for the currently-focused address (if any).
     private func restartAnnotatedSubscription() {
         annotatedTask?.cancel()
         annotatedTask = nil
         annotated = nil
-        guard
-            let id = focusedFunctionId,
-            let fn = functions.first(where: { $0.id == id })
-        else { return }
+        guard let address = focusedAddress else { return }
         guard case .ready(let client) = service.state else { return }
 
-        let address = fn.address
         annotatedTask = Task { [weak self] in
             await self?.runAnnotatedSubscription(client: client, address: address)
         }
     }
 
     /// Cancel any in-flight neighbors subscription and start a new
-    /// one for the currently-focused function (if any). The result
-    /// populates `neighbors` (raw wire shape) plus the legacy
-    /// `familyCallers` / `familyFocused` / `familyCallees` flat lists
-    /// (for any remaining consumers).
+    /// one for the currently-focused address (if any).
     private func restartNeighborsSubscription() {
         neighborsTask?.cancel()
         neighborsTask = nil
         neighbors = nil
-        guard
-            let id = focusedFunctionId,
-            let fn = functions.first(where: { $0.id == id })
-        else { return }
+        guard let address = focusedAddress else { return }
         guard case .ready(let client) = service.state else { return }
 
-        let address = fn.address
         neighborsTask = Task { [weak self] in
             await self?.runNeighborsSubscription(client: client, address: address)
         }

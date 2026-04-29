@@ -20,11 +20,11 @@ struct MainPane: View {
 
     @ViewBuilder
     private var topPane: some View {
-        if let fn = focusedFunction {
+        if let display = model.focusedDisplay {
             VStack(spacing: 0) {
-                NavHeader(model: model, focused: fn)
+                NavHeader(model: model, focused: display)
                 Divider()
-                CallGraphView(model: model, focused: fn)
+                CallGraphView(model: model)
             }
         } else {
             VStack(spacing: 0) {
@@ -35,43 +35,49 @@ struct MainPane: View {
         }
     }
 
-    private var focusedFunction: AppModel.FunctionEntry? {
-        guard let id = model.focusedFunctionId else { return nil }
-        return model.functions.first { $0.id == id }
-    }
-
     private var minimap: some View {
         Minimap(timeline: model.timeline)
             .frame(height: 56)
     }
 
     private var flame: some View {
-        FlameView(flamegraph: model.flamegraph)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        FlameView(flamegraph: model.flamegraph) { node in
+            guard let fg = model.flamegraph else { return }
+            model.focusOnFlameNode(node, strings: fg.strings)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
 /// Stacked-tree flame graph. Each level is one fixed-height row;
 /// children of a node are placed left-to-right under their parent,
 /// with widths proportional to their `on_cpu_ns`. Coloured by the
-/// node's language string.
+/// node's language string. Clicking a cell calls `onTap` with the
+/// underlying FlameNode (the deepest cell containing the click point).
 private struct FlameView: View {
     let flamegraph: FlamegraphUpdate?
+    var onTap: (FlameNode) -> Void = { _ in }
 
     var body: some View {
         ZStack {
             Color(nsColor: .textBackgroundColor).opacity(0.3)
             if let flamegraph {
-                Canvas { ctx, size in
-                    let totalNs = max(1, flamegraph.root.onCpuNs)
-                    drawFlameNode(
-                        flamegraph.root,
-                        in: ctx,
-                        rect: CGRect(origin: .zero, size: size),
-                        depth: 0,
-                        totalNs: totalNs,
-                        strings: flamegraph.strings
-                    )
+                GeometryReader { geo in
+                    let cells = layoutFlame(root: flamegraph.root, in: geo.size)
+                    Canvas { ctx, _ in
+                        for cell in cells {
+                            drawFlameCell(cell, in: ctx, strings: flamegraph.strings)
+                        }
+                    }
+                    .contentShape(.rect)
+                    .onTapGesture(coordinateSpace: .local) { loc in
+                        // Walk in reverse — render order is parent-first,
+                        // so the last rect containing the point is the
+                        // deepest (and thus most specific) cell.
+                        if let hit = cells.reversed().first(where: { $0.rect.contains(loc) }) {
+                            onTap(hit.node)
+                        }
+                    }
                 }
             } else {
                 Text("waiting for flamegraph…")
@@ -82,50 +88,62 @@ private struct FlameView: View {
     }
 }
 
+private struct LaidOutFlameCell {
+    let node: FlameNode
+    let rect: CGRect
+}
+
 private let flameLevelHeight: CGFloat = 18
 private let flameMaxDepth = 32
 
-private func drawFlameNode(
-    _ node: FlameNode,
-    in ctx: GraphicsContext,
-    rect: CGRect,
-    depth: Int,
-    totalNs: UInt64,
-    strings: [String]
+/// One-pass tidy-tree layout: each level is a fixed-height row,
+/// children fill their parent's width proportional to `on_cpu_ns`.
+/// Returns cells in pre-order (root first) so the renderer paints
+/// shallow before deep, and so reverse-walk hit-testing finds the
+/// deepest covering cell first.
+private func layoutFlame(root: FlameNode, in size: CGSize) -> [LaidOutFlameCell] {
+    var cells: [LaidOutFlameCell] = []
+    func walk(_ node: FlameNode, rect: CGRect, depth: Int) {
+        if depth >= flameMaxDepth { return }
+        if rect.width < 0.5 { return }
+        cells.append(LaidOutFlameCell(node: node, rect: rect))
+
+        let parentNs = max(1, node.onCpuNs)
+        var childX = rect.minX
+        for child in node.children {
+            let w = rect.width * CGFloat(child.onCpuNs) / CGFloat(parentNs)
+            if w >= 0.5 {
+                walk(
+                    child,
+                    rect: CGRect(
+                        x: childX,
+                        y: CGFloat(depth + 1) * flameLevelHeight,
+                        width: w,
+                        height: flameLevelHeight - 1),
+                    depth: depth + 1)
+            }
+            childX += w
+        }
+    }
+    walk(
+        root,
+        rect: CGRect(x: 0, y: 0, width: size.width, height: flameLevelHeight - 1),
+        depth: 0)
+    return cells
+}
+
+private func drawFlameCell(
+    _ cell: LaidOutFlameCell, in ctx: GraphicsContext, strings: [String]
 ) {
-    if depth >= flameMaxDepth { return }
-    if rect.width < 1 { return }
+    let fill = flameNodeColor(cell.node, strings: strings)
+    ctx.fill(Path(cell.rect), with: .color(fill))
 
-    let y = CGFloat(depth) * flameLevelHeight
-    let cell = CGRect(x: rect.minX, y: y, width: rect.width, height: flameLevelHeight - 1)
-    let fill = flameNodeColor(node, strings: strings)
-    ctx.fill(Path(cell), with: .color(fill))
-
-    if cell.width >= 32 {
-        let name = stringAt(node.functionName, in: strings) ?? hex(node.address)
+    if cell.rect.width >= 32 {
+        let name = stringAt(cell.node.functionName, in: strings) ?? hex(cell.node.address)
         let text = Text(name)
             .font(.mono(.caption2))
             .foregroundStyle(.primary)
-        let labelRect = cell.insetBy(dx: 4, dy: 1)
-        ctx.draw(text, in: labelRect)
-    }
-
-    // Recurse into children stacked horizontally under us.
-    let parentNs = max(1, node.onCpuNs)
-    var childX = rect.minX
-    for child in node.children {
-        let childWidth = rect.width * CGFloat(child.onCpuNs) / CGFloat(parentNs)
-        if childWidth >= 0.5 {
-            drawFlameNode(
-                child,
-                in: ctx,
-                rect: CGRect(x: childX, y: y, width: childWidth, height: rect.height),
-                depth: depth + 1,
-                totalNs: totalNs,
-                strings: strings
-            )
-        }
-        childX += childWidth
+        ctx.draw(text, in: cell.rect.insetBy(dx: 4, dy: 1))
     }
 }
 
@@ -216,12 +234,12 @@ private struct Minimap: View {
 
 private struct NavHeader: View {
     @Bindable var model: AppModel
-    let focused: AppModel.FunctionEntry
+    let focused: AppModel.FocusedDisplay
 
     var body: some View {
         HStack(spacing: 8) {
             Button {
-                model.focusedFunctionId = nil
+                model.clearFocus()
             } label: {
                 HStack(spacing: 3) {
                     Image(systemName: "chevron.left")

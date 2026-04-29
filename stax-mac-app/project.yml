@@ -44,13 +44,17 @@ targets:
         INFOPLIST_KEY_NSHumanReadableCopyright: "© bearcove"
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
         INFOPLIST_KEY_ATSApplicationFontsPath: Fonts
-        ENABLE_APP_SANDBOX: YES
+        # Sandbox is off for now — the Mac app reaches stax-server's
+        # unix socket at /tmp/stax-server-<uid>.sock, which sandbox's
+        # file-access policy blocks. Group-container migration is the
+        # eventual home; until then, hardened-runtime stays on but
+        # sandbox is disabled.
+        ENABLE_APP_SANDBOX: NO
         ENABLE_HARDENED_RUNTIME: YES
         CODE_SIGN_ENTITLEMENTS: stax/stax.entitlements
         CODE_SIGN_STYLE: Automatic
     entitlements:
       path: stax/stax.entitlements
       properties:
-        com.apple.security.app-sandbox: true
         com.apple.security.network.client: true
         com.apple.security.files.user-selected.read-only: true

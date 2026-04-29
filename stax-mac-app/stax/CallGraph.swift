@@ -9,7 +9,6 @@ import SwiftUI
 /// child rectangles.
 struct CallGraphView: View {
     @Bindable var model: AppModel
-    let focused: AppModel.FunctionEntry
 
     var body: some View {
         ZStack {
