@@ -98,10 +98,19 @@ fn should_publish_revision(revision: &AtomicU64, last_seen: &mut Option<u64>) ->
 
 impl Profiler for LiveServer {
     async fn top(&self, limit: u32, sort: TopSort, params: ViewParams) -> Vec<TopEntry> {
+        self.top_update(limit, sort, params).await.entries
+    }
+
+    async fn top_update(&self, limit: u32, sort: TopSort, params: ViewParams) -> TopUpdate {
         let agg = self.aggregator.read();
         let bins = self.binaries.read();
         let aggregation = aggregate_with_filter(&agg, &bins, params.tid, &params.filter);
-        group_top_entries(&aggregation, &bins, sort, limit as usize)
+        let entries = group_top_entries(&aggregation, &bins, sort, limit as usize);
+        TopUpdate {
+            total_on_cpu_ns: aggregation.total_on_cpu_ns,
+            total_off_cpu: aggregation.total_off_cpu.to_proto(),
+            entries,
+        }
     }
 
     async fn subscribe_top(
@@ -147,6 +156,21 @@ impl Profiler for LiveServer {
         let agg = self.aggregator.read();
         let bins = self.binaries.read();
         agg.aggregate_all(&bins).total_on_cpu_ns
+    }
+
+    async fn annotated(&self, address: u64, params: ViewParams) -> AnnotatedView {
+        let ViewParams { tid, filter } = params;
+        let by_address = {
+            let agg = self.aggregator.read();
+            let bins = self.binaries.read();
+            aggregate_with_filter(&agg, &bins, tid, &filter).by_address
+        };
+        compute_annotated_view(&self.binaries, &self.source, address, |a| {
+            by_address
+                .get(&a)
+                .map(|s| (s.self_on_cpu_ns, s.self_pet_samples))
+                .unwrap_or((0, 0))
+        })
     }
 
     async fn subscribe_annotated(
@@ -197,6 +221,14 @@ impl Profiler for LiveServer {
         });
     }
 
+    async fn flamegraph(&self, params: ViewParams) -> FlamegraphUpdate {
+        let ViewParams { tid, filter } = params;
+        let agg = self.aggregator.read();
+        let bins = self.binaries.read();
+        let aggregation = aggregate_with_filter(&agg, &bins, tid, &filter);
+        compute_flame_update(&aggregation, &bins)
+    }
+
     async fn subscribe_flamegraph(&self, params: ViewParams, output: vox::Tx<FlamegraphUpdate>) {
         let ViewParams { tid, filter } = params;
         tracing::info!(?tid, "subscribe_flamegraph: starting stream");
@@ -223,6 +255,14 @@ impl Profiler for LiveServer {
                 }
             }
         });
+    }
+
+    async fn neighbors(&self, address: u64, params: ViewParams) -> NeighborsUpdate {
+        let ViewParams { tid, filter } = params;
+        let agg = self.aggregator.read();
+        let bins = self.binaries.read();
+        let aggregation = aggregate_with_filter(&agg, &bins, tid, &filter);
+        compute_neighbors_update(&aggregation.flame_root, &bins, address)
     }
 
     async fn subscribe_neighbors(
@@ -266,6 +306,10 @@ impl Profiler for LiveServer {
         });
     }
 
+    async fn timeline(&self, tid: Option<u32>) -> TimelineUpdate {
+        build_timeline_update(&self.aggregator, tid)
+    }
+
     async fn subscribe_timeline(&self, tid: Option<u32>, output: vox::Tx<TimelineUpdate>) {
         tracing::info!(?tid, "subscribe_timeline: starting stream");
         let aggregator = self.aggregator.clone();
@@ -285,6 +329,10 @@ impl Profiler for LiveServer {
                 }
             }
         });
+    }
+
+    async fn wakers(&self, wakee_tid: u32) -> stax_live_proto::WakersUpdate {
+        build_wakers_update(&self.aggregator, &self.binaries, wakee_tid)
     }
 
     async fn subscribe_wakers(
@@ -311,6 +359,14 @@ impl Profiler for LiveServer {
                 }
             }
         });
+    }
+
+    async fn intervals(&self, flame_key: String, params: ViewParams) -> IntervalListUpdate {
+        let _ = flame_key;
+        let ViewParams { tid, filter } = params;
+        let agg = self.aggregator.read();
+        let bins = self.binaries.read();
+        build_intervals_update(&agg, &bins, tid, &filter)
     }
 
     async fn subscribe_intervals(
@@ -348,6 +404,13 @@ impl Profiler for LiveServer {
                 }
             }
         });
+    }
+
+    async fn pet_samples(&self, flame_key: String, params: ViewParams) -> PetSampleListUpdate {
+        let _ = flame_key;
+        let ViewParams { tid, filter } = params;
+        let agg = self.aggregator.read();
+        build_pet_samples_update(&agg, tid, &filter)
     }
 
     async fn subscribe_pet_samples(
@@ -391,6 +454,12 @@ impl Profiler for LiveServer {
         self.paused.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    async fn probe_diff(&self, tid: Option<u32>) -> ProbeDiffUpdate {
+        let agg = self.aggregator.read();
+        let bins = self.binaries.read();
+        build_probe_diff_update(&agg, &bins, tid)
+    }
+
     async fn subscribe_probe_diff(&self, tid: Option<u32>, output: vox::Tx<ProbeDiffUpdate>) {
         tracing::info!(?tid, "subscribe_probe_diff: starting stream");
         let aggregator = self.aggregator.clone();
@@ -417,6 +486,10 @@ impl Profiler for LiveServer {
         });
     }
 
+    async fn threads(&self) -> ThreadsUpdate {
+        build_threads_update(&self.aggregator, &self.binaries)
+    }
+
     async fn subscribe_threads(&self, output: vox::Tx<ThreadsUpdate>) {
         tracing::info!("subscribe_threads: starting stream");
         let aggregator = self.aggregator.clone();
@@ -430,35 +503,7 @@ impl Profiler for LiveServer {
                 if !should_publish_revision(&revision, &mut last_seen) {
                     continue;
                 }
-                let update = {
-                    let agg = aggregator.read();
-                    let bins = binaries.read();
-                    let mut threads: Vec<ThreadInfo> = agg
-                        .iter_threads()
-                        .map(|tid| {
-                            let aggregation = agg.aggregate(Some(tid), &bins, |_| true);
-                            let pet_samples: u64 = agg
-                                .thread_stats(tid)
-                                .map(|s| s.pet_samples.len() as u64)
-                                .unwrap_or(0);
-                            ThreadInfo {
-                                tid,
-                                name: agg.thread_name(tid).map(|s| s.to_owned()),
-                                on_cpu_ns: aggregation.total_on_cpu_ns,
-                                off_cpu: aggregation.total_off_cpu.to_proto(),
-                                pet_samples,
-                            }
-                        })
-                        .collect();
-                    // Rank by on_cpu_ns + total off-cpu so active +
-                    // heavily-blocked threads both float to the top.
-                    threads.sort_by(|a, b| {
-                        let a_total = a.on_cpu_ns.saturating_add(off_cpu_total_proto(&a.off_cpu));
-                        let b_total = b.on_cpu_ns.saturating_add(off_cpu_total_proto(&b.off_cpu));
-                        b_total.cmp(&a_total)
-                    });
-                    ThreadsUpdate { threads }
-                };
+                let update = build_threads_update(&aggregator, &binaries);
                 if let Err(e) = output.send(update).await {
                     tracing::info!("subscribe_threads: stream ended: {e:?}");
                     break;
@@ -479,6 +524,37 @@ fn off_cpu_total_proto(b: &stax_live_proto::OffCpuBreakdown) -> u64 {
         .saturating_add(b.sleep_ns)
         .saturating_add(b.connect_ns)
         .saturating_add(b.other_ns)
+}
+
+fn build_threads_update(
+    aggregator: &Arc<RwLock<Aggregator>>,
+    binaries: &Arc<RwLock<BinaryRegistry>>,
+) -> ThreadsUpdate {
+    let agg = aggregator.read();
+    let bins = binaries.read();
+    let mut threads: Vec<ThreadInfo> = agg
+        .iter_threads()
+        .map(|tid| {
+            let aggregation = agg.aggregate(Some(tid), &bins, |_| true);
+            let pet_samples: u64 = agg
+                .thread_stats(tid)
+                .map(|s| s.pet_samples.len() as u64)
+                .unwrap_or(0);
+            ThreadInfo {
+                tid,
+                name: agg.thread_name(tid).map(|s| s.to_owned()),
+                on_cpu_ns: aggregation.total_on_cpu_ns,
+                off_cpu: aggregation.total_off_cpu.to_proto(),
+                pet_samples,
+            }
+        })
+        .collect();
+    threads.sort_by(|a, b| {
+        let a_total = a.on_cpu_ns.saturating_add(off_cpu_total_proto(&a.off_cpu));
+        let b_total = b.on_cpu_ns.saturating_add(off_cpu_total_proto(&b.off_cpu));
+        b_total.cmp(&a_total)
+    });
+    ThreadsUpdate { threads }
 }
 
 /// One-stop helper: run `Aggregator::aggregate` with the

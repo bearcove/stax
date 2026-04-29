@@ -712,6 +712,10 @@ pub trait Profiler {
     /// bundles thread/time/exclude filters.
     async fn top(&self, limit: u32, sort: TopSort, params: ViewParams) -> Vec<TopEntry>;
 
+    /// One-shot top-function snapshot, including totals. UIs may poll
+    /// this instead of opening a long-lived channel.
+    async fn top_update(&self, limit: u32, sort: TopSort, params: ViewParams) -> TopUpdate;
+
     async fn subscribe_top(
         &self,
         limit: u32,
@@ -726,6 +730,8 @@ pub trait Profiler {
     /// "X CPU-seconds across the recording" displays.
     async fn total_on_cpu_ns(&self) -> u64;
 
+    async fn annotated(&self, address: u64, params: ViewParams) -> AnnotatedView;
+
     async fn subscribe_annotated(
         &self,
         address: u64,
@@ -733,13 +739,23 @@ pub trait Profiler {
         output: vox::Tx<AnnotatedView>,
     );
 
+    async fn flamegraph(&self, params: ViewParams) -> FlamegraphUpdate;
+
     async fn subscribe_flamegraph(&self, params: ViewParams, output: vox::Tx<FlamegraphUpdate>);
+
+    async fn threads(&self) -> ThreadsUpdate;
 
     async fn subscribe_threads(&self, output: vox::Tx<ThreadsUpdate>);
 
     /// Always relative to the full recording (no `filter`); brush
     /// selection happens on top of the unfiltered timeline.
+    async fn timeline(&self, tid: Option<u32>) -> TimelineUpdate;
+
+    /// Always relative to the full recording (no `filter`); brush
+    /// selection happens on top of the unfiltered timeline.
     async fn subscribe_timeline(&self, tid: Option<u32>, output: vox::Tx<TimelineUpdate>);
+
+    async fn neighbors(&self, address: u64, params: ViewParams) -> NeighborsUpdate;
 
     async fn subscribe_neighbors(
         &self,
@@ -747,6 +763,13 @@ pub trait Profiler {
         params: ViewParams,
         output: vox::Tx<NeighborsUpdate>,
     );
+
+    /// Stream "who woke this thread?" updates: top wakers grouped by
+    /// (waker_tid, waker_function), aggregated from the kperf
+    /// MACH_MAKERUNNABLE wakeup edges. The wakee's tid is required;
+    /// `None` produces an empty update (we don't aggregate across
+    /// threads).
+    async fn wakers(&self, wakee_tid: u32) -> WakersUpdate;
 
     /// Stream "who woke this thread?" updates: top wakers grouped by
     /// (waker_tid, waker_function), aggregated from the kperf
@@ -761,12 +784,25 @@ pub trait Profiler {
     /// 30ms..." with each interval colored by reason and clickable
     /// to surface the waker. `flame_key` matches the `r/2/1/0`
     /// addressing the frontend already uses for focus.
+    async fn intervals(&self, flame_key: String, params: ViewParams) -> IntervalListUpdate;
+
+    /// Stream the off-CPU intervals attributed to a single stack
+    /// node, in chronological order. Lets the UI drill into a flame
+    /// box and see "this stack was blocked here for 12ms, here for
+    /// 30ms..." with each interval colored by reason and clickable
+    /// to surface the waker. `flame_key` matches the `r/2/1/0`
+    /// addressing the frontend already uses for focus.
     async fn subscribe_intervals(
         &self,
         flame_key: String,
         params: ViewParams,
         output: vox::Tx<IntervalListUpdate>,
     );
+
+    /// Stream the PET stack-walk hits attributed to a single stack
+    /// node, in chronological order. Symmetric counterpart to
+    /// `subscribe_intervals` for the on-CPU side.
+    async fn pet_samples(&self, flame_key: String, params: ViewParams) -> PetSampleListUpdate;
 
     /// Stream the PET stack-walk hits attributed to a single stack
     /// node, in chronological order. Symmetric counterpart to
@@ -786,6 +822,15 @@ pub trait Profiler {
     /// continue to work against the existing (frozen) data.
     async fn set_paused(&self, paused: bool);
     async fn is_paused(&self) -> bool;
+
+    /// Stream periodic snapshots of the kperf-vs-probe diff:
+    /// per-thread pairing of kperf PET samples with their
+    /// race-against-return probe results, common-suffix histogram,
+    /// drift histogram, and the most recent N entries with both
+    /// stacks symbolicated through the live BinaryRegistry. Pass
+    /// `tid = Some(_)` to scope to a single thread, or `None` for
+    /// all threads.
+    async fn probe_diff(&self, tid: Option<u32>) -> ProbeDiffUpdate;
 
     /// Stream periodic snapshots of the kperf-vs-probe diff:
     /// per-thread pairing of kperf PET samples with their

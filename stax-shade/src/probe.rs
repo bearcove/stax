@@ -25,6 +25,9 @@ use staxd_client::KperfProbeTriggerTiming;
 
 const MAX_FP_FRAMES: usize = 64;
 const MAX_FP_DELTA: u64 = 8 * 1024 * 1024;
+const STACK_SNAPSHOT_BYTES: usize = 512 * 1024;
+const STACK_SNAPSHOT_CHUNK: usize = 16 * 1024;
+const PROBE_UNWIND_QUEUE_CAPACITY: usize = 1024;
 pub struct RaceKperfSink<S> {
     inner: S,
     probe: Option<RaceProbeWorker>,
@@ -128,7 +131,50 @@ impl RaceProbeWorker {
     fn new(task: mach_port_t) -> Self {
         let requests = Arc::new(LatestProbeRequests::default());
         let worker_requests = requests.clone();
+        let (capture_tx, capture_rx) =
+            mpsc::sync_channel::<ProbeCaptureWithKey>(PROBE_UNWIND_QUEUE_CAPACITY);
         let (res_tx, res_rx) = mpsc::channel::<ProbeSnapshotWithKey>();
+        std::thread::Builder::new()
+            .name("stax-race-unwind".to_owned())
+            .spawn(move || {
+                tracing::info!("race-kperf unwind worker started");
+                let mut results_sent: u64 = 0;
+                let mut first_result_logged = false;
+                while let Ok(capture) = capture_rx.recv() {
+                    let mut timing = capture.timing;
+                    let walked = fp_walk_snapshot(&capture.stack, capture.fp);
+                    timing.walk_done = unsafe { mach_absolute_time() };
+                    let out = ProbeSnapshotWithKey {
+                        tid: capture.tid,
+                        timing,
+                        queue: capture.queue,
+                        pc: capture.pc,
+                        lr: capture.lr,
+                        fp: capture.fp,
+                        sp: capture.sp,
+                        walked,
+                    };
+                    if res_tx.send(out).is_err() {
+                        tracing::info!(results_sent, "race-kperf probe result receiver closed");
+                        return;
+                    }
+                    results_sent += 1;
+                    if !first_result_logged {
+                        first_result_logged = true;
+                        tracing::info!(
+                            tid = capture.tid,
+                            kperf_ts = capture.timing.kperf_ts,
+                            results_sent,
+                            coalesced = capture.queue.coalesced_requests,
+                            worker_batch_len = capture.queue.worker_batch_len,
+                            stack_bytes = capture.stack.bytes.len(),
+                            "race-kperf unwind worker sent first result"
+                        );
+                    }
+                }
+                tracing::info!(results_sent, "race-kperf unwind worker exiting");
+            })
+            .expect("spawn race unwind worker");
         std::thread::Builder::new()
             .name("stax-race-probe".to_owned())
             .spawn(move || {
@@ -136,9 +182,9 @@ impl RaceProbeWorker {
                 let mut probe = RaceProbe::new(task);
                 let mut batches: u64 = 0;
                 let mut requests_seen: u64 = 0;
-                let mut results_sent: u64 = 0;
+                let mut captures_sent: u64 = 0;
+                let mut captures_dropped: u64 = 0;
                 let mut first_request_logged = false;
-                let mut first_result_logged = false;
                 while let Some(batch) = worker_requests.take_all() {
                     batches += 1;
                     let worker_batch_len = batch.len() as u32;
@@ -156,40 +202,42 @@ impl RaceProbeWorker {
                         }
                         let mut timing = req.timing;
                         timing.worker_started = unsafe { mach_absolute_time() };
-                        if let Some(snapshot) = probe.probe_sample(req.tid, timing) {
-                            let out = ProbeSnapshotWithKey {
+                        if let Some(capture) = probe.probe_sample(req.tid, timing) {
+                            let out = ProbeCaptureWithKey {
                                 tid: req.tid,
-                                timing: snapshot.timing,
+                                timing: capture.timing,
                                 queue: ProbeQueueStats {
                                     coalesced_requests: req.coalesced_requests,
                                     worker_batch_len,
                                 },
-                                pc: snapshot.pc,
-                                lr: snapshot.lr,
-                                fp: snapshot.fp,
-                                sp: snapshot.sp,
-                                walked: snapshot.walked,
+                                pc: capture.pc,
+                                lr: capture.lr,
+                                fp: capture.fp,
+                                sp: capture.sp,
+                                stack: capture.stack,
                             };
-                            if res_tx.send(out).is_err() {
-                                tracing::info!(
-                                    batches,
-                                    requests_seen,
-                                    results_sent,
-                                    "race-kperf probe result receiver closed"
-                                );
-                                return;
-                            }
-                            results_sent += 1;
-                            if !first_result_logged {
-                                first_result_logged = true;
-                                tracing::info!(
-                                    tid = req.tid,
-                                    kperf_ts = req.timing.kperf_ts,
-                                    results_sent,
-                                    coalesced = req.coalesced_requests,
-                                    worker_batch_len,
-                                    "race-kperf probe worker sent first result"
-                                );
+                            match capture_tx.try_send(out) {
+                                Ok(()) => captures_sent += 1,
+                                Err(mpsc::TrySendError::Full(_)) => {
+                                    captures_dropped += 1;
+                                    if captures_dropped.is_multiple_of(1024) {
+                                        tracing::warn!(
+                                            captures_dropped,
+                                            captures_sent,
+                                            "race-kperf unwind queue full; dropping captures"
+                                        );
+                                    }
+                                }
+                                Err(mpsc::TrySendError::Disconnected(_)) => {
+                                    tracing::info!(
+                                        batches,
+                                        requests_seen,
+                                        captures_sent,
+                                        captures_dropped,
+                                        "race-kperf unwind worker closed"
+                                    );
+                                    return;
+                                }
                             }
                         }
                     }
@@ -197,7 +245,8 @@ impl RaceProbeWorker {
                 tracing::info!(
                     batches,
                     requests_seen,
-                    results_sent,
+                    captures_sent,
+                    captures_dropped,
                     "race-kperf probe worker exiting"
                 );
             })
@@ -349,7 +398,7 @@ impl RaceProbe {
         }
     }
 
-    fn probe_sample(&mut self, tid: u32, mut timing: ProbeTiming) -> Option<ProbeSnapshot> {
+    fn probe_sample(&mut self, tid: u32, mut timing: ProbeTiming) -> Option<ProbeCapture> {
         let thread = self.threads.get(tid)?;
         timing.thread_lookup_done = unsafe { mach_absolute_time() };
         match self.probe_thread(thread, timing) {
@@ -366,7 +415,7 @@ impl RaceProbe {
         &self,
         thread: thread_act_t,
         mut timing: ProbeTiming,
-    ) -> Result<ProbeSnapshot, ProbeError> {
+    ) -> Result<ProbeCapture, ProbeError> {
         let kr = unsafe { thread_suspend(thread) };
         if kr != KERN_SUCCESS {
             return Err(ProbeError::Kernel {
@@ -382,6 +431,7 @@ impl RaceProbe {
                 return Err(err);
             }
         };
+        let stack = copy_stack_window(self.task, state.sp);
         timing.state_done = unsafe { mach_absolute_time() };
         let resume_kr = unsafe { thread_resume(thread) };
         timing.resume_done = unsafe { mach_absolute_time() };
@@ -392,26 +442,24 @@ impl RaceProbe {
             });
         }
 
-        let walked = fp_walk(self.task, state.fp);
-        timing.walk_done = unsafe { mach_absolute_time() };
-        Ok(ProbeSnapshot {
+        Ok(ProbeCapture {
             timing,
             pc: strip_ptr(state.pc),
             lr: strip_ptr(state.lr),
             fp: strip_ptr(state.fp),
             sp: strip_ptr(state.sp),
-            walked,
+            stack,
         })
     }
 }
 
-struct ProbeSnapshot {
+struct ProbeCapture {
     timing: ProbeTiming,
     pc: u64,
     lr: u64,
     fp: u64,
     sp: u64,
-    walked: Vec<u64>,
+    stack: StackSnapshot,
 }
 
 struct ProbeRequest {
@@ -444,11 +492,27 @@ struct ProbeSnapshotWithKey {
     walked: Vec<u64>,
 }
 
+struct ProbeCaptureWithKey {
+    tid: u32,
+    timing: ProbeTiming,
+    queue: ProbeQueueStats,
+    pc: u64,
+    lr: u64,
+    fp: u64,
+    sp: u64,
+    stack: StackSnapshot,
+}
+
 struct ThreadState {
     pc: u64,
     lr: u64,
     fp: u64,
     sp: u64,
+}
+
+struct StackSnapshot {
+    base: u64,
+    bytes: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -545,14 +609,14 @@ fn deallocate_port(port: mach_port_t) {
     let _ = unsafe { mach_port_deallocate(mach_task_self(), port) };
 }
 
-fn fp_walk(task: mach_port_t, mut fp: u64) -> Vec<u64> {
+fn fp_walk_snapshot(stack: &StackSnapshot, mut fp: u64) -> Vec<u64> {
     let mut out = Vec::new();
     fp = strip_ptr(fp);
     for _ in 0..MAX_FP_FRAMES {
         if fp == 0 || fp & 0xf != 0 {
             break;
         }
-        let Some((next_fp, ret)) = read_frame_record(task, fp) else {
+        let Some((next_fp, ret)) = stack.read_frame_record(fp) else {
             break;
         };
         let next_fp = strip_ptr(next_fp);
@@ -569,23 +633,43 @@ fn fp_walk(task: mach_port_t, mut fp: u64) -> Vec<u64> {
     out
 }
 
-fn read_frame_record(task: mach_port_t, fp: u64) -> Option<(u64, u64)> {
-    let mut pair = [0u64; 2];
-    let mut got: mach_vm_size_t = 0;
-    let kr = unsafe {
-        mach_vm_read_overwrite(
-            task,
-            fp as mach_vm_address_t,
-            std::mem::size_of_val(&pair) as mach_vm_size_t,
-            pair.as_mut_ptr() as mach_vm_address_t,
-            &mut got,
-        )
-    };
-    if kr == KERN_SUCCESS && got as usize == std::mem::size_of_val(&pair) {
-        Some((pair[0], pair[1]))
-    } else {
-        None
+impl StackSnapshot {
+    fn read_frame_record(&self, fp: u64) -> Option<(u64, u64)> {
+        let offset = fp.checked_sub(self.base)? as usize;
+        let end = offset.checked_add(16)?;
+        let bytes = self.bytes.get(offset..end)?;
+        let next_fp = u64::from_ne_bytes(bytes[0..8].try_into().ok()?);
+        let ret = u64::from_ne_bytes(bytes[8..16].try_into().ok()?);
+        Some((next_fp, ret))
     }
+}
+
+fn copy_stack_window(task: mach_port_t, sp: u64) -> StackSnapshot {
+    let base = strip_ptr(sp);
+    let mut bytes = vec![0u8; STACK_SNAPSHOT_BYTES];
+    let mut copied = 0usize;
+    while copied < STACK_SNAPSHOT_BYTES {
+        let chunk = (STACK_SNAPSHOT_BYTES - copied).min(STACK_SNAPSHOT_CHUNK);
+        let mut got: mach_vm_size_t = 0;
+        let kr = unsafe {
+            mach_vm_read_overwrite(
+                task,
+                base.saturating_add(copied as u64) as mach_vm_address_t,
+                chunk as mach_vm_size_t,
+                bytes[copied..].as_mut_ptr() as mach_vm_address_t,
+                &mut got,
+            )
+        };
+        if kr != KERN_SUCCESS || got == 0 {
+            break;
+        }
+        copied = copied.saturating_add(got as usize);
+        if got as usize != chunk {
+            break;
+        }
+    }
+    bytes.truncate(copied);
+    StackSnapshot { base, bytes }
 }
 
 #[cfg(target_arch = "aarch64")]

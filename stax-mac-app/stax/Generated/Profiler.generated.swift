@@ -9,18 +9,28 @@ import VoxRuntime
 
 public enum ProfilerMethodId {
     public static let top: UInt64 = 0x4eb5e594c5e49e21
+    public static let topUpdate: UInt64 = 0x7d9fe97f38add11f
     public static let subscribeTop: UInt64 = 0x5e5b065bf333971b
     public static let totalOnCpuNs: UInt64 = 0xe2829a21383119b4
+    public static let annotated: UInt64 = 0xf202b32106aebf48
     public static let subscribeAnnotated: UInt64 = 0xbd08d48f35f68c69
+    public static let flamegraph: UInt64 = 0x4daac56b194b862f
     public static let subscribeFlamegraph: UInt64 = 0x6889c2c730466af0
+    public static let threads: UInt64 = 0x33fb58adecb28dea
     public static let subscribeThreads: UInt64 = 0xbf5f73ea223d9f7d
+    public static let timeline: UInt64 = 0xae55e9be2dc6a39a
     public static let subscribeTimeline: UInt64 = 0xc3381210c17fc3c4
+    public static let neighbors: UInt64 = 0xb289f4d7e911ad10
     public static let subscribeNeighbors: UInt64 = 0x42acdf6aa85cc2d3
+    public static let wakers: UInt64 = 0x03a2a085cf611098
     public static let subscribeWakers: UInt64 = 0xc6ab2f2a4444e87c
+    public static let intervals: UInt64 = 0x0e5152fe1d5189e0
     public static let subscribeIntervals: UInt64 = 0xc689c5fb8e7ec474
+    public static let petSamples: UInt64 = 0xf8b0a4d361f215d6
     public static let subscribePetSamples: UInt64 = 0xca1b65cabd8a8f38
     public static let setPaused: UInt64 = 0x0ffcbbadd058c8f7
     public static let isPaused: UInt64 = 0xfbcae644722d364e
+    public static let probeDiff: UInt64 = 0xc853dfab2eb75d77
     public static let subscribeProbeDiff: UInt64 = 0x45bb91e63c98208a
 }
 
@@ -30,19 +40,35 @@ public protocol ProfilerCaller {
     ///  Snapshot of the top-N functions, ranked by `sort`. `params`
     ///  bundles thread/time/exclude filters.
     func top(limit: UInt32, sort: TopSort, params: ViewParams) async throws -> [TopEntry]
+    ///  One-shot top-function snapshot, including totals. UIs may poll
+    ///  this instead of opening a long-lived channel.
+    func topUpdate(limit: UInt32, sort: TopSort, params: ViewParams) async throws -> TopUpdate
     func subscribeTop(limit: UInt32, sort: TopSort, params: ViewParams, output: UnboundTx<TopUpdate>) async throws
     ///  Total on-CPU time across every thread, in nanoseconds.
     ///  Bounded by `cores × wall_time` (you can't be on more than one
     ///  CPU at a time, and there are only so many CPUs). Useful for
     ///  "X CPU-seconds across the recording" displays.
     func totalOnCpuNs() async throws -> UInt64
+    func annotated(address: UInt64, params: ViewParams) async throws -> AnnotatedView
     func subscribeAnnotated(address: UInt64, params: ViewParams, output: UnboundTx<AnnotatedView>) async throws
+    func flamegraph(params: ViewParams) async throws -> FlamegraphUpdate
     func subscribeFlamegraph(params: ViewParams, output: UnboundTx<FlamegraphUpdate>) async throws
+    func threads() async throws -> ThreadsUpdate
     func subscribeThreads(output: UnboundTx<ThreadsUpdate>) async throws
     ///  Always relative to the full recording (no `filter`); brush
     ///  selection happens on top of the unfiltered timeline.
+    func timeline(tid: UInt32?) async throws -> TimelineUpdate
+    ///  Always relative to the full recording (no `filter`); brush
+    ///  selection happens on top of the unfiltered timeline.
     func subscribeTimeline(tid: UInt32?, output: UnboundTx<TimelineUpdate>) async throws
+    func neighbors(address: UInt64, params: ViewParams) async throws -> NeighborsUpdate
     func subscribeNeighbors(address: UInt64, params: ViewParams, output: UnboundTx<NeighborsUpdate>) async throws
+    ///  Stream "who woke this thread?" updates: top wakers grouped by
+    ///  (waker_tid, waker_function), aggregated from the kperf
+    ///  MACH_MAKERUNNABLE wakeup edges. The wakee's tid is required;
+    ///  `None` produces an empty update (we don't aggregate across
+    ///  threads).
+    func wakers(wakeeTid: UInt32) async throws -> WakersUpdate
     ///  Stream "who woke this thread?" updates: top wakers grouped by
     ///  (waker_tid, waker_function), aggregated from the kperf
     ///  MACH_MAKERUNNABLE wakeup edges. The wakee's tid is required;
@@ -55,7 +81,18 @@ public protocol ProfilerCaller {
     ///  30ms..." with each interval colored by reason and clickable
     ///  to surface the waker. `flame_key` matches the `r/2/1/0`
     ///  addressing the frontend already uses for focus.
+    func intervals(flameKey: String, params: ViewParams) async throws -> IntervalListUpdate
+    ///  Stream the off-CPU intervals attributed to a single stack
+    ///  node, in chronological order. Lets the UI drill into a flame
+    ///  box and see "this stack was blocked here for 12ms, here for
+    ///  30ms..." with each interval colored by reason and clickable
+    ///  to surface the waker. `flame_key` matches the `r/2/1/0`
+    ///  addressing the frontend already uses for focus.
     func subscribeIntervals(flameKey: String, params: ViewParams, output: UnboundTx<IntervalListUpdate>) async throws
+    ///  Stream the PET stack-walk hits attributed to a single stack
+    ///  node, in chronological order. Symmetric counterpart to
+    ///  `subscribe_intervals` for the on-CPU side.
+    func petSamples(flameKey: String, params: ViewParams) async throws -> PetSampleListUpdate
     ///  Stream the PET stack-walk hits attributed to a single stack
     ///  node, in chronological order. Symmetric counterpart to
     ///  `subscribe_intervals` for the on-CPU side.
@@ -68,6 +105,14 @@ public protocol ProfilerCaller {
     ///  continue to work against the existing (frozen) data.
     func setPaused(paused: Bool) async throws
     func isPaused() async throws -> Bool
+    ///  Stream periodic snapshots of the kperf-vs-probe diff:
+    ///  per-thread pairing of kperf PET samples with their
+    ///  race-against-return probe results, common-suffix histogram,
+    ///  drift histogram, and the most recent N entries with both
+    ///  stacks symbolicated through the live BinaryRegistry. Pass
+    ///  `tid = Some(_)` to scope to a single thread, or `None` for
+    ///  all threads.
+    func probeDiff(tid: UInt32?) async throws -> ProbeDiffUpdate
     ///  Stream periodic snapshots of the kperf-vs-probe diff:
     ///  per-thread pairing of kperf PET samples with their
     ///  race-against-return probe results, common-suffix histogram,
@@ -97,6 +142,33 @@ public final class ProfilerClient: ProfilerCaller, Sendable {
         let response = try await connection.call(methodId: 0x4eb5e594c5e49e21, metadata: [], payload: payload, retry: .volatile, timeout: timeout, prepareRetry: nil, finalizeChannels: nil, schemaInfo: schemaInfo)
         return try decodeInfallibleResponse(response) { buf in
             let result = try decodeVec(from: &buf, decoder: { buf in try decodeTopEntry(from: &buf) })
+            return result
+        }
+    }
+
+    public func topUpdate(limit: UInt32, sort: TopSort, params: ViewParams) async throws -> TopUpdate {
+        var buffer = ByteBufferAllocator().buffer(capacity: 64)
+        encodeU32(limit, into: &buffer)
+        encodeTopSort(sort, into: &buffer)
+        encodeViewParams(params, into: &buffer)
+        let payload = buffer.readBytes(length: buffer.readableBytes) ?? []
+        let schemaInfo = ClientSchemaInfo(methodInfo: profiler_method_schemas[0x7d9fe97f38add11f]!, schemaRegistry: profiler_schema_registry)
+        let response = try await connection.call(methodId: 0x7d9fe97f38add11f, metadata: [], payload: payload, retry: .volatile, timeout: timeout, prepareRetry: nil, finalizeChannels: nil, schemaInfo: schemaInfo)
+        return try decodeInfallibleResponse(response) { buf in
+            let _result_totalOnCpuNs = try decodeVarint(from: &buf)
+            let __result_totalOffCpu_idleNs = try decodeVarint(from: &buf)
+            let __result_totalOffCpu_lockNs = try decodeVarint(from: &buf)
+            let __result_totalOffCpu_semaphoreNs = try decodeVarint(from: &buf)
+            let __result_totalOffCpu_ipcNs = try decodeVarint(from: &buf)
+            let __result_totalOffCpu_ioReadNs = try decodeVarint(from: &buf)
+            let __result_totalOffCpu_ioWriteNs = try decodeVarint(from: &buf)
+            let __result_totalOffCpu_readinessNs = try decodeVarint(from: &buf)
+            let __result_totalOffCpu_sleepNs = try decodeVarint(from: &buf)
+            let __result_totalOffCpu_connectNs = try decodeVarint(from: &buf)
+            let __result_totalOffCpu_otherNs = try decodeVarint(from: &buf)
+            let _result_totalOffCpu = OffCpuBreakdown(idleNs: __result_totalOffCpu_idleNs, lockNs: __result_totalOffCpu_lockNs, semaphoreNs: __result_totalOffCpu_semaphoreNs, ipcNs: __result_totalOffCpu_ipcNs, ioReadNs: __result_totalOffCpu_ioReadNs, ioWriteNs: __result_totalOffCpu_ioWriteNs, readinessNs: __result_totalOffCpu_readinessNs, sleepNs: __result_totalOffCpu_sleepNs, connectNs: __result_totalOffCpu_connectNs, otherNs: __result_totalOffCpu_otherNs)
+            let _result_entries = try decodeVec(from: &buf, decoder: { buf in try decodeTopEntry(from: &buf) })
+            let result = TopUpdate(totalOnCpuNs: _result_totalOnCpuNs, totalOffCpu: _result_totalOffCpu, entries: _result_entries)
             return result
         }
     }
@@ -137,6 +209,24 @@ public final class ProfilerClient: ProfilerCaller, Sendable {
         }
     }
 
+    public func annotated(address: UInt64, params: ViewParams) async throws -> AnnotatedView {
+        var buffer = ByteBufferAllocator().buffer(capacity: 64)
+        encodeVarint(address, into: &buffer)
+        encodeViewParams(params, into: &buffer)
+        let payload = buffer.readBytes(length: buffer.readableBytes) ?? []
+        let schemaInfo = ClientSchemaInfo(methodInfo: profiler_method_schemas[0xf202b32106aebf48]!, schemaRegistry: profiler_schema_registry)
+        let response = try await connection.call(methodId: 0xf202b32106aebf48, metadata: [], payload: payload, retry: .volatile, timeout: timeout, prepareRetry: nil, finalizeChannels: nil, schemaInfo: schemaInfo)
+        return try decodeInfallibleResponse(response) { buf in
+            let _result_functionName = try decodeString(from: &buf)
+            let _result_language = try decodeString(from: &buf)
+            let _result_baseAddress = try decodeVarint(from: &buf)
+            let _result_queriedAddress = try decodeVarint(from: &buf)
+            let _result_lines = try decodeVec(from: &buf, decoder: { buf in try decodeAnnotatedLine(from: &buf) })
+            let result = AnnotatedView(functionName: _result_functionName, language: _result_language, baseAddress: _result_baseAddress, queriedAddress: _result_queriedAddress, lines: _result_lines)
+            return result
+        }
+    }
+
     public func subscribeAnnotated(address: UInt64, params: ViewParams, output: UnboundTx<AnnotatedView>) async throws {
         let schemaInfo = ClientSchemaInfo(methodInfo: profiler_method_schemas[0xbd08d48f35f68c69]!, schemaRegistry: profiler_schema_registry)
         let prepareRetry: @Sendable () async -> PreparedRetryRequest = { [connection] in
@@ -160,6 +250,56 @@ public final class ProfilerClient: ProfilerCaller, Sendable {
 
         let response = try await connection.call(methodId: 0xbd08d48f35f68c69, metadata: [], payload: prepared.payload, retry: .volatile, timeout: timeout, prepareRetry: prepareRetry, finalizeChannels: { finalizeBoundChannels(argsRoot: profiler_method_schemas[0xbd08d48f35f68c69]!.argsRoot, schemaRegistry: profiler_schema_registry, args: [address, params, output]) }, schemaInfo: schemaInfo)
         try decodeInfallibleResponse(response) { _ in }
+    }
+
+    public func flamegraph(params: ViewParams) async throws -> FlamegraphUpdate {
+        var buffer = ByteBufferAllocator().buffer(capacity: 64)
+        encodeViewParams(params, into: &buffer)
+        let payload = buffer.readBytes(length: buffer.readableBytes) ?? []
+        let schemaInfo = ClientSchemaInfo(methodInfo: profiler_method_schemas[0x4daac56b194b862f]!, schemaRegistry: profiler_schema_registry)
+        let response = try await connection.call(methodId: 0x4daac56b194b862f, metadata: [], payload: payload, retry: .volatile, timeout: timeout, prepareRetry: nil, finalizeChannels: nil, schemaInfo: schemaInfo)
+        return try decodeInfallibleResponse(response) { buf in
+            let _result_totalOnCpuNs = try decodeVarint(from: &buf)
+            let __result_totalOffCpu_idleNs = try decodeVarint(from: &buf)
+            let __result_totalOffCpu_lockNs = try decodeVarint(from: &buf)
+            let __result_totalOffCpu_semaphoreNs = try decodeVarint(from: &buf)
+            let __result_totalOffCpu_ipcNs = try decodeVarint(from: &buf)
+            let __result_totalOffCpu_ioReadNs = try decodeVarint(from: &buf)
+            let __result_totalOffCpu_ioWriteNs = try decodeVarint(from: &buf)
+            let __result_totalOffCpu_readinessNs = try decodeVarint(from: &buf)
+            let __result_totalOffCpu_sleepNs = try decodeVarint(from: &buf)
+            let __result_totalOffCpu_connectNs = try decodeVarint(from: &buf)
+            let __result_totalOffCpu_otherNs = try decodeVarint(from: &buf)
+            let _result_totalOffCpu = OffCpuBreakdown(idleNs: __result_totalOffCpu_idleNs, lockNs: __result_totalOffCpu_lockNs, semaphoreNs: __result_totalOffCpu_semaphoreNs, ipcNs: __result_totalOffCpu_ipcNs, ioReadNs: __result_totalOffCpu_ioReadNs, ioWriteNs: __result_totalOffCpu_ioWriteNs, readinessNs: __result_totalOffCpu_readinessNs, sleepNs: __result_totalOffCpu_sleepNs, connectNs: __result_totalOffCpu_connectNs, otherNs: __result_totalOffCpu_otherNs)
+            let _result_strings = try decodeVec(from: &buf, decoder: { buf in try decodeString(from: &buf) })
+            let __result_root_address = try decodeVarint(from: &buf)
+            let __result_root_functionName = try decodeOption(from: &buf, decoder: { buf in try decodeU32(from: &buf) })
+            let __result_root_binary = try decodeOption(from: &buf, decoder: { buf in try decodeU32(from: &buf) })
+            let __result_root_isMain = try decodeBool(from: &buf)
+            let __result_root_language = try decodeU32(from: &buf)
+            let __result_root_onCpuNs = try decodeVarint(from: &buf)
+            let ___result_root_offCpu_idleNs = try decodeVarint(from: &buf)
+            let ___result_root_offCpu_lockNs = try decodeVarint(from: &buf)
+            let ___result_root_offCpu_semaphoreNs = try decodeVarint(from: &buf)
+            let ___result_root_offCpu_ipcNs = try decodeVarint(from: &buf)
+            let ___result_root_offCpu_ioReadNs = try decodeVarint(from: &buf)
+            let ___result_root_offCpu_ioWriteNs = try decodeVarint(from: &buf)
+            let ___result_root_offCpu_readinessNs = try decodeVarint(from: &buf)
+            let ___result_root_offCpu_sleepNs = try decodeVarint(from: &buf)
+            let ___result_root_offCpu_connectNs = try decodeVarint(from: &buf)
+            let ___result_root_offCpu_otherNs = try decodeVarint(from: &buf)
+            let __result_root_offCpu = OffCpuBreakdown(idleNs: ___result_root_offCpu_idleNs, lockNs: ___result_root_offCpu_lockNs, semaphoreNs: ___result_root_offCpu_semaphoreNs, ipcNs: ___result_root_offCpu_ipcNs, ioReadNs: ___result_root_offCpu_ioReadNs, ioWriteNs: ___result_root_offCpu_ioWriteNs, readinessNs: ___result_root_offCpu_readinessNs, sleepNs: ___result_root_offCpu_sleepNs, connectNs: ___result_root_offCpu_connectNs, otherNs: ___result_root_offCpu_otherNs)
+            let __result_root_petSamples = try decodeVarint(from: &buf)
+            let __result_root_offCpuIntervals = try decodeVarint(from: &buf)
+            let __result_root_cycles = try decodeVarint(from: &buf)
+            let __result_root_instructions = try decodeVarint(from: &buf)
+            let __result_root_l1dMisses = try decodeVarint(from: &buf)
+            let __result_root_branchMispreds = try decodeVarint(from: &buf)
+            let __result_root_children = try decodeVec(from: &buf, decoder: { buf in try decodeFlameNode(from: &buf) })
+            let _result_root = FlameNode(address: __result_root_address, functionName: __result_root_functionName, binary: __result_root_binary, isMain: __result_root_isMain, language: __result_root_language, onCpuNs: __result_root_onCpuNs, offCpu: __result_root_offCpu, petSamples: __result_root_petSamples, offCpuIntervals: __result_root_offCpuIntervals, cycles: __result_root_cycles, instructions: __result_root_instructions, l1dMisses: __result_root_l1dMisses, branchMispreds: __result_root_branchMispreds, children: __result_root_children)
+            let result = FlamegraphUpdate(totalOnCpuNs: _result_totalOnCpuNs, totalOffCpu: _result_totalOffCpu, strings: _result_strings, root: _result_root)
+            return result
+        }
     }
 
     public func subscribeFlamegraph(params: ViewParams, output: UnboundTx<FlamegraphUpdate>) async throws {
@@ -186,6 +326,17 @@ public final class ProfilerClient: ProfilerCaller, Sendable {
         try decodeInfallibleResponse(response) { _ in }
     }
 
+    public func threads() async throws -> ThreadsUpdate {
+        let payload: [UInt8] = []
+        let schemaInfo = ClientSchemaInfo(methodInfo: profiler_method_schemas[0x33fb58adecb28dea]!, schemaRegistry: profiler_schema_registry)
+        let response = try await connection.call(methodId: 0x33fb58adecb28dea, metadata: [], payload: payload, retry: .volatile, timeout: timeout, prepareRetry: nil, finalizeChannels: nil, schemaInfo: schemaInfo)
+        return try decodeInfallibleResponse(response) { buf in
+            let _result_threads = try decodeVec(from: &buf, decoder: { buf in try decodeThreadInfo(from: &buf) })
+            let result = ThreadsUpdate(threads: _result_threads)
+            return result
+        }
+    }
+
     public func subscribeThreads(output: UnboundTx<ThreadsUpdate>) async throws {
         let schemaInfo = ClientSchemaInfo(methodInfo: profiler_method_schemas[0xbf5f73ea223d9f7d]!, schemaRegistry: profiler_schema_registry)
         let prepareRetry: @Sendable () async -> PreparedRetryRequest = { [connection] in
@@ -207,6 +358,23 @@ public final class ProfilerClient: ProfilerCaller, Sendable {
 
         let response = try await connection.call(methodId: 0xbf5f73ea223d9f7d, metadata: [], payload: prepared.payload, retry: .volatile, timeout: timeout, prepareRetry: prepareRetry, finalizeChannels: { finalizeBoundChannels(argsRoot: profiler_method_schemas[0xbf5f73ea223d9f7d]!.argsRoot, schemaRegistry: profiler_schema_registry, args: [output]) }, schemaInfo: schemaInfo)
         try decodeInfallibleResponse(response) { _ in }
+    }
+
+    public func timeline(tid: UInt32?) async throws -> TimelineUpdate {
+        var buffer = ByteBufferAllocator().buffer(capacity: 64)
+        encodeOption(tid, into: &buffer, encoder: { val, buf in encodeU32(val, into: &buf) })
+        let payload = buffer.readBytes(length: buffer.readableBytes) ?? []
+        let schemaInfo = ClientSchemaInfo(methodInfo: profiler_method_schemas[0xae55e9be2dc6a39a]!, schemaRegistry: profiler_schema_registry)
+        let response = try await connection.call(methodId: 0xae55e9be2dc6a39a, metadata: [], payload: payload, retry: .volatile, timeout: timeout, prepareRetry: nil, finalizeChannels: nil, schemaInfo: schemaInfo)
+        return try decodeInfallibleResponse(response) { buf in
+            let _result_bucketSizeNs = try decodeVarint(from: &buf)
+            let _result_recordingDurationNs = try decodeVarint(from: &buf)
+            let _result_totalOnCpuNs = try decodeVarint(from: &buf)
+            let _result_totalOffCpuNs = try decodeVarint(from: &buf)
+            let _result_buckets = try decodeVec(from: &buf, decoder: { buf in try decodeTimelineBucket(from: &buf) })
+            let result = TimelineUpdate(bucketSizeNs: _result_bucketSizeNs, recordingDurationNs: _result_recordingDurationNs, totalOnCpuNs: _result_totalOnCpuNs, totalOffCpuNs: _result_totalOffCpuNs, buckets: _result_buckets)
+            return result
+        }
     }
 
     public func subscribeTimeline(tid: UInt32?, output: UnboundTx<TimelineUpdate>) async throws {
@@ -231,6 +399,88 @@ public final class ProfilerClient: ProfilerCaller, Sendable {
 
         let response = try await connection.call(methodId: 0xc3381210c17fc3c4, metadata: [], payload: prepared.payload, retry: .volatile, timeout: timeout, prepareRetry: prepareRetry, finalizeChannels: { finalizeBoundChannels(argsRoot: profiler_method_schemas[0xc3381210c17fc3c4]!.argsRoot, schemaRegistry: profiler_schema_registry, args: [tid, output]) }, schemaInfo: schemaInfo)
         try decodeInfallibleResponse(response) { _ in }
+    }
+
+    public func neighbors(address: UInt64, params: ViewParams) async throws -> NeighborsUpdate {
+        var buffer = ByteBufferAllocator().buffer(capacity: 64)
+        encodeVarint(address, into: &buffer)
+        encodeViewParams(params, into: &buffer)
+        let payload = buffer.readBytes(length: buffer.readableBytes) ?? []
+        let schemaInfo = ClientSchemaInfo(methodInfo: profiler_method_schemas[0xb289f4d7e911ad10]!, schemaRegistry: profiler_schema_registry)
+        let response = try await connection.call(methodId: 0xb289f4d7e911ad10, metadata: [], payload: payload, retry: .volatile, timeout: timeout, prepareRetry: nil, finalizeChannels: nil, schemaInfo: schemaInfo)
+        return try decodeInfallibleResponse(response) { buf in
+            let _result_strings = try decodeVec(from: &buf, decoder: { buf in try decodeString(from: &buf) })
+            let _result_functionName = try decodeOption(from: &buf, decoder: { buf in try decodeU32(from: &buf) })
+            let _result_binary = try decodeOption(from: &buf, decoder: { buf in try decodeU32(from: &buf) })
+            let _result_isMain = try decodeBool(from: &buf)
+            let _result_language = try decodeU32(from: &buf)
+            let _result_ownOnCpuNs = try decodeVarint(from: &buf)
+            let __result_ownOffCpu_idleNs = try decodeVarint(from: &buf)
+            let __result_ownOffCpu_lockNs = try decodeVarint(from: &buf)
+            let __result_ownOffCpu_semaphoreNs = try decodeVarint(from: &buf)
+            let __result_ownOffCpu_ipcNs = try decodeVarint(from: &buf)
+            let __result_ownOffCpu_ioReadNs = try decodeVarint(from: &buf)
+            let __result_ownOffCpu_ioWriteNs = try decodeVarint(from: &buf)
+            let __result_ownOffCpu_readinessNs = try decodeVarint(from: &buf)
+            let __result_ownOffCpu_sleepNs = try decodeVarint(from: &buf)
+            let __result_ownOffCpu_connectNs = try decodeVarint(from: &buf)
+            let __result_ownOffCpu_otherNs = try decodeVarint(from: &buf)
+            let _result_ownOffCpu = OffCpuBreakdown(idleNs: __result_ownOffCpu_idleNs, lockNs: __result_ownOffCpu_lockNs, semaphoreNs: __result_ownOffCpu_semaphoreNs, ipcNs: __result_ownOffCpu_ipcNs, ioReadNs: __result_ownOffCpu_ioReadNs, ioWriteNs: __result_ownOffCpu_ioWriteNs, readinessNs: __result_ownOffCpu_readinessNs, sleepNs: __result_ownOffCpu_sleepNs, connectNs: __result_ownOffCpu_connectNs, otherNs: __result_ownOffCpu_otherNs)
+            let _result_ownPetSamples = try decodeVarint(from: &buf)
+            let _result_ownOffCpuIntervals = try decodeVarint(from: &buf)
+            let __result_callersTree_address = try decodeVarint(from: &buf)
+            let __result_callersTree_functionName = try decodeOption(from: &buf, decoder: { buf in try decodeU32(from: &buf) })
+            let __result_callersTree_binary = try decodeOption(from: &buf, decoder: { buf in try decodeU32(from: &buf) })
+            let __result_callersTree_isMain = try decodeBool(from: &buf)
+            let __result_callersTree_language = try decodeU32(from: &buf)
+            let __result_callersTree_onCpuNs = try decodeVarint(from: &buf)
+            let ___result_callersTree_offCpu_idleNs = try decodeVarint(from: &buf)
+            let ___result_callersTree_offCpu_lockNs = try decodeVarint(from: &buf)
+            let ___result_callersTree_offCpu_semaphoreNs = try decodeVarint(from: &buf)
+            let ___result_callersTree_offCpu_ipcNs = try decodeVarint(from: &buf)
+            let ___result_callersTree_offCpu_ioReadNs = try decodeVarint(from: &buf)
+            let ___result_callersTree_offCpu_ioWriteNs = try decodeVarint(from: &buf)
+            let ___result_callersTree_offCpu_readinessNs = try decodeVarint(from: &buf)
+            let ___result_callersTree_offCpu_sleepNs = try decodeVarint(from: &buf)
+            let ___result_callersTree_offCpu_connectNs = try decodeVarint(from: &buf)
+            let ___result_callersTree_offCpu_otherNs = try decodeVarint(from: &buf)
+            let __result_callersTree_offCpu = OffCpuBreakdown(idleNs: ___result_callersTree_offCpu_idleNs, lockNs: ___result_callersTree_offCpu_lockNs, semaphoreNs: ___result_callersTree_offCpu_semaphoreNs, ipcNs: ___result_callersTree_offCpu_ipcNs, ioReadNs: ___result_callersTree_offCpu_ioReadNs, ioWriteNs: ___result_callersTree_offCpu_ioWriteNs, readinessNs: ___result_callersTree_offCpu_readinessNs, sleepNs: ___result_callersTree_offCpu_sleepNs, connectNs: ___result_callersTree_offCpu_connectNs, otherNs: ___result_callersTree_offCpu_otherNs)
+            let __result_callersTree_petSamples = try decodeVarint(from: &buf)
+            let __result_callersTree_offCpuIntervals = try decodeVarint(from: &buf)
+            let __result_callersTree_cycles = try decodeVarint(from: &buf)
+            let __result_callersTree_instructions = try decodeVarint(from: &buf)
+            let __result_callersTree_l1dMisses = try decodeVarint(from: &buf)
+            let __result_callersTree_branchMispreds = try decodeVarint(from: &buf)
+            let __result_callersTree_children = try decodeVec(from: &buf, decoder: { buf in try decodeFlameNode(from: &buf) })
+            let _result_callersTree = FlameNode(address: __result_callersTree_address, functionName: __result_callersTree_functionName, binary: __result_callersTree_binary, isMain: __result_callersTree_isMain, language: __result_callersTree_language, onCpuNs: __result_callersTree_onCpuNs, offCpu: __result_callersTree_offCpu, petSamples: __result_callersTree_petSamples, offCpuIntervals: __result_callersTree_offCpuIntervals, cycles: __result_callersTree_cycles, instructions: __result_callersTree_instructions, l1dMisses: __result_callersTree_l1dMisses, branchMispreds: __result_callersTree_branchMispreds, children: __result_callersTree_children)
+            let __result_calleesTree_address = try decodeVarint(from: &buf)
+            let __result_calleesTree_functionName = try decodeOption(from: &buf, decoder: { buf in try decodeU32(from: &buf) })
+            let __result_calleesTree_binary = try decodeOption(from: &buf, decoder: { buf in try decodeU32(from: &buf) })
+            let __result_calleesTree_isMain = try decodeBool(from: &buf)
+            let __result_calleesTree_language = try decodeU32(from: &buf)
+            let __result_calleesTree_onCpuNs = try decodeVarint(from: &buf)
+            let ___result_calleesTree_offCpu_idleNs = try decodeVarint(from: &buf)
+            let ___result_calleesTree_offCpu_lockNs = try decodeVarint(from: &buf)
+            let ___result_calleesTree_offCpu_semaphoreNs = try decodeVarint(from: &buf)
+            let ___result_calleesTree_offCpu_ipcNs = try decodeVarint(from: &buf)
+            let ___result_calleesTree_offCpu_ioReadNs = try decodeVarint(from: &buf)
+            let ___result_calleesTree_offCpu_ioWriteNs = try decodeVarint(from: &buf)
+            let ___result_calleesTree_offCpu_readinessNs = try decodeVarint(from: &buf)
+            let ___result_calleesTree_offCpu_sleepNs = try decodeVarint(from: &buf)
+            let ___result_calleesTree_offCpu_connectNs = try decodeVarint(from: &buf)
+            let ___result_calleesTree_offCpu_otherNs = try decodeVarint(from: &buf)
+            let __result_calleesTree_offCpu = OffCpuBreakdown(idleNs: ___result_calleesTree_offCpu_idleNs, lockNs: ___result_calleesTree_offCpu_lockNs, semaphoreNs: ___result_calleesTree_offCpu_semaphoreNs, ipcNs: ___result_calleesTree_offCpu_ipcNs, ioReadNs: ___result_calleesTree_offCpu_ioReadNs, ioWriteNs: ___result_calleesTree_offCpu_ioWriteNs, readinessNs: ___result_calleesTree_offCpu_readinessNs, sleepNs: ___result_calleesTree_offCpu_sleepNs, connectNs: ___result_calleesTree_offCpu_connectNs, otherNs: ___result_calleesTree_offCpu_otherNs)
+            let __result_calleesTree_petSamples = try decodeVarint(from: &buf)
+            let __result_calleesTree_offCpuIntervals = try decodeVarint(from: &buf)
+            let __result_calleesTree_cycles = try decodeVarint(from: &buf)
+            let __result_calleesTree_instructions = try decodeVarint(from: &buf)
+            let __result_calleesTree_l1dMisses = try decodeVarint(from: &buf)
+            let __result_calleesTree_branchMispreds = try decodeVarint(from: &buf)
+            let __result_calleesTree_children = try decodeVec(from: &buf, decoder: { buf in try decodeFlameNode(from: &buf) })
+            let _result_calleesTree = FlameNode(address: __result_calleesTree_address, functionName: __result_calleesTree_functionName, binary: __result_calleesTree_binary, isMain: __result_calleesTree_isMain, language: __result_calleesTree_language, onCpuNs: __result_calleesTree_onCpuNs, offCpu: __result_calleesTree_offCpu, petSamples: __result_calleesTree_petSamples, offCpuIntervals: __result_calleesTree_offCpuIntervals, cycles: __result_calleesTree_cycles, instructions: __result_calleesTree_instructions, l1dMisses: __result_calleesTree_l1dMisses, branchMispreds: __result_calleesTree_branchMispreds, children: __result_calleesTree_children)
+            let result = NeighborsUpdate(strings: _result_strings, functionName: _result_functionName, binary: _result_binary, isMain: _result_isMain, language: _result_language, ownOnCpuNs: _result_ownOnCpuNs, ownOffCpu: _result_ownOffCpu, ownPetSamples: _result_ownPetSamples, ownOffCpuIntervals: _result_ownOffCpuIntervals, callersTree: _result_callersTree, calleesTree: _result_calleesTree)
+            return result
+        }
     }
 
     public func subscribeNeighbors(address: UInt64, params: ViewParams, output: UnboundTx<NeighborsUpdate>) async throws {
@@ -258,6 +508,21 @@ public final class ProfilerClient: ProfilerCaller, Sendable {
         try decodeInfallibleResponse(response) { _ in }
     }
 
+    public func wakers(wakeeTid: UInt32) async throws -> WakersUpdate {
+        var buffer = ByteBufferAllocator().buffer(capacity: 64)
+        encodeU32(wakeeTid, into: &buffer)
+        let payload = buffer.readBytes(length: buffer.readableBytes) ?? []
+        let schemaInfo = ClientSchemaInfo(methodInfo: profiler_method_schemas[0x03a2a085cf611098]!, schemaRegistry: profiler_schema_registry)
+        let response = try await connection.call(methodId: 0x03a2a085cf611098, metadata: [], payload: payload, retry: .volatile, timeout: timeout, prepareRetry: nil, finalizeChannels: nil, schemaInfo: schemaInfo)
+        return try decodeInfallibleResponse(response) { buf in
+            let _result_wakeeTid = try decodeU32(from: &buf)
+            let _result_totalWakeups = try decodeVarint(from: &buf)
+            let _result_entries = try decodeVec(from: &buf, decoder: { buf in try decodeWakerEntry(from: &buf) })
+            let result = WakersUpdate(wakeeTid: _result_wakeeTid, totalWakeups: _result_totalWakeups, entries: _result_entries)
+            return result
+        }
+    }
+
     public func subscribeWakers(wakeeTid: UInt32, output: UnboundTx<WakersUpdate>) async throws {
         let schemaInfo = ClientSchemaInfo(methodInfo: profiler_method_schemas[0xc6ab2f2a4444e87c]!, schemaRegistry: profiler_schema_registry)
         let prepareRetry: @Sendable () async -> PreparedRetryRequest = { [connection] in
@@ -280,6 +545,34 @@ public final class ProfilerClient: ProfilerCaller, Sendable {
 
         let response = try await connection.call(methodId: 0xc6ab2f2a4444e87c, metadata: [], payload: prepared.payload, retry: .volatile, timeout: timeout, prepareRetry: prepareRetry, finalizeChannels: { finalizeBoundChannels(argsRoot: profiler_method_schemas[0xc6ab2f2a4444e87c]!.argsRoot, schemaRegistry: profiler_schema_registry, args: [wakeeTid, output]) }, schemaInfo: schemaInfo)
         try decodeInfallibleResponse(response) { _ in }
+    }
+
+    public func intervals(flameKey: String, params: ViewParams) async throws -> IntervalListUpdate {
+        var buffer = ByteBufferAllocator().buffer(capacity: 64)
+        encodeString(flameKey, into: &buffer)
+        encodeViewParams(params, into: &buffer)
+        let payload = buffer.readBytes(length: buffer.readableBytes) ?? []
+        let schemaInfo = ClientSchemaInfo(methodInfo: profiler_method_schemas[0x0e5152fe1d5189e0]!, schemaRegistry: profiler_schema_registry)
+        let response = try await connection.call(methodId: 0x0e5152fe1d5189e0, metadata: [], payload: payload, retry: .volatile, timeout: timeout, prepareRetry: nil, finalizeChannels: nil, schemaInfo: schemaInfo)
+        return try decodeInfallibleResponse(response) { buf in
+            let _result_strings = try decodeVec(from: &buf, decoder: { buf in try decodeString(from: &buf) })
+            let _result_totalIntervals = try decodeVarint(from: &buf)
+            let _result_totalDurationNs = try decodeVarint(from: &buf)
+            let __result_byReason_idleNs = try decodeVarint(from: &buf)
+            let __result_byReason_lockNs = try decodeVarint(from: &buf)
+            let __result_byReason_semaphoreNs = try decodeVarint(from: &buf)
+            let __result_byReason_ipcNs = try decodeVarint(from: &buf)
+            let __result_byReason_ioReadNs = try decodeVarint(from: &buf)
+            let __result_byReason_ioWriteNs = try decodeVarint(from: &buf)
+            let __result_byReason_readinessNs = try decodeVarint(from: &buf)
+            let __result_byReason_sleepNs = try decodeVarint(from: &buf)
+            let __result_byReason_connectNs = try decodeVarint(from: &buf)
+            let __result_byReason_otherNs = try decodeVarint(from: &buf)
+            let _result_byReason = OffCpuBreakdown(idleNs: __result_byReason_idleNs, lockNs: __result_byReason_lockNs, semaphoreNs: __result_byReason_semaphoreNs, ipcNs: __result_byReason_ipcNs, ioReadNs: __result_byReason_ioReadNs, ioWriteNs: __result_byReason_ioWriteNs, readinessNs: __result_byReason_readinessNs, sleepNs: __result_byReason_sleepNs, connectNs: __result_byReason_connectNs, otherNs: __result_byReason_otherNs)
+            let _result_entries = try decodeVec(from: &buf, decoder: { buf in try decodeIntervalEntry(from: &buf) })
+            let result = IntervalListUpdate(strings: _result_strings, totalIntervals: _result_totalIntervals, totalDurationNs: _result_totalDurationNs, byReason: _result_byReason, entries: _result_entries)
+            return result
+        }
     }
 
     public func subscribeIntervals(flameKey: String, params: ViewParams, output: UnboundTx<IntervalListUpdate>) async throws {
@@ -305,6 +598,21 @@ public final class ProfilerClient: ProfilerCaller, Sendable {
 
         let response = try await connection.call(methodId: 0xc689c5fb8e7ec474, metadata: [], payload: prepared.payload, retry: .volatile, timeout: timeout, prepareRetry: prepareRetry, finalizeChannels: { finalizeBoundChannels(argsRoot: profiler_method_schemas[0xc689c5fb8e7ec474]!.argsRoot, schemaRegistry: profiler_schema_registry, args: [flameKey, params, output]) }, schemaInfo: schemaInfo)
         try decodeInfallibleResponse(response) { _ in }
+    }
+
+    public func petSamples(flameKey: String, params: ViewParams) async throws -> PetSampleListUpdate {
+        var buffer = ByteBufferAllocator().buffer(capacity: 64)
+        encodeString(flameKey, into: &buffer)
+        encodeViewParams(params, into: &buffer)
+        let payload = buffer.readBytes(length: buffer.readableBytes) ?? []
+        let schemaInfo = ClientSchemaInfo(methodInfo: profiler_method_schemas[0xf8b0a4d361f215d6]!, schemaRegistry: profiler_schema_registry)
+        let response = try await connection.call(methodId: 0xf8b0a4d361f215d6, metadata: [], payload: payload, retry: .volatile, timeout: timeout, prepareRetry: nil, finalizeChannels: nil, schemaInfo: schemaInfo)
+        return try decodeInfallibleResponse(response) { buf in
+            let _result_totalSamples = try decodeVarint(from: &buf)
+            let _result_entries = try decodeVec(from: &buf, decoder: { buf in try decodePetSampleEntry(from: &buf) })
+            let result = PetSampleListUpdate(totalSamples: _result_totalSamples, entries: _result_entries)
+            return result
+        }
     }
 
     public func subscribePetSamples(flameKey: String, params: ViewParams, output: UnboundTx<PetSampleListUpdate>) async throws {
@@ -347,6 +655,66 @@ public final class ProfilerClient: ProfilerCaller, Sendable {
         let response = try await connection.call(methodId: 0xfbcae644722d364e, metadata: [], payload: payload, retry: .volatile, timeout: timeout, prepareRetry: nil, finalizeChannels: nil, schemaInfo: schemaInfo)
         return try decodeInfallibleResponse(response) { buf in
             let result = try decodeBool(from: &buf)
+            return result
+        }
+    }
+
+    public func probeDiff(tid: UInt32?) async throws -> ProbeDiffUpdate {
+        var buffer = ByteBufferAllocator().buffer(capacity: 64)
+        encodeOption(tid, into: &buffer, encoder: { val, buf in encodeU32(val, into: &buf) })
+        let payload = buffer.readBytes(length: buffer.readableBytes) ?? []
+        let schemaInfo = ClientSchemaInfo(methodInfo: profiler_method_schemas[0xc853dfab2eb75d77]!, schemaRegistry: profiler_schema_registry)
+        let response = try await connection.call(methodId: 0xc853dfab2eb75d77, metadata: [], payload: payload, retry: .volatile, timeout: timeout, prepareRetry: nil, finalizeChannels: nil, schemaInfo: schemaInfo)
+        return try decodeInfallibleResponse(response) { buf in
+            let _result_totalKperfSamples = try decodeVarint(from: &buf)
+            let _result_totalProbes = try decodeVarint(from: &buf)
+            let _result_paired = try decodeVarint(from: &buf)
+            let _result_kperfOnly = try decodeVarint(from: &buf)
+            let _result_probeOnly = try decodeVarint(from: &buf)
+            let _result_probeAugmentedKperf = try decodeVarint(from: &buf)
+            let _result_probeWalkedDeeper = try decodeVarint(from: &buf)
+            let _result_commonSuffixHist = try decodeVec(from: &buf, decoder: { buf in try decodeVarint(from: &buf) })
+            let _result_depthMatch = try decodeVec(from: &buf, decoder: { buf in try decodeProbeDiffDepthCell(from: &buf) })
+            let _result_driftBuckets = try decodeVec(from: &buf, decoder: { buf in try decodeProbeDiffBucket(from: &buf) })
+            let __result_timing_samples = try decodeVarint(from: &buf)
+            let __result_timing_avgKperfToEnqueueNs = try decodeVarint(from: &buf)
+            let __result_timing_maxKperfToEnqueueNs = try decodeVarint(from: &buf)
+            let __result_timing_avgKperfToStaxdReadNs = try decodeVarint(from: &buf)
+            let __result_timing_maxKperfToStaxdReadNs = try decodeVarint(from: &buf)
+            let __result_timing_avgStaxdReadNs = try decodeVarint(from: &buf)
+            let __result_timing_maxStaxdReadNs = try decodeVarint(from: &buf)
+            let __result_timing_avgStaxdDrainToSendNs = try decodeVarint(from: &buf)
+            let __result_timing_maxStaxdDrainToSendNs = try decodeVarint(from: &buf)
+            let __result_timing_avgStaxdDrainToQueueNs = try decodeVarint(from: &buf)
+            let __result_timing_maxStaxdDrainToQueueNs = try decodeVarint(from: &buf)
+            let __result_timing_avgStaxdQueueWaitNs = try decodeVarint(from: &buf)
+            let __result_timing_maxStaxdQueueWaitNs = try decodeVarint(from: &buf)
+            let __result_timing_avgStaxdSendToClientRecvNs = try decodeVarint(from: &buf)
+            let __result_timing_maxStaxdSendToClientRecvNs = try decodeVarint(from: &buf)
+            let __result_timing_avgClientRecvToEnqueueNs = try decodeVarint(from: &buf)
+            let __result_timing_maxClientRecvToEnqueueNs = try decodeVarint(from: &buf)
+            let __result_timing_avgQueueWaitNs = try decodeVarint(from: &buf)
+            let __result_timing_maxQueueWaitNs = try decodeVarint(from: &buf)
+            let __result_timing_avgLookupNs = try decodeVarint(from: &buf)
+            let __result_timing_maxLookupNs = try decodeVarint(from: &buf)
+            let __result_timing_avgSuspendStateNs = try decodeVarint(from: &buf)
+            let __result_timing_maxSuspendStateNs = try decodeVarint(from: &buf)
+            let __result_timing_avgResumeNs = try decodeVarint(from: &buf)
+            let __result_timing_maxResumeNs = try decodeVarint(from: &buf)
+            let __result_timing_avgWalkNs = try decodeVarint(from: &buf)
+            let __result_timing_maxWalkNs = try decodeVarint(from: &buf)
+            let __result_timing_avgProbeTotalNs = try decodeVarint(from: &buf)
+            let __result_timing_maxProbeTotalNs = try decodeVarint(from: &buf)
+            let __result_timing_coalescedRequests = try decodeVarint(from: &buf)
+            let __result_timing_maxWorkerBatchLen = try decodeU32(from: &buf)
+            let _result_timing = ProbeTimingSummary(samples: __result_timing_samples, avgKperfToEnqueueNs: __result_timing_avgKperfToEnqueueNs, maxKperfToEnqueueNs: __result_timing_maxKperfToEnqueueNs, avgKperfToStaxdReadNs: __result_timing_avgKperfToStaxdReadNs, maxKperfToStaxdReadNs: __result_timing_maxKperfToStaxdReadNs, avgStaxdReadNs: __result_timing_avgStaxdReadNs, maxStaxdReadNs: __result_timing_maxStaxdReadNs, avgStaxdDrainToSendNs: __result_timing_avgStaxdDrainToSendNs, maxStaxdDrainToSendNs: __result_timing_maxStaxdDrainToSendNs, avgStaxdDrainToQueueNs: __result_timing_avgStaxdDrainToQueueNs, maxStaxdDrainToQueueNs: __result_timing_maxStaxdDrainToQueueNs, avgStaxdQueueWaitNs: __result_timing_avgStaxdQueueWaitNs, maxStaxdQueueWaitNs: __result_timing_maxStaxdQueueWaitNs, avgStaxdSendToClientRecvNs: __result_timing_avgStaxdSendToClientRecvNs, maxStaxdSendToClientRecvNs: __result_timing_maxStaxdSendToClientRecvNs, avgClientRecvToEnqueueNs: __result_timing_avgClientRecvToEnqueueNs, maxClientRecvToEnqueueNs: __result_timing_maxClientRecvToEnqueueNs, avgQueueWaitNs: __result_timing_avgQueueWaitNs, maxQueueWaitNs: __result_timing_maxQueueWaitNs, avgLookupNs: __result_timing_avgLookupNs, maxLookupNs: __result_timing_maxLookupNs, avgSuspendStateNs: __result_timing_avgSuspendStateNs, maxSuspendStateNs: __result_timing_maxSuspendStateNs, avgResumeNs: __result_timing_avgResumeNs, maxResumeNs: __result_timing_maxResumeNs, avgWalkNs: __result_timing_avgWalkNs, maxWalkNs: __result_timing_maxWalkNs, avgProbeTotalNs: __result_timing_avgProbeTotalNs, maxProbeTotalNs: __result_timing_maxProbeTotalNs, coalescedRequests: __result_timing_coalescedRequests, maxWorkerBatchLen: __result_timing_maxWorkerBatchLen)
+            let _result_pcMatch = try decodeVarint(from: &buf)
+            let _result_stitchable = try decodeVarint(from: &buf)
+            let _result_framehopUsed = try decodeVarint(from: &buf)
+            let _result_fpWalkUsed = try decodeVarint(from: &buf)
+            let _result_threads = try decodeVec(from: &buf, decoder: { buf in try decodeProbeDiffThread(from: &buf) })
+            let _result_recent = try decodeVec(from: &buf, decoder: { buf in try decodeProbeDiffEntry(from: &buf) })
+            let result = ProbeDiffUpdate(totalKperfSamples: _result_totalKperfSamples, totalProbes: _result_totalProbes, paired: _result_paired, kperfOnly: _result_kperfOnly, probeOnly: _result_probeOnly, probeAugmentedKperf: _result_probeAugmentedKperf, probeWalkedDeeper: _result_probeWalkedDeeper, commonSuffixHist: _result_commonSuffixHist, depthMatch: _result_depthMatch, driftBuckets: _result_driftBuckets, timing: _result_timing, pcMatch: _result_pcMatch, stitchable: _result_stitchable, framehopUsed: _result_framehopUsed, fpWalkUsed: _result_fpWalkUsed, threads: _result_threads, recent: _result_recent)
             return result
         }
     }
@@ -445,6 +813,12 @@ nonisolated(unsafe) public let profiler_method_schemas: [UInt64: MethodSchemaInf
         responseSchemaIds: [0x178367a87f66fb46, 0x281c5be4f2ee63b4, 0x42046de663beeef0, 0x5db70a394660f3e6, 0x6d7dce914ee150e8, 0x4cf4b2aeb98a1939, 0xd9356298b81639ac, 0xdcafd4de6b7969bb, 0xa6544bf68ad6b55c, 0x5973fe57ec11dd2f, 0x0a96b404b4d79d67],
         responseRoot: .generic(0x42046de663beeef0, args: [.generic(0x0a96b404b4d79d67, args: [.concrete(0x5973fe57ec11dd2f)]), .generic(0x4cf4b2aeb98a1939, args: [.concrete(0x5db70a394660f3e6)])])
     ),
+    0x7d9fe97f38add11f: MethodSchemaInfo(
+        argsSchemaIds: [0x281c5be4f2ee63b4, 0xa9bc52fb11aa78c0, 0xdcafd4de6b7969bb, 0xd9356298b81639ac, 0x68892f74829bd154, 0x6d7dce914ee150e8, 0xbc88382e830f9c36, 0x0a96b404b4d79d67, 0xce2c9daef1e9c914, 0x6f5fed68b5ace623, 0xaa510ab07d34f141],
+        argsRoot: .generic(0xaa510ab07d34f141, args: [.concrete(0x281c5be4f2ee63b4), .concrete(0xa9bc52fb11aa78c0), .concrete(0x6f5fed68b5ace623)]),
+        responseSchemaIds: [0x178367a87f66fb46, 0x281c5be4f2ee63b4, 0x42046de663beeef0, 0x5db70a394660f3e6, 0x6d7dce914ee150e8, 0x4cf4b2aeb98a1939, 0xd9356298b81639ac, 0xa6544bf68ad6b55c, 0xdcafd4de6b7969bb, 0x5973fe57ec11dd2f, 0x0a96b404b4d79d67, 0xf37cef8f274712ba],
+        responseRoot: .generic(0x42046de663beeef0, args: [.concrete(0xf37cef8f274712ba), .generic(0x4cf4b2aeb98a1939, args: [.concrete(0x5db70a394660f3e6)])])
+    ),
     0x5e5b065bf333971b: MethodSchemaInfo(
         argsSchemaIds: [0x281c5be4f2ee63b4, 0xa9bc52fb11aa78c0, 0xdcafd4de6b7969bb, 0xd9356298b81639ac, 0x68892f74829bd154, 0x6d7dce914ee150e8, 0xbc88382e830f9c36, 0x0a96b404b4d79d67, 0xce2c9daef1e9c914, 0x6f5fed68b5ace623, 0xa6544bf68ad6b55c, 0x178367a87f66fb46, 0x5973fe57ec11dd2f, 0xf37cef8f274712ba, 0xc886545a493d06eb, 0x915c6fb5b64f270b],
         argsRoot: .generic(0x915c6fb5b64f270b, args: [.concrete(0x281c5be4f2ee63b4), .concrete(0xa9bc52fb11aa78c0), .concrete(0x6f5fed68b5ace623), .generic(0xc886545a493d06eb, args: [.concrete(0xf37cef8f274712ba)])]),
@@ -457,11 +831,23 @@ nonisolated(unsafe) public let profiler_method_schemas: [UInt64: MethodSchemaInf
         responseSchemaIds: [0x178367a87f66fb46, 0x281c5be4f2ee63b4, 0x42046de663beeef0, 0x5db70a394660f3e6, 0x6d7dce914ee150e8, 0x4cf4b2aeb98a1939, 0xd9356298b81639ac],
         responseRoot: .generic(0x42046de663beeef0, args: [.concrete(0xd9356298b81639ac), .generic(0x4cf4b2aeb98a1939, args: [.concrete(0x5db70a394660f3e6)])])
     ),
+    0xf202b32106aebf48: MethodSchemaInfo(
+        argsSchemaIds: [0xd9356298b81639ac, 0x281c5be4f2ee63b4, 0xdcafd4de6b7969bb, 0x68892f74829bd154, 0x6d7dce914ee150e8, 0xbc88382e830f9c36, 0x0a96b404b4d79d67, 0xce2c9daef1e9c914, 0x6f5fed68b5ace623, 0xba0496aa8cee7a4c],
+        argsRoot: .generic(0xba0496aa8cee7a4c, args: [.concrete(0xd9356298b81639ac), .concrete(0x6f5fed68b5ace623)]),
+        responseSchemaIds: [0x178367a87f66fb46, 0x281c5be4f2ee63b4, 0x42046de663beeef0, 0x5db70a394660f3e6, 0x6d7dce914ee150e8, 0x4cf4b2aeb98a1939, 0xd9356298b81639ac, 0xa8c9da7259d0084c, 0xdcafd4de6b7969bb, 0x221c376d3d0775c7, 0x0a96b404b4d79d67, 0xcac80352e0417711],
+        responseRoot: .generic(0x42046de663beeef0, args: [.concrete(0xcac80352e0417711), .generic(0x4cf4b2aeb98a1939, args: [.concrete(0x5db70a394660f3e6)])])
+    ),
     0xbd08d48f35f68c69: MethodSchemaInfo(
         argsSchemaIds: [0xd9356298b81639ac, 0x281c5be4f2ee63b4, 0xdcafd4de6b7969bb, 0x68892f74829bd154, 0x6d7dce914ee150e8, 0xbc88382e830f9c36, 0x0a96b404b4d79d67, 0xce2c9daef1e9c914, 0x6f5fed68b5ace623, 0xa8c9da7259d0084c, 0x221c376d3d0775c7, 0xcac80352e0417711, 0xc886545a493d06eb, 0xaa510ab07d34f141],
         argsRoot: .generic(0xaa510ab07d34f141, args: [.concrete(0xd9356298b81639ac), .concrete(0x6f5fed68b5ace623), .generic(0xc886545a493d06eb, args: [.concrete(0xcac80352e0417711)])]),
         responseSchemaIds: [0x178367a87f66fb46, 0x281c5be4f2ee63b4, 0x42046de663beeef0, 0x5db70a394660f3e6, 0x6d7dce914ee150e8, 0x4cf4b2aeb98a1939, 0xbc5c33249a2dc720],
         responseRoot: .generic(0x42046de663beeef0, args: [.concrete(0xbc5c33249a2dc720), .generic(0x4cf4b2aeb98a1939, args: [.concrete(0x5db70a394660f3e6)])])
+    ),
+    0x4daac56b194b862f: MethodSchemaInfo(
+        argsSchemaIds: [0x281c5be4f2ee63b4, 0xdcafd4de6b7969bb, 0xd9356298b81639ac, 0x68892f74829bd154, 0x6d7dce914ee150e8, 0xbc88382e830f9c36, 0x0a96b404b4d79d67, 0xce2c9daef1e9c914, 0x6f5fed68b5ace623, 0x6847ab90feda71c1],
+        argsRoot: .generic(0x6847ab90feda71c1, args: [.concrete(0x6f5fed68b5ace623)]),
+        responseSchemaIds: [0x178367a87f66fb46, 0x281c5be4f2ee63b4, 0x42046de663beeef0, 0x5db70a394660f3e6, 0x6d7dce914ee150e8, 0x4cf4b2aeb98a1939, 0xd9356298b81639ac, 0xa6544bf68ad6b55c, 0x0a96b404b4d79d67, 0xdcafd4de6b7969bb, 0xacd4834091495bce, 0x240883a6784a0dde],
+        responseRoot: .generic(0x42046de663beeef0, args: [.concrete(0x240883a6784a0dde), .generic(0x4cf4b2aeb98a1939, args: [.concrete(0x5db70a394660f3e6)])])
     ),
     0x6889c2c730466af0: MethodSchemaInfo(
         argsSchemaIds: [0x281c5be4f2ee63b4, 0xdcafd4de6b7969bb, 0xd9356298b81639ac, 0x68892f74829bd154, 0x6d7dce914ee150e8, 0xbc88382e830f9c36, 0x0a96b404b4d79d67, 0xce2c9daef1e9c914, 0x6f5fed68b5ace623, 0xa6544bf68ad6b55c, 0x178367a87f66fb46, 0xacd4834091495bce, 0x240883a6784a0dde, 0xc886545a493d06eb, 0xba0496aa8cee7a4c],
@@ -469,11 +855,23 @@ nonisolated(unsafe) public let profiler_method_schemas: [UInt64: MethodSchemaInf
         responseSchemaIds: [0x178367a87f66fb46, 0x281c5be4f2ee63b4, 0x42046de663beeef0, 0x5db70a394660f3e6, 0x6d7dce914ee150e8, 0x4cf4b2aeb98a1939, 0xbc5c33249a2dc720],
         responseRoot: .generic(0x42046de663beeef0, args: [.concrete(0xbc5c33249a2dc720), .generic(0x4cf4b2aeb98a1939, args: [.concrete(0x5db70a394660f3e6)])])
     ),
+    0x33fb58adecb28dea: MethodSchemaInfo(
+        argsSchemaIds: [0xbc5c33249a2dc720],
+        argsRoot: .concrete(0xbc5c33249a2dc720),
+        responseSchemaIds: [0x178367a87f66fb46, 0x281c5be4f2ee63b4, 0x42046de663beeef0, 0x5db70a394660f3e6, 0x6d7dce914ee150e8, 0x4cf4b2aeb98a1939, 0xdcafd4de6b7969bb, 0xd9356298b81639ac, 0xa6544bf68ad6b55c, 0x280e4b7bd3c1857f, 0x0a96b404b4d79d67, 0x2c384616cb5c3ade],
+        responseRoot: .generic(0x42046de663beeef0, args: [.concrete(0x2c384616cb5c3ade), .generic(0x4cf4b2aeb98a1939, args: [.concrete(0x5db70a394660f3e6)])])
+    ),
     0xbf5f73ea223d9f7d: MethodSchemaInfo(
         argsSchemaIds: [0x281c5be4f2ee63b4, 0x6d7dce914ee150e8, 0xdcafd4de6b7969bb, 0xd9356298b81639ac, 0xa6544bf68ad6b55c, 0x280e4b7bd3c1857f, 0x0a96b404b4d79d67, 0x2c384616cb5c3ade, 0xc886545a493d06eb, 0x6847ab90feda71c1],
         argsRoot: .generic(0x6847ab90feda71c1, args: [.generic(0xc886545a493d06eb, args: [.concrete(0x2c384616cb5c3ade)])]),
         responseSchemaIds: [0x178367a87f66fb46, 0x281c5be4f2ee63b4, 0x42046de663beeef0, 0x5db70a394660f3e6, 0x6d7dce914ee150e8, 0x4cf4b2aeb98a1939, 0xbc5c33249a2dc720],
         responseRoot: .generic(0x42046de663beeef0, args: [.concrete(0xbc5c33249a2dc720), .generic(0x4cf4b2aeb98a1939, args: [.concrete(0x5db70a394660f3e6)])])
+    ),
+    0xae55e9be2dc6a39a: MethodSchemaInfo(
+        argsSchemaIds: [0x281c5be4f2ee63b4, 0xdcafd4de6b7969bb, 0x6847ab90feda71c1],
+        argsRoot: .generic(0x6847ab90feda71c1, args: [.generic(0xdcafd4de6b7969bb, args: [.concrete(0x281c5be4f2ee63b4)])]),
+        responseSchemaIds: [0x178367a87f66fb46, 0x281c5be4f2ee63b4, 0x42046de663beeef0, 0x5db70a394660f3e6, 0x6d7dce914ee150e8, 0x4cf4b2aeb98a1939, 0xd9356298b81639ac, 0x32ec7bb903ef97dd, 0x0a96b404b4d79d67, 0x850d6eed797249ff],
+        responseRoot: .generic(0x42046de663beeef0, args: [.concrete(0x850d6eed797249ff), .generic(0x4cf4b2aeb98a1939, args: [.concrete(0x5db70a394660f3e6)])])
     ),
     0xc3381210c17fc3c4: MethodSchemaInfo(
         argsSchemaIds: [0x281c5be4f2ee63b4, 0xdcafd4de6b7969bb, 0xd9356298b81639ac, 0x32ec7bb903ef97dd, 0x0a96b404b4d79d67, 0x850d6eed797249ff, 0xc886545a493d06eb, 0xba0496aa8cee7a4c],
@@ -481,11 +879,23 @@ nonisolated(unsafe) public let profiler_method_schemas: [UInt64: MethodSchemaInf
         responseSchemaIds: [0x178367a87f66fb46, 0x281c5be4f2ee63b4, 0x42046de663beeef0, 0x5db70a394660f3e6, 0x6d7dce914ee150e8, 0x4cf4b2aeb98a1939, 0xbc5c33249a2dc720],
         responseRoot: .generic(0x42046de663beeef0, args: [.concrete(0xbc5c33249a2dc720), .generic(0x4cf4b2aeb98a1939, args: [.concrete(0x5db70a394660f3e6)])])
     ),
+    0xb289f4d7e911ad10: MethodSchemaInfo(
+        argsSchemaIds: [0xd9356298b81639ac, 0x281c5be4f2ee63b4, 0xdcafd4de6b7969bb, 0x68892f74829bd154, 0x6d7dce914ee150e8, 0xbc88382e830f9c36, 0x0a96b404b4d79d67, 0xce2c9daef1e9c914, 0x6f5fed68b5ace623, 0xba0496aa8cee7a4c],
+        argsRoot: .generic(0xba0496aa8cee7a4c, args: [.concrete(0xd9356298b81639ac), .concrete(0x6f5fed68b5ace623)]),
+        responseSchemaIds: [0x178367a87f66fb46, 0x281c5be4f2ee63b4, 0x42046de663beeef0, 0x5db70a394660f3e6, 0x6d7dce914ee150e8, 0x4cf4b2aeb98a1939, 0x0a96b404b4d79d67, 0xdcafd4de6b7969bb, 0xd9356298b81639ac, 0xa6544bf68ad6b55c, 0xacd4834091495bce, 0x3b0d82ca26ca8011],
+        responseRoot: .generic(0x42046de663beeef0, args: [.concrete(0x3b0d82ca26ca8011), .generic(0x4cf4b2aeb98a1939, args: [.concrete(0x5db70a394660f3e6)])])
+    ),
     0x42acdf6aa85cc2d3: MethodSchemaInfo(
         argsSchemaIds: [0xd9356298b81639ac, 0x281c5be4f2ee63b4, 0xdcafd4de6b7969bb, 0x68892f74829bd154, 0x6d7dce914ee150e8, 0xbc88382e830f9c36, 0x0a96b404b4d79d67, 0xce2c9daef1e9c914, 0x6f5fed68b5ace623, 0x178367a87f66fb46, 0xa6544bf68ad6b55c, 0xacd4834091495bce, 0x3b0d82ca26ca8011, 0xc886545a493d06eb, 0xaa510ab07d34f141],
         argsRoot: .generic(0xaa510ab07d34f141, args: [.concrete(0xd9356298b81639ac), .concrete(0x6f5fed68b5ace623), .generic(0xc886545a493d06eb, args: [.concrete(0x3b0d82ca26ca8011)])]),
         responseSchemaIds: [0x178367a87f66fb46, 0x281c5be4f2ee63b4, 0x42046de663beeef0, 0x5db70a394660f3e6, 0x6d7dce914ee150e8, 0x4cf4b2aeb98a1939, 0xbc5c33249a2dc720],
         responseRoot: .generic(0x42046de663beeef0, args: [.concrete(0xbc5c33249a2dc720), .generic(0x4cf4b2aeb98a1939, args: [.concrete(0x5db70a394660f3e6)])])
+    ),
+    0x03a2a085cf611098: MethodSchemaInfo(
+        argsSchemaIds: [0x281c5be4f2ee63b4, 0x6847ab90feda71c1],
+        argsRoot: .generic(0x6847ab90feda71c1, args: [.concrete(0x281c5be4f2ee63b4)]),
+        responseSchemaIds: [0x178367a87f66fb46, 0x281c5be4f2ee63b4, 0x42046de663beeef0, 0x5db70a394660f3e6, 0x6d7dce914ee150e8, 0x4cf4b2aeb98a1939, 0xd9356298b81639ac, 0xdcafd4de6b7969bb, 0xdd37b6551b52fb4f, 0x0a96b404b4d79d67, 0x5ce6ea672e206d3e],
+        responseRoot: .generic(0x42046de663beeef0, args: [.concrete(0x5ce6ea672e206d3e), .generic(0x4cf4b2aeb98a1939, args: [.concrete(0x5db70a394660f3e6)])])
     ),
     0xc6ab2f2a4444e87c: MethodSchemaInfo(
         argsSchemaIds: [0x281c5be4f2ee63b4, 0xd9356298b81639ac, 0x6d7dce914ee150e8, 0xdcafd4de6b7969bb, 0xdd37b6551b52fb4f, 0x0a96b404b4d79d67, 0x5ce6ea672e206d3e, 0xc886545a493d06eb, 0xba0496aa8cee7a4c],
@@ -493,11 +903,23 @@ nonisolated(unsafe) public let profiler_method_schemas: [UInt64: MethodSchemaInf
         responseSchemaIds: [0x178367a87f66fb46, 0x281c5be4f2ee63b4, 0x42046de663beeef0, 0x5db70a394660f3e6, 0x6d7dce914ee150e8, 0x4cf4b2aeb98a1939, 0xbc5c33249a2dc720],
         responseRoot: .generic(0x42046de663beeef0, args: [.concrete(0xbc5c33249a2dc720), .generic(0x4cf4b2aeb98a1939, args: [.concrete(0x5db70a394660f3e6)])])
     ),
+    0x0e5152fe1d5189e0: MethodSchemaInfo(
+        argsSchemaIds: [0x6d7dce914ee150e8, 0x281c5be4f2ee63b4, 0xdcafd4de6b7969bb, 0xd9356298b81639ac, 0x68892f74829bd154, 0xbc88382e830f9c36, 0x0a96b404b4d79d67, 0xce2c9daef1e9c914, 0x6f5fed68b5ace623, 0xba0496aa8cee7a4c],
+        argsRoot: .generic(0xba0496aa8cee7a4c, args: [.concrete(0x6d7dce914ee150e8), .concrete(0x6f5fed68b5ace623)]),
+        responseSchemaIds: [0x178367a87f66fb46, 0x281c5be4f2ee63b4, 0x42046de663beeef0, 0x5db70a394660f3e6, 0x6d7dce914ee150e8, 0x4cf4b2aeb98a1939, 0x0a96b404b4d79d67, 0xd9356298b81639ac, 0xa6544bf68ad6b55c, 0xd4aa7ad5e9292896, 0xdcafd4de6b7969bb, 0x697260434424b795, 0xe0dc192175c3c123],
+        responseRoot: .generic(0x42046de663beeef0, args: [.concrete(0xe0dc192175c3c123), .generic(0x4cf4b2aeb98a1939, args: [.concrete(0x5db70a394660f3e6)])])
+    ),
     0xc689c5fb8e7ec474: MethodSchemaInfo(
         argsSchemaIds: [0x6d7dce914ee150e8, 0x281c5be4f2ee63b4, 0xdcafd4de6b7969bb, 0xd9356298b81639ac, 0x68892f74829bd154, 0xbc88382e830f9c36, 0x0a96b404b4d79d67, 0xce2c9daef1e9c914, 0x6f5fed68b5ace623, 0xa6544bf68ad6b55c, 0xd4aa7ad5e9292896, 0x697260434424b795, 0xe0dc192175c3c123, 0xc886545a493d06eb, 0xaa510ab07d34f141],
         argsRoot: .generic(0xaa510ab07d34f141, args: [.concrete(0x6d7dce914ee150e8), .concrete(0x6f5fed68b5ace623), .generic(0xc886545a493d06eb, args: [.concrete(0xe0dc192175c3c123)])]),
         responseSchemaIds: [0x178367a87f66fb46, 0x281c5be4f2ee63b4, 0x42046de663beeef0, 0x5db70a394660f3e6, 0x6d7dce914ee150e8, 0x4cf4b2aeb98a1939, 0xbc5c33249a2dc720],
         responseRoot: .generic(0x42046de663beeef0, args: [.concrete(0xbc5c33249a2dc720), .generic(0x4cf4b2aeb98a1939, args: [.concrete(0x5db70a394660f3e6)])])
+    ),
+    0xf8b0a4d361f215d6: MethodSchemaInfo(
+        argsSchemaIds: [0x6d7dce914ee150e8, 0x281c5be4f2ee63b4, 0xdcafd4de6b7969bb, 0xd9356298b81639ac, 0x68892f74829bd154, 0xbc88382e830f9c36, 0x0a96b404b4d79d67, 0xce2c9daef1e9c914, 0x6f5fed68b5ace623, 0xba0496aa8cee7a4c],
+        argsRoot: .generic(0xba0496aa8cee7a4c, args: [.concrete(0x6d7dce914ee150e8), .concrete(0x6f5fed68b5ace623)]),
+        responseSchemaIds: [0x178367a87f66fb46, 0x281c5be4f2ee63b4, 0x42046de663beeef0, 0x5db70a394660f3e6, 0x6d7dce914ee150e8, 0x4cf4b2aeb98a1939, 0xd9356298b81639ac, 0x8ff4ce59f1e94d72, 0x0a96b404b4d79d67, 0xd6af01229bc47f82],
+        responseRoot: .generic(0x42046de663beeef0, args: [.concrete(0xd6af01229bc47f82), .generic(0x4cf4b2aeb98a1939, args: [.concrete(0x5db70a394660f3e6)])])
     ),
     0xca1b65cabd8a8f38: MethodSchemaInfo(
         argsSchemaIds: [0x6d7dce914ee150e8, 0x281c5be4f2ee63b4, 0xdcafd4de6b7969bb, 0xd9356298b81639ac, 0x68892f74829bd154, 0xbc88382e830f9c36, 0x0a96b404b4d79d67, 0xce2c9daef1e9c914, 0x6f5fed68b5ace623, 0x8ff4ce59f1e94d72, 0xd6af01229bc47f82, 0xc886545a493d06eb, 0xaa510ab07d34f141],
@@ -516,6 +938,12 @@ nonisolated(unsafe) public let profiler_method_schemas: [UInt64: MethodSchemaInf
         argsRoot: .concrete(0xbc5c33249a2dc720),
         responseSchemaIds: [0x178367a87f66fb46, 0x281c5be4f2ee63b4, 0x42046de663beeef0, 0x5db70a394660f3e6, 0x6d7dce914ee150e8, 0x4cf4b2aeb98a1939],
         responseRoot: .generic(0x42046de663beeef0, args: [.concrete(0x178367a87f66fb46), .generic(0x4cf4b2aeb98a1939, args: [.concrete(0x5db70a394660f3e6)])])
+    ),
+    0xc853dfab2eb75d77: MethodSchemaInfo(
+        argsSchemaIds: [0x281c5be4f2ee63b4, 0xdcafd4de6b7969bb, 0x6847ab90feda71c1],
+        argsRoot: .generic(0x6847ab90feda71c1, args: [.generic(0xdcafd4de6b7969bb, args: [.concrete(0x281c5be4f2ee63b4)])]),
+        responseSchemaIds: [0x178367a87f66fb46, 0x281c5be4f2ee63b4, 0x42046de663beeef0, 0x5db70a394660f3e6, 0x6d7dce914ee150e8, 0x4cf4b2aeb98a1939, 0xd9356298b81639ac, 0x0a96b404b4d79d67, 0x28630521853183b3, 0x605b8a9435bfeb8e, 0x6b1d4b54ef3253f3, 0x8e02f623d1b2310c, 0xdcafd4de6b7969bb, 0xdb973fadc1801ce2, 0xc6eb8c46f1e17fba, 0xd63ff61fe6f8fb41, 0x34ae3055219d9613, 0xa24a048785643f31, 0x021934229e7389fb, 0x1098f4e53a617b18],
+        responseRoot: .generic(0x42046de663beeef0, args: [.concrete(0x1098f4e53a617b18), .generic(0x4cf4b2aeb98a1939, args: [.concrete(0x5db70a394660f3e6)])])
     ),
     0x45bb91e63c98208a: MethodSchemaInfo(
         argsSchemaIds: [0x281c5be4f2ee63b4, 0xdcafd4de6b7969bb, 0xd9356298b81639ac, 0x0a96b404b4d79d67, 0x28630521853183b3, 0x605b8a9435bfeb8e, 0x6b1d4b54ef3253f3, 0x8e02f623d1b2310c, 0x6d7dce914ee150e8, 0xdb973fadc1801ce2, 0xc6eb8c46f1e17fba, 0xd63ff61fe6f8fb41, 0x34ae3055219d9613, 0xa24a048785643f31, 0x178367a87f66fb46, 0x021934229e7389fb, 0x1098f4e53a617b18, 0xc886545a493d06eb, 0xba0496aa8cee7a4c],

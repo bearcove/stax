@@ -360,6 +360,13 @@ export type TopRequest = [
 ];
 export type TopResponse = TopEntry[];
 
+export type TopUpdateRequest = [
+  number, // limit
+  TopSort, // sort
+  ViewParams, // params
+];
+export type TopUpdateResponse = TopUpdate;
+
 export type SubscribeTopRequest = [
   number, // limit
   TopSort, // sort
@@ -371,6 +378,12 @@ export type SubscribeTopResponse = void;
 export type TotalOnCpuNsRequest = [];
 export type TotalOnCpuNsResponse = bigint;
 
+export type AnnotatedRequest = [
+  bigint, // address
+  ViewParams, // params
+];
+export type AnnotatedResponse = AnnotatedView;
+
 export type SubscribeAnnotatedRequest = [
   bigint, // address
   ViewParams, // params
@@ -378,20 +391,35 @@ export type SubscribeAnnotatedRequest = [
 ];
 export type SubscribeAnnotatedResponse = void;
 
+export type FlamegraphRequest = [ViewParams];
+export type FlamegraphResponse = FlamegraphUpdate;
+
 export type SubscribeFlamegraphRequest = [
   ViewParams, // params
   Tx<FlamegraphUpdate>, // output
 ];
 export type SubscribeFlamegraphResponse = void;
 
+export type ThreadsRequest = [];
+export type ThreadsResponse = ThreadsUpdate;
+
 export type SubscribeThreadsRequest = [Tx<ThreadsUpdate>];
 export type SubscribeThreadsResponse = void;
+
+export type TimelineRequest = [number | null];
+export type TimelineResponse = TimelineUpdate;
 
 export type SubscribeTimelineRequest = [
   number | null, // tid
   Tx<TimelineUpdate>, // output
 ];
 export type SubscribeTimelineResponse = void;
+
+export type NeighborsRequest = [
+  bigint, // address
+  ViewParams, // params
+];
+export type NeighborsResponse = NeighborsUpdate;
 
 export type SubscribeNeighborsRequest = [
   bigint, // address
@@ -400,11 +428,20 @@ export type SubscribeNeighborsRequest = [
 ];
 export type SubscribeNeighborsResponse = void;
 
+export type WakersRequest = [number];
+export type WakersResponse = WakersUpdate;
+
 export type SubscribeWakersRequest = [
   number, // wakee_tid
   Tx<WakersUpdate>, // output
 ];
 export type SubscribeWakersResponse = void;
+
+export type IntervalsRequest = [
+  string, // flame_key
+  ViewParams, // params
+];
+export type IntervalsResponse = IntervalListUpdate;
 
 export type SubscribeIntervalsRequest = [
   string, // flame_key
@@ -412,6 +449,12 @@ export type SubscribeIntervalsRequest = [
   Tx<IntervalListUpdate>, // output
 ];
 export type SubscribeIntervalsResponse = void;
+
+export type PetSamplesRequest = [
+  string, // flame_key
+  ViewParams, // params
+];
+export type PetSamplesResponse = PetSampleListUpdate;
 
 export type SubscribePetSamplesRequest = [
   string, // flame_key
@@ -426,6 +469,9 @@ export type SetPausedResponse = void;
 export type IsPausedRequest = [];
 export type IsPausedResponse = boolean;
 
+export type ProbeDiffRequest = [number | null];
+export type ProbeDiffResponse = ProbeDiffUpdate;
+
 export type SubscribeProbeDiffRequest = [
   number | null, // tid
   Tx<ProbeDiffUpdate>, // output
@@ -439,6 +485,11 @@ export interface ProfilerCaller {
    * bundles thread/time/exclude filters.
    */
   top(limit: number, sort: TopSort, params: ViewParams): Promise<TopEntry[]>;
+  /**
+   * One-shot top-function snapshot, including totals. UIs may poll
+   * this instead of opening a long-lived channel.
+   */
+  topUpdate(limit: number, sort: TopSort, params: ViewParams): Promise<TopUpdate>;
   subscribeTop(limit: number, sort: TopSort, params: ViewParams, output: Tx<TopUpdate>): Promise<void>;
   /**
    * Total on-CPU time across every thread, in nanoseconds.
@@ -447,15 +498,32 @@ export interface ProfilerCaller {
    * "X CPU-seconds across the recording" displays.
    */
   totalOnCpuNs(): Promise<bigint>;
+  annotated(address: bigint, params: ViewParams): Promise<AnnotatedView>;
   subscribeAnnotated(address: bigint, params: ViewParams, output: Tx<AnnotatedView>): Promise<void>;
+  flamegraph(params: ViewParams): Promise<FlamegraphUpdate>;
   subscribeFlamegraph(params: ViewParams, output: Tx<FlamegraphUpdate>): Promise<void>;
+  threads(): Promise<ThreadsUpdate>;
   subscribeThreads(output: Tx<ThreadsUpdate>): Promise<void>;
   /**
    * Always relative to the full recording (no `filter`); brush
    * selection happens on top of the unfiltered timeline.
    */
+  timeline(tid: number | null): Promise<TimelineUpdate>;
+  /**
+   * Always relative to the full recording (no `filter`); brush
+   * selection happens on top of the unfiltered timeline.
+   */
   subscribeTimeline(tid: number | null, output: Tx<TimelineUpdate>): Promise<void>;
+  neighbors(address: bigint, params: ViewParams): Promise<NeighborsUpdate>;
   subscribeNeighbors(address: bigint, params: ViewParams, output: Tx<NeighborsUpdate>): Promise<void>;
+  /**
+   * Stream "who woke this thread?" updates: top wakers grouped by
+   * (waker_tid, waker_function), aggregated from the kperf
+   * MACH_MAKERUNNABLE wakeup edges. The wakee's tid is required;
+   * `None` produces an empty update (we don't aggregate across
+   * threads).
+   */
+  wakers(wakeeTid: number): Promise<WakersUpdate>;
   /**
    * Stream "who woke this thread?" updates: top wakers grouped by
    * (waker_tid, waker_function), aggregated from the kperf
@@ -472,7 +540,22 @@ export interface ProfilerCaller {
    * to surface the waker. `flame_key` matches the `r/2/1/0`
    * addressing the frontend already uses for focus.
    */
+  intervals(flameKey: string, params: ViewParams): Promise<IntervalListUpdate>;
+  /**
+   * Stream the off-CPU intervals attributed to a single stack
+   * node, in chronological order. Lets the UI drill into a flame
+   * box and see "this stack was blocked here for 12ms, here for
+   * 30ms..." with each interval colored by reason and clickable
+   * to surface the waker. `flame_key` matches the `r/2/1/0`
+   * addressing the frontend already uses for focus.
+   */
   subscribeIntervals(flameKey: string, params: ViewParams, output: Tx<IntervalListUpdate>): Promise<void>;
+  /**
+   * Stream the PET stack-walk hits attributed to a single stack
+   * node, in chronological order. Symmetric counterpart to
+   * `subscribe_intervals` for the on-CPU side.
+   */
+  petSamples(flameKey: string, params: ViewParams): Promise<PetSampleListUpdate>;
   /**
    * Stream the PET stack-walk hits attributed to a single stack
    * node, in chronological order. Symmetric counterpart to
@@ -489,6 +572,16 @@ export interface ProfilerCaller {
    */
   setPaused(paused: boolean): Promise<void>;
   isPaused(): Promise<boolean>;
+  /**
+   * Stream periodic snapshots of the kperf-vs-probe diff:
+   * per-thread pairing of kperf PET samples with their
+   * race-against-return probe results, common-suffix histogram,
+   * drift histogram, and the most recent N entries with both
+   * stacks symbolicated through the live BinaryRegistry. Pass
+   * `tid = Some(_)` to scope to a single thread, or `None` for
+   * all threads.
+   */
+  probeDiff(tid: number | null): Promise<ProbeDiffUpdate>;
   /**
    * Stream periodic snapshots of the kperf-vs-probe diff:
    * per-thread pairing of kperf PET samples with their
@@ -523,6 +616,22 @@ export class ProfilerClient implements ProfilerCaller {
         sendSchemas,
       });
       return value as TopEntry[];
+  }
+
+  /**
+   * One-shot top-function snapshot, including totals. UIs may poll
+   * this instead of opening a long-lived channel.
+   */
+  async topUpdate(limit: number, sort: TopSort, params: ViewParams): Promise<TopUpdate> {
+    const descriptor = profiler_topUpdate_method;
+    const sendSchemas = profiler_descriptor.send_schemas;
+      const value = await this.caller.call({
+        method: "Profiler.topUpdate",
+        args: { limit, sort, params },
+        descriptor,
+        sendSchemas,
+      });
+      return value as TopUpdate;
   }
 
   async subscribeTop(limit: number, sort: TopSort, params: ViewParams, output: Tx<TopUpdate>): Promise<void> {
@@ -569,6 +678,18 @@ export class ProfilerClient implements ProfilerCaller {
       return value as bigint;
   }
 
+  async annotated(address: bigint, params: ViewParams): Promise<AnnotatedView> {
+    const descriptor = profiler_annotated_method;
+    const sendSchemas = profiler_descriptor.send_schemas;
+      const value = await this.caller.call({
+        method: "Profiler.annotated",
+        args: { address, params },
+        descriptor,
+        sendSchemas,
+      });
+      return value as AnnotatedView;
+  }
+
   async subscribeAnnotated(address: bigint, params: ViewParams, output: Tx<AnnotatedView>): Promise<void> {
     const descriptor = profiler_subscribeAnnotated_method;
     const sendSchemas = profiler_descriptor.send_schemas;
@@ -595,6 +716,18 @@ export class ProfilerClient implements ProfilerCaller {
       return value as void;
   }
 
+  async flamegraph(params: ViewParams): Promise<FlamegraphUpdate> {
+    const descriptor = profiler_flamegraph_method;
+    const sendSchemas = profiler_descriptor.send_schemas;
+      const value = await this.caller.call({
+        method: "Profiler.flamegraph",
+        args: { params },
+        descriptor,
+        sendSchemas,
+      });
+      return value as FlamegraphUpdate;
+  }
+
   async subscribeFlamegraph(params: ViewParams, output: Tx<FlamegraphUpdate>): Promise<void> {
     const descriptor = profiler_subscribeFlamegraph_method;
     const sendSchemas = profiler_descriptor.send_schemas;
@@ -619,6 +752,18 @@ export class ProfilerClient implements ProfilerCaller {
         finalizeChannels: () => finalizeBoundChannelsForTypeRefs(argTypeRefs, [params, output], sendSchemas.schemas),
       });
       return value as void;
+  }
+
+  async threads(): Promise<ThreadsUpdate> {
+    const descriptor = profiler_threads_method;
+    const sendSchemas = profiler_descriptor.send_schemas;
+      const value = await this.caller.call({
+        method: "Profiler.threads",
+        args: {},
+        descriptor,
+        sendSchemas,
+      });
+      return value as ThreadsUpdate;
   }
 
   async subscribeThreads(output: Tx<ThreadsUpdate>): Promise<void> {
@@ -651,6 +796,22 @@ export class ProfilerClient implements ProfilerCaller {
    * Always relative to the full recording (no `filter`); brush
    * selection happens on top of the unfiltered timeline.
    */
+  async timeline(tid: number | null): Promise<TimelineUpdate> {
+    const descriptor = profiler_timeline_method;
+    const sendSchemas = profiler_descriptor.send_schemas;
+      const value = await this.caller.call({
+        method: "Profiler.timeline",
+        args: { tid },
+        descriptor,
+        sendSchemas,
+      });
+      return value as TimelineUpdate;
+  }
+
+  /**
+   * Always relative to the full recording (no `filter`); brush
+   * selection happens on top of the unfiltered timeline.
+   */
   async subscribeTimeline(tid: number | null, output: Tx<TimelineUpdate>): Promise<void> {
     const descriptor = profiler_subscribeTimeline_method;
     const sendSchemas = profiler_descriptor.send_schemas;
@@ -677,6 +838,18 @@ export class ProfilerClient implements ProfilerCaller {
       return value as void;
   }
 
+  async neighbors(address: bigint, params: ViewParams): Promise<NeighborsUpdate> {
+    const descriptor = profiler_neighbors_method;
+    const sendSchemas = profiler_descriptor.send_schemas;
+      const value = await this.caller.call({
+        method: "Profiler.neighbors",
+        args: { address, params },
+        descriptor,
+        sendSchemas,
+      });
+      return value as NeighborsUpdate;
+  }
+
   async subscribeNeighbors(address: bigint, params: ViewParams, output: Tx<NeighborsUpdate>): Promise<void> {
     const descriptor = profiler_subscribeNeighbors_method;
     const sendSchemas = profiler_descriptor.send_schemas;
@@ -701,6 +874,25 @@ export class ProfilerClient implements ProfilerCaller {
         finalizeChannels: () => finalizeBoundChannelsForTypeRefs(argTypeRefs, [address, params, output], sendSchemas.schemas),
       });
       return value as void;
+  }
+
+  /**
+   * Stream "who woke this thread?" updates: top wakers grouped by
+   * (waker_tid, waker_function), aggregated from the kperf
+   * MACH_MAKERUNNABLE wakeup edges. The wakee's tid is required;
+   * `None` produces an empty update (we don't aggregate across
+   * threads).
+   */
+  async wakers(wakeeTid: number): Promise<WakersUpdate> {
+    const descriptor = profiler_wakers_method;
+    const sendSchemas = profiler_descriptor.send_schemas;
+      const value = await this.caller.call({
+        method: "Profiler.wakers",
+        args: { wakeeTid },
+        descriptor,
+        sendSchemas,
+      });
+      return value as WakersUpdate;
   }
 
   /**
@@ -744,6 +936,26 @@ export class ProfilerClient implements ProfilerCaller {
    * to surface the waker. `flame_key` matches the `r/2/1/0`
    * addressing the frontend already uses for focus.
    */
+  async intervals(flameKey: string, params: ViewParams): Promise<IntervalListUpdate> {
+    const descriptor = profiler_intervals_method;
+    const sendSchemas = profiler_descriptor.send_schemas;
+      const value = await this.caller.call({
+        method: "Profiler.intervals",
+        args: { flameKey, params },
+        descriptor,
+        sendSchemas,
+      });
+      return value as IntervalListUpdate;
+  }
+
+  /**
+   * Stream the off-CPU intervals attributed to a single stack
+   * node, in chronological order. Lets the UI drill into a flame
+   * box and see "this stack was blocked here for 12ms, here for
+   * 30ms..." with each interval colored by reason and clickable
+   * to surface the waker. `flame_key` matches the `r/2/1/0`
+   * addressing the frontend already uses for focus.
+   */
   async subscribeIntervals(flameKey: string, params: ViewParams, output: Tx<IntervalListUpdate>): Promise<void> {
     const descriptor = profiler_subscribeIntervals_method;
     const sendSchemas = profiler_descriptor.send_schemas;
@@ -768,6 +980,23 @@ export class ProfilerClient implements ProfilerCaller {
         finalizeChannels: () => finalizeBoundChannelsForTypeRefs(argTypeRefs, [flameKey, params, output], sendSchemas.schemas),
       });
       return value as void;
+  }
+
+  /**
+   * Stream the PET stack-walk hits attributed to a single stack
+   * node, in chronological order. Symmetric counterpart to
+   * `subscribe_intervals` for the on-CPU side.
+   */
+  async petSamples(flameKey: string, params: ViewParams): Promise<PetSampleListUpdate> {
+    const descriptor = profiler_petSamples_method;
+    const sendSchemas = profiler_descriptor.send_schemas;
+      const value = await this.caller.call({
+        method: "Profiler.petSamples",
+        args: { flameKey, params },
+        descriptor,
+        sendSchemas,
+      });
+      return value as PetSampleListUpdate;
   }
 
   /**
@@ -842,6 +1071,27 @@ export class ProfilerClient implements ProfilerCaller {
    * `tid = Some(_)` to scope to a single thread, or `None` for
    * all threads.
    */
+  async probeDiff(tid: number | null): Promise<ProbeDiffUpdate> {
+    const descriptor = profiler_probeDiff_method;
+    const sendSchemas = profiler_descriptor.send_schemas;
+      const value = await this.caller.call({
+        method: "Profiler.probeDiff",
+        args: { tid },
+        descriptor,
+        sendSchemas,
+      });
+      return value as ProbeDiffUpdate;
+  }
+
+  /**
+   * Stream periodic snapshots of the kperf-vs-probe diff:
+   * per-thread pairing of kperf PET samples with their
+   * race-against-return probe results, common-suffix histogram,
+   * drift histogram, and the most recent N entries with both
+   * stacks symbolicated through the live BinaryRegistry. Pass
+   * `tid = Some(_)` to scope to a single thread, or `None` for
+   * all threads.
+   */
   async subscribeProbeDiff(tid: number | null, output: Tx<ProbeDiffUpdate>): Promise<void> {
     const descriptor = profiler_subscribeProbeDiff_method;
     const sendSchemas = profiler_descriptor.send_schemas;
@@ -886,18 +1136,28 @@ export async function connectProfiler(
 // Handler interface for Profiler
 export interface ProfilerHandler {
   top(limit: number, sort: TopSort, params: ViewParams): Promise<TopEntry[]> | TopEntry[];
+  topUpdate(limit: number, sort: TopSort, params: ViewParams): Promise<TopUpdate> | TopUpdate;
   subscribeTop(limit: number, sort: TopSort, params: ViewParams, output: Tx<TopUpdate>): Promise<void> | void;
   totalOnCpuNs(): Promise<bigint> | bigint;
+  annotated(address: bigint, params: ViewParams): Promise<AnnotatedView> | AnnotatedView;
   subscribeAnnotated(address: bigint, params: ViewParams, output: Tx<AnnotatedView>): Promise<void> | void;
+  flamegraph(params: ViewParams): Promise<FlamegraphUpdate> | FlamegraphUpdate;
   subscribeFlamegraph(params: ViewParams, output: Tx<FlamegraphUpdate>): Promise<void> | void;
+  threads(): Promise<ThreadsUpdate> | ThreadsUpdate;
   subscribeThreads(output: Tx<ThreadsUpdate>): Promise<void> | void;
+  timeline(tid: number | null): Promise<TimelineUpdate> | TimelineUpdate;
   subscribeTimeline(tid: number | null, output: Tx<TimelineUpdate>): Promise<void> | void;
+  neighbors(address: bigint, params: ViewParams): Promise<NeighborsUpdate> | NeighborsUpdate;
   subscribeNeighbors(address: bigint, params: ViewParams, output: Tx<NeighborsUpdate>): Promise<void> | void;
+  wakers(wakeeTid: number): Promise<WakersUpdate> | WakersUpdate;
   subscribeWakers(wakeeTid: number, output: Tx<WakersUpdate>): Promise<void> | void;
+  intervals(flameKey: string, params: ViewParams): Promise<IntervalListUpdate> | IntervalListUpdate;
   subscribeIntervals(flameKey: string, params: ViewParams, output: Tx<IntervalListUpdate>): Promise<void> | void;
+  petSamples(flameKey: string, params: ViewParams): Promise<PetSampleListUpdate> | PetSampleListUpdate;
   subscribePetSamples(flameKey: string, params: ViewParams, output: Tx<PetSampleListUpdate>): Promise<void> | void;
   setPaused(paused: boolean): Promise<void> | void;
   isPaused(): Promise<boolean> | boolean;
+  probeDiff(tid: number | null): Promise<ProbeDiffUpdate> | ProbeDiffUpdate;
   subscribeProbeDiff(tid: number | null, output: Tx<ProbeDiffUpdate>): Promise<void> | void;
 }
 
@@ -921,6 +1181,13 @@ export class ProfilerDispatcher implements Dispatcher {
       } catch (error) {
         call.replyInternalError(error instanceof Error ? error.message : String(error));
       }
+    } else if (method.id === 0x7d9fe97f38add11fn) {
+      try {
+        const result = await this.handler.topUpdate(args[0] as number, args[1] as TopSort, args[2] as ViewParams);
+        call.reply(result);
+      } catch (error) {
+        call.replyInternalError(error instanceof Error ? error.message : String(error));
+      }
     } else if (method.id === 0x5e5b065bf333971bn) {
       try {
         const result = await this.handler.subscribeTop(args[0] as number, args[1] as TopSort, args[2] as ViewParams, args[3] as Tx<TopUpdate>);
@@ -935,9 +1202,23 @@ export class ProfilerDispatcher implements Dispatcher {
       } catch (error) {
         call.replyInternalError(error instanceof Error ? error.message : String(error));
       }
+    } else if (method.id === 0xf202b32106aebf48n) {
+      try {
+        const result = await this.handler.annotated(args[0] as bigint, args[1] as ViewParams);
+        call.reply(result);
+      } catch (error) {
+        call.replyInternalError(error instanceof Error ? error.message : String(error));
+      }
     } else if (method.id === 0xbd08d48f35f68c69n) {
       try {
         const result = await this.handler.subscribeAnnotated(args[0] as bigint, args[1] as ViewParams, args[2] as Tx<AnnotatedView>);
+        call.reply(result);
+      } catch (error) {
+        call.replyInternalError(error instanceof Error ? error.message : String(error));
+      }
+    } else if (method.id === 0x4daac56b194b862fn) {
+      try {
+        const result = await this.handler.flamegraph(args[0] as ViewParams);
         call.reply(result);
       } catch (error) {
         call.replyInternalError(error instanceof Error ? error.message : String(error));
@@ -949,9 +1230,23 @@ export class ProfilerDispatcher implements Dispatcher {
       } catch (error) {
         call.replyInternalError(error instanceof Error ? error.message : String(error));
       }
+    } else if (method.id === 0x33fb58adecb28dean) {
+      try {
+        const result = await this.handler.threads();
+        call.reply(result);
+      } catch (error) {
+        call.replyInternalError(error instanceof Error ? error.message : String(error));
+      }
     } else if (method.id === 0xbf5f73ea223d9f7dn) {
       try {
         const result = await this.handler.subscribeThreads(args[0] as Tx<ThreadsUpdate>);
+        call.reply(result);
+      } catch (error) {
+        call.replyInternalError(error instanceof Error ? error.message : String(error));
+      }
+    } else if (method.id === 0xae55e9be2dc6a39an) {
+      try {
+        const result = await this.handler.timeline(args[0] as number | null);
         call.reply(result);
       } catch (error) {
         call.replyInternalError(error instanceof Error ? error.message : String(error));
@@ -963,9 +1258,23 @@ export class ProfilerDispatcher implements Dispatcher {
       } catch (error) {
         call.replyInternalError(error instanceof Error ? error.message : String(error));
       }
+    } else if (method.id === 0xb289f4d7e911ad10n) {
+      try {
+        const result = await this.handler.neighbors(args[0] as bigint, args[1] as ViewParams);
+        call.reply(result);
+      } catch (error) {
+        call.replyInternalError(error instanceof Error ? error.message : String(error));
+      }
     } else if (method.id === 0x42acdf6aa85cc2d3n) {
       try {
         const result = await this.handler.subscribeNeighbors(args[0] as bigint, args[1] as ViewParams, args[2] as Tx<NeighborsUpdate>);
+        call.reply(result);
+      } catch (error) {
+        call.replyInternalError(error instanceof Error ? error.message : String(error));
+      }
+    } else if (method.id === 0x03a2a085cf611098n) {
+      try {
+        const result = await this.handler.wakers(args[0] as number);
         call.reply(result);
       } catch (error) {
         call.replyInternalError(error instanceof Error ? error.message : String(error));
@@ -977,9 +1286,23 @@ export class ProfilerDispatcher implements Dispatcher {
       } catch (error) {
         call.replyInternalError(error instanceof Error ? error.message : String(error));
       }
+    } else if (method.id === 0x0e5152fe1d5189e0n) {
+      try {
+        const result = await this.handler.intervals(args[0] as string, args[1] as ViewParams);
+        call.reply(result);
+      } catch (error) {
+        call.replyInternalError(error instanceof Error ? error.message : String(error));
+      }
     } else if (method.id === 0xc689c5fb8e7ec474n) {
       try {
         const result = await this.handler.subscribeIntervals(args[0] as string, args[1] as ViewParams, args[2] as Tx<IntervalListUpdate>);
+        call.reply(result);
+      } catch (error) {
+        call.replyInternalError(error instanceof Error ? error.message : String(error));
+      }
+    } else if (method.id === 0xf8b0a4d361f215d6n) {
+      try {
+        const result = await this.handler.petSamples(args[0] as string, args[1] as ViewParams);
         call.reply(result);
       } catch (error) {
         call.replyInternalError(error instanceof Error ? error.message : String(error));
@@ -1001,6 +1324,13 @@ export class ProfilerDispatcher implements Dispatcher {
     } else if (method.id === 0xfbcae644722d364en) {
       try {
         const result = await this.handler.isPaused();
+        call.reply(result);
+      } catch (error) {
+        call.replyInternalError(error instanceof Error ? error.message : String(error));
+      }
+    } else if (method.id === 0xc853dfab2eb75d77n) {
+      try {
+        const result = await this.handler.probeDiff(args[0] as number | null);
         call.reply(result);
       } catch (error) {
         call.replyInternalError(error instanceof Error ? error.message : String(error));
@@ -1041,15 +1371,15 @@ export const profiler_send_schemas: import("@bearcove/vox-core").ServiceSendSche
     [0xc886545a493d06ebn, { id: 0xc886545a493d06ebn, type_params: ['T'], kind: { tag: 'channel', direction: 'tx', element: { tag: 'var', name: 'T' } } }],
     [0x915c6fb5b64f270bn, { id: 0x915c6fb5b64f270bn, type_params: ['T0', 'T1', 'T2', 'T3'], kind: { tag: 'tuple', elements: [{ tag: 'var', name: 'T0' }, { tag: 'var', name: 'T1' }, { tag: 'var', name: 'T2' }, { tag: 'var', name: 'T3' }] } }],
     [0xbc5c33249a2dc720n, { id: 0xbc5c33249a2dc720n, type_params: [], kind: { tag: 'primitive', primitive_type: 'unit' } }],
+    [0xba0496aa8cee7a4cn, { id: 0xba0496aa8cee7a4cn, type_params: ['T0', 'T1'], kind: { tag: 'tuple', elements: [{ tag: 'var', name: 'T0' }, { tag: 'var', name: 'T1' }] } }],
     [0xa8c9da7259d0084cn, { id: 0xa8c9da7259d0084cn, type_params: [], kind: { tag: 'struct', name: 'SourceHeader', fields: [{ name: 'file', type_ref: { tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }, required: true }, { name: 'line', type_ref: { tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }, required: true }, { name: 'html', type_ref: { tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }, required: true }] } }],
     [0x221c376d3d0775c7n, { id: 0x221c376d3d0775c7n, type_params: [], kind: { tag: 'struct', name: 'AnnotatedLine', fields: [{ name: 'address', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'html', type_ref: { tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }, required: true }, { name: 'self_on_cpu_ns', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'self_pet_samples', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'source_header', type_ref: { tag: 'concrete', type_id: 0xdcafd4de6b7969bbn, args: [{ tag: 'concrete', type_id: 0xa8c9da7259d0084cn, args: [] }] }, required: true }] } }],
     [0xcac80352e0417711n, { id: 0xcac80352e0417711n, type_params: [], kind: { tag: 'struct', name: 'AnnotatedView', fields: [{ name: 'function_name', type_ref: { tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }, required: true }, { name: 'language', type_ref: { tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }, required: true }, { name: 'base_address', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'queried_address', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'lines', type_ref: { tag: 'concrete', type_id: 0x0a96b404b4d79d67n, args: [{ tag: 'concrete', type_id: 0x221c376d3d0775c7n, args: [] }] }, required: true }] } }],
+    [0x6847ab90feda71c1n, { id: 0x6847ab90feda71c1n, type_params: ['T0'], kind: { tag: 'tuple', elements: [{ tag: 'var', name: 'T0' }] } }],
     [0xacd4834091495bcen, { id: 0xacd4834091495bcen, type_params: [], kind: { tag: 'struct', name: 'FlameNode', fields: [{ name: 'address', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'function_name', type_ref: { tag: 'concrete', type_id: 0xdcafd4de6b7969bbn, args: [{ tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }] }, required: true }, { name: 'binary', type_ref: { tag: 'concrete', type_id: 0xdcafd4de6b7969bbn, args: [{ tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }] }, required: true }, { name: 'is_main', type_ref: { tag: 'concrete', type_id: 0x178367a87f66fb46n, args: [] }, required: true }, { name: 'language', type_ref: { tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }, required: true }, { name: 'on_cpu_ns', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'off_cpu', type_ref: { tag: 'concrete', type_id: 0xa6544bf68ad6b55cn, args: [] }, required: true }, { name: 'pet_samples', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'off_cpu_intervals', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'cycles', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'instructions', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'l1d_misses', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'branch_mispreds', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'children', type_ref: { tag: 'concrete', type_id: 0x0a96b404b4d79d67n, args: [{ tag: 'concrete', type_id: 0xacd4834091495bcen, args: [] }] }, required: true }] } }],
     [0x240883a6784a0dden, { id: 0x240883a6784a0dden, type_params: [], kind: { tag: 'struct', name: 'FlamegraphUpdate', fields: [{ name: 'total_on_cpu_ns', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'total_off_cpu', type_ref: { tag: 'concrete', type_id: 0xa6544bf68ad6b55cn, args: [] }, required: true }, { name: 'strings', type_ref: { tag: 'concrete', type_id: 0x0a96b404b4d79d67n, args: [{ tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }] }, required: true }, { name: 'root', type_ref: { tag: 'concrete', type_id: 0xacd4834091495bcen, args: [] }, required: true }] } }],
-    [0xba0496aa8cee7a4cn, { id: 0xba0496aa8cee7a4cn, type_params: ['T0', 'T1'], kind: { tag: 'tuple', elements: [{ tag: 'var', name: 'T0' }, { tag: 'var', name: 'T1' }] } }],
     [0x280e4b7bd3c1857fn, { id: 0x280e4b7bd3c1857fn, type_params: [], kind: { tag: 'struct', name: 'ThreadInfo', fields: [{ name: 'tid', type_ref: { tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }, required: true }, { name: 'name', type_ref: { tag: 'concrete', type_id: 0xdcafd4de6b7969bbn, args: [{ tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }] }, required: true }, { name: 'on_cpu_ns', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'off_cpu', type_ref: { tag: 'concrete', type_id: 0xa6544bf68ad6b55cn, args: [] }, required: true }, { name: 'pet_samples', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }] } }],
     [0x2c384616cb5c3aden, { id: 0x2c384616cb5c3aden, type_params: [], kind: { tag: 'struct', name: 'ThreadsUpdate', fields: [{ name: 'threads', type_ref: { tag: 'concrete', type_id: 0x0a96b404b4d79d67n, args: [{ tag: 'concrete', type_id: 0x280e4b7bd3c1857fn, args: [] }] }, required: true }] } }],
-    [0x6847ab90feda71c1n, { id: 0x6847ab90feda71c1n, type_params: ['T0'], kind: { tag: 'tuple', elements: [{ tag: 'var', name: 'T0' }] } }],
     [0x32ec7bb903ef97ddn, { id: 0x32ec7bb903ef97ddn, type_params: [], kind: { tag: 'struct', name: 'TimelineBucket', fields: [{ name: 'start_ns', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'on_cpu_ns', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'off_cpu_ns', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }] } }],
     [0x850d6eed797249ffn, { id: 0x850d6eed797249ffn, type_params: [], kind: { tag: 'struct', name: 'TimelineUpdate', fields: [{ name: 'bucket_size_ns', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'recording_duration_ns', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'total_on_cpu_ns', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'total_off_cpu_ns', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'buckets', type_ref: { tag: 'concrete', type_id: 0x0a96b404b4d79d67n, args: [{ tag: 'concrete', type_id: 0x32ec7bb903ef97ddn, args: [] }] }, required: true }] } }],
     [0x3b0d82ca26ca8011n, { id: 0x3b0d82ca26ca8011n, type_params: [], kind: { tag: 'struct', name: 'NeighborsUpdate', fields: [{ name: 'strings', type_ref: { tag: 'concrete', type_id: 0x0a96b404b4d79d67n, args: [{ tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }] }, required: true }, { name: 'function_name', type_ref: { tag: 'concrete', type_id: 0xdcafd4de6b7969bbn, args: [{ tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }] }, required: true }, { name: 'binary', type_ref: { tag: 'concrete', type_id: 0xdcafd4de6b7969bbn, args: [{ tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }] }, required: true }, { name: 'is_main', type_ref: { tag: 'concrete', type_id: 0x178367a87f66fb46n, args: [] }, required: true }, { name: 'language', type_ref: { tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }, required: true }, { name: 'own_on_cpu_ns', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'own_off_cpu', type_ref: { tag: 'concrete', type_id: 0xa6544bf68ad6b55cn, args: [] }, required: true }, { name: 'own_pet_samples', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'own_off_cpu_intervals', type_ref: { tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, required: true }, { name: 'callers_tree', type_ref: { tag: 'concrete', type_id: 0xacd4834091495bcen, args: [] }, required: true }, { name: 'callees_tree', type_ref: { tag: 'concrete', type_id: 0xacd4834091495bcen, args: [] }, required: true }] } }],
@@ -1074,18 +1404,28 @@ export const profiler_send_schemas: import("@bearcove/vox-core").ServiceSendSche
   ]),
   methods: new Map<bigint, import("@bearcove/vox-core").MethodSendSchemas>([
     [0x4eb5e594c5e49e21n, { argsRootRef: { tag: 'concrete', type_id: 0xaa510ab07d34f141n, args: [{ tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }, { tag: 'concrete', type_id: 0xa9bc52fb11aa78c0n, args: [] }, { tag: 'concrete', type_id: 0x6f5fed68b5ace623n, args: [] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0x0a96b404b4d79d67n, args: [{ tag: 'concrete', type_id: 0x5973fe57ec11dd2fn, args: [] }] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
+    [0x7d9fe97f38add11fn, { argsRootRef: { tag: 'concrete', type_id: 0xaa510ab07d34f141n, args: [{ tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }, { tag: 'concrete', type_id: 0xa9bc52fb11aa78c0n, args: [] }, { tag: 'concrete', type_id: 0x6f5fed68b5ace623n, args: [] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0xf37cef8f274712ban, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
     [0x5e5b065bf333971bn, { argsRootRef: { tag: 'concrete', type_id: 0x915c6fb5b64f270bn, args: [{ tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }, { tag: 'concrete', type_id: 0xa9bc52fb11aa78c0n, args: [] }, { tag: 'concrete', type_id: 0x6f5fed68b5ace623n, args: [] }, { tag: 'concrete', type_id: 0xc886545a493d06ebn, args: [{ tag: 'concrete', type_id: 0xf37cef8f274712ban, args: [] }] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0xbc5c33249a2dc720n, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
     [0xe2829a21383119b4n, { argsRootRef: { tag: 'concrete', type_id: 0xbc5c33249a2dc720n, args: [] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
+    [0xf202b32106aebf48n, { argsRootRef: { tag: 'concrete', type_id: 0xba0496aa8cee7a4cn, args: [{ tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, { tag: 'concrete', type_id: 0x6f5fed68b5ace623n, args: [] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0xcac80352e0417711n, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
     [0xbd08d48f35f68c69n, { argsRootRef: { tag: 'concrete', type_id: 0xaa510ab07d34f141n, args: [{ tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, { tag: 'concrete', type_id: 0x6f5fed68b5ace623n, args: [] }, { tag: 'concrete', type_id: 0xc886545a493d06ebn, args: [{ tag: 'concrete', type_id: 0xcac80352e0417711n, args: [] }] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0xbc5c33249a2dc720n, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
+    [0x4daac56b194b862fn, { argsRootRef: { tag: 'concrete', type_id: 0x6847ab90feda71c1n, args: [{ tag: 'concrete', type_id: 0x6f5fed68b5ace623n, args: [] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0x240883a6784a0dden, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
     [0x6889c2c730466af0n, { argsRootRef: { tag: 'concrete', type_id: 0xba0496aa8cee7a4cn, args: [{ tag: 'concrete', type_id: 0x6f5fed68b5ace623n, args: [] }, { tag: 'concrete', type_id: 0xc886545a493d06ebn, args: [{ tag: 'concrete', type_id: 0x240883a6784a0dden, args: [] }] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0xbc5c33249a2dc720n, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
+    [0x33fb58adecb28dean, { argsRootRef: { tag: 'concrete', type_id: 0xbc5c33249a2dc720n, args: [] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0x2c384616cb5c3aden, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
     [0xbf5f73ea223d9f7dn, { argsRootRef: { tag: 'concrete', type_id: 0x6847ab90feda71c1n, args: [{ tag: 'concrete', type_id: 0xc886545a493d06ebn, args: [{ tag: 'concrete', type_id: 0x2c384616cb5c3aden, args: [] }] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0xbc5c33249a2dc720n, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
+    [0xae55e9be2dc6a39an, { argsRootRef: { tag: 'concrete', type_id: 0x6847ab90feda71c1n, args: [{ tag: 'concrete', type_id: 0xdcafd4de6b7969bbn, args: [{ tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0x850d6eed797249ffn, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
     [0xc3381210c17fc3c4n, { argsRootRef: { tag: 'concrete', type_id: 0xba0496aa8cee7a4cn, args: [{ tag: 'concrete', type_id: 0xdcafd4de6b7969bbn, args: [{ tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }] }, { tag: 'concrete', type_id: 0xc886545a493d06ebn, args: [{ tag: 'concrete', type_id: 0x850d6eed797249ffn, args: [] }] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0xbc5c33249a2dc720n, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
+    [0xb289f4d7e911ad10n, { argsRootRef: { tag: 'concrete', type_id: 0xba0496aa8cee7a4cn, args: [{ tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, { tag: 'concrete', type_id: 0x6f5fed68b5ace623n, args: [] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0x3b0d82ca26ca8011n, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
     [0x42acdf6aa85cc2d3n, { argsRootRef: { tag: 'concrete', type_id: 0xaa510ab07d34f141n, args: [{ tag: 'concrete', type_id: 0xd9356298b81639acn, args: [] }, { tag: 'concrete', type_id: 0x6f5fed68b5ace623n, args: [] }, { tag: 'concrete', type_id: 0xc886545a493d06ebn, args: [{ tag: 'concrete', type_id: 0x3b0d82ca26ca8011n, args: [] }] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0xbc5c33249a2dc720n, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
+    [0x03a2a085cf611098n, { argsRootRef: { tag: 'concrete', type_id: 0x6847ab90feda71c1n, args: [{ tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0x5ce6ea672e206d3en, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
     [0xc6ab2f2a4444e87cn, { argsRootRef: { tag: 'concrete', type_id: 0xba0496aa8cee7a4cn, args: [{ tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }, { tag: 'concrete', type_id: 0xc886545a493d06ebn, args: [{ tag: 'concrete', type_id: 0x5ce6ea672e206d3en, args: [] }] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0xbc5c33249a2dc720n, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
+    [0x0e5152fe1d5189e0n, { argsRootRef: { tag: 'concrete', type_id: 0xba0496aa8cee7a4cn, args: [{ tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }, { tag: 'concrete', type_id: 0x6f5fed68b5ace623n, args: [] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0xe0dc192175c3c123n, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
     [0xc689c5fb8e7ec474n, { argsRootRef: { tag: 'concrete', type_id: 0xaa510ab07d34f141n, args: [{ tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }, { tag: 'concrete', type_id: 0x6f5fed68b5ace623n, args: [] }, { tag: 'concrete', type_id: 0xc886545a493d06ebn, args: [{ tag: 'concrete', type_id: 0xe0dc192175c3c123n, args: [] }] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0xbc5c33249a2dc720n, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
+    [0xf8b0a4d361f215d6n, { argsRootRef: { tag: 'concrete', type_id: 0xba0496aa8cee7a4cn, args: [{ tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }, { tag: 'concrete', type_id: 0x6f5fed68b5ace623n, args: [] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0xd6af01229bc47f82n, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
     [0xca1b65cabd8a8f38n, { argsRootRef: { tag: 'concrete', type_id: 0xaa510ab07d34f141n, args: [{ tag: 'concrete', type_id: 0x6d7dce914ee150e8n, args: [] }, { tag: 'concrete', type_id: 0x6f5fed68b5ace623n, args: [] }, { tag: 'concrete', type_id: 0xc886545a493d06ebn, args: [{ tag: 'concrete', type_id: 0xd6af01229bc47f82n, args: [] }] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0xbc5c33249a2dc720n, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
     [0x0ffcbbadd058c8f7n, { argsRootRef: { tag: 'concrete', type_id: 0x6847ab90feda71c1n, args: [{ tag: 'concrete', type_id: 0x178367a87f66fb46n, args: [] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0xbc5c33249a2dc720n, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
     [0xfbcae644722d364en, { argsRootRef: { tag: 'concrete', type_id: 0xbc5c33249a2dc720n, args: [] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0x178367a87f66fb46n, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
+    [0xc853dfab2eb75d77n, { argsRootRef: { tag: 'concrete', type_id: 0x6847ab90feda71c1n, args: [{ tag: 'concrete', type_id: 0xdcafd4de6b7969bbn, args: [{ tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0x1098f4e53a617b18n, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
     [0x45bb91e63c98208an, { argsRootRef: { tag: 'concrete', type_id: 0xba0496aa8cee7a4cn, args: [{ tag: 'concrete', type_id: 0xdcafd4de6b7969bbn, args: [{ tag: 'concrete', type_id: 0x281c5be4f2ee63b4n, args: [] }] }, { tag: 'concrete', type_id: 0xc886545a493d06ebn, args: [{ tag: 'concrete', type_id: 0x1098f4e53a617b18n, args: [] }] }] }, responseRootRef: { tag: 'concrete', type_id: 0x42046de663beeef0n, args: [{ tag: 'concrete', type_id: 0xbc5c33249a2dc720n, args: [] }, { tag: 'concrete', type_id: 0x4cf4b2aeb98a1939n, args: [{ tag: 'concrete', type_id: 0x5db70a394660f3e6n, args: [] }] }] } }],
   ]),
 };
@@ -1093,6 +1433,12 @@ export const profiler_send_schemas: import("@bearcove/vox-core").ServiceSendSche
 export const profiler_top_method: MethodDescriptor = {
   name: 'top',
   id: 0x4eb5e594c5e49e21n,
+  retry: { persist: false, idem: false },
+};
+
+export const profiler_topUpdate_method: MethodDescriptor = {
+  name: 'topUpdate',
+  id: 0x7d9fe97f38add11fn,
   retry: { persist: false, idem: false },
 };
 
@@ -1108,9 +1454,21 @@ export const profiler_totalOnCpuNs_method: MethodDescriptor = {
   retry: { persist: false, idem: false },
 };
 
+export const profiler_annotated_method: MethodDescriptor = {
+  name: 'annotated',
+  id: 0xf202b32106aebf48n,
+  retry: { persist: false, idem: false },
+};
+
 export const profiler_subscribeAnnotated_method: MethodDescriptor = {
   name: 'subscribeAnnotated',
   id: 0xbd08d48f35f68c69n,
+  retry: { persist: false, idem: false },
+};
+
+export const profiler_flamegraph_method: MethodDescriptor = {
+  name: 'flamegraph',
+  id: 0x4daac56b194b862fn,
   retry: { persist: false, idem: false },
 };
 
@@ -1120,9 +1478,21 @@ export const profiler_subscribeFlamegraph_method: MethodDescriptor = {
   retry: { persist: false, idem: false },
 };
 
+export const profiler_threads_method: MethodDescriptor = {
+  name: 'threads',
+  id: 0x33fb58adecb28dean,
+  retry: { persist: false, idem: false },
+};
+
 export const profiler_subscribeThreads_method: MethodDescriptor = {
   name: 'subscribeThreads',
   id: 0xbf5f73ea223d9f7dn,
+  retry: { persist: false, idem: false },
+};
+
+export const profiler_timeline_method: MethodDescriptor = {
+  name: 'timeline',
+  id: 0xae55e9be2dc6a39an,
   retry: { persist: false, idem: false },
 };
 
@@ -1132,9 +1502,21 @@ export const profiler_subscribeTimeline_method: MethodDescriptor = {
   retry: { persist: false, idem: false },
 };
 
+export const profiler_neighbors_method: MethodDescriptor = {
+  name: 'neighbors',
+  id: 0xb289f4d7e911ad10n,
+  retry: { persist: false, idem: false },
+};
+
 export const profiler_subscribeNeighbors_method: MethodDescriptor = {
   name: 'subscribeNeighbors',
   id: 0x42acdf6aa85cc2d3n,
+  retry: { persist: false, idem: false },
+};
+
+export const profiler_wakers_method: MethodDescriptor = {
+  name: 'wakers',
+  id: 0x03a2a085cf611098n,
   retry: { persist: false, idem: false },
 };
 
@@ -1144,9 +1526,21 @@ export const profiler_subscribeWakers_method: MethodDescriptor = {
   retry: { persist: false, idem: false },
 };
 
+export const profiler_intervals_method: MethodDescriptor = {
+  name: 'intervals',
+  id: 0x0e5152fe1d5189e0n,
+  retry: { persist: false, idem: false },
+};
+
 export const profiler_subscribeIntervals_method: MethodDescriptor = {
   name: 'subscribeIntervals',
   id: 0xc689c5fb8e7ec474n,
+  retry: { persist: false, idem: false },
+};
+
+export const profiler_petSamples_method: MethodDescriptor = {
+  name: 'petSamples',
+  id: 0xf8b0a4d361f215d6n,
   retry: { persist: false, idem: false },
 };
 
@@ -1168,6 +1562,12 @@ export const profiler_isPaused_method: MethodDescriptor = {
   retry: { persist: false, idem: false },
 };
 
+export const profiler_probeDiff_method: MethodDescriptor = {
+  name: 'probeDiff',
+  id: 0xc853dfab2eb75d77n,
+  retry: { persist: false, idem: false },
+};
+
 export const profiler_subscribeProbeDiff_method: MethodDescriptor = {
   name: 'subscribeProbeDiff',
   id: 0x45bb91e63c98208an,
@@ -1180,18 +1580,28 @@ export const profiler_descriptor: ServiceDescriptor = {
   send_schemas: profiler_send_schemas,
   methods: new Map<bigint, MethodDescriptor>([
     [profiler_top_method.id, profiler_top_method],
+    [profiler_topUpdate_method.id, profiler_topUpdate_method],
     [profiler_subscribeTop_method.id, profiler_subscribeTop_method],
     [profiler_totalOnCpuNs_method.id, profiler_totalOnCpuNs_method],
+    [profiler_annotated_method.id, profiler_annotated_method],
     [profiler_subscribeAnnotated_method.id, profiler_subscribeAnnotated_method],
+    [profiler_flamegraph_method.id, profiler_flamegraph_method],
     [profiler_subscribeFlamegraph_method.id, profiler_subscribeFlamegraph_method],
+    [profiler_threads_method.id, profiler_threads_method],
     [profiler_subscribeThreads_method.id, profiler_subscribeThreads_method],
+    [profiler_timeline_method.id, profiler_timeline_method],
     [profiler_subscribeTimeline_method.id, profiler_subscribeTimeline_method],
+    [profiler_neighbors_method.id, profiler_neighbors_method],
     [profiler_subscribeNeighbors_method.id, profiler_subscribeNeighbors_method],
+    [profiler_wakers_method.id, profiler_wakers_method],
     [profiler_subscribeWakers_method.id, profiler_subscribeWakers_method],
+    [profiler_intervals_method.id, profiler_intervals_method],
     [profiler_subscribeIntervals_method.id, profiler_subscribeIntervals_method],
+    [profiler_petSamples_method.id, profiler_petSamples_method],
     [profiler_subscribePetSamples_method.id, profiler_subscribePetSamples_method],
     [profiler_setPaused_method.id, profiler_setPaused_method],
     [profiler_isPaused_method.id, profiler_isPaused_method],
+    [profiler_probeDiff_method.id, profiler_probeDiff_method],
     [profiler_subscribeProbeDiff_method.id, profiler_subscribeProbeDiff_method],
   ]),
 };

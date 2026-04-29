@@ -563,38 +563,28 @@ async fn run_annotate(args: AnnotateArgs) -> Result<(), Box<dyn Error>> {
         },
     };
     let address = resolve_target(&client, &args.target, view_params.clone()).await?;
-    // subscribe_annotated streams updates every ~250ms; we want a one-shot
-    // snapshot, so take the first item and drop the channel.
-    let (tx, mut rx) = vox::channel();
-    client
-        .subscribe_annotated(address, view_params, tx)
+    let view = client
+        .annotated(address, view_params)
         .await
         .map_err(|e| format!("{e:?}"))?;
-    let view_sref = rx
-        .recv()
-        .await
-        .map_err(|e| format!("{e:?}"))?
-        .ok_or("annotate stream closed before sending an update")?;
-    view_sref.map(|view| {
-        println!(
-            "; {} ({}) @ {:#x}",
-            view.function_name, view.language, view.base_address
-        );
-        for line in view.lines {
-            if let Some(hdr) = &line.source_header
-                && !hdr.file.is_empty()
-            {
-                println!("; {}:{}", hdr.file, hdr.line);
-            }
-            // .html carries arborium-tagged HTML; strip the tags for a
-            // plain-text terminal view.
-            let plain = strip_html_tags(&line.html);
-            println!(
-                "  {:#x}  {:>5} samples  {}",
-                line.address, line.self_pet_samples, plain
-            );
+    println!(
+        "; {} ({}) @ {:#x}",
+        view.function_name, view.language, view.base_address
+    );
+    for line in view.lines {
+        if let Some(hdr) = &line.source_header
+            && !hdr.file.is_empty()
+        {
+            println!("; {}:{}", hdr.file, hdr.line);
         }
-    });
+        // .html carries arborium-tagged HTML; strip the tags for a
+        // plain-text terminal view.
+        let plain = strip_html_tags(&line.html);
+        println!(
+            "  {:#x}  {:>5} samples  {}",
+            line.address, line.self_pet_samples, plain
+        );
+    }
     Ok(())
 }
 
@@ -602,18 +592,8 @@ async fn run_threads(args: ThreadsArgs) -> Result<(), Box<dyn Error>> {
     let url = require_server_socket()?;
     let client: ProfilerClient = vox::connect(&url).await?;
     let _debug_registration = register_profiler_client("threads", &client);
-    // subscribe_threads streams every ~250ms; take the first.
-    let (tx, mut rx) = vox::channel();
-    client
-        .subscribe_threads(tx)
-        .await
-        .map_err(|e| format!("{e:?}"))?;
-    let update_sref = rx
-        .recv()
-        .await
-        .map_err(|e| format!("{e:?}"))?
-        .ok_or("threads stream closed before sending an update")?;
-    update_sref.map(|update| print_threads(&update, args.limit));
+    let update = client.threads().await.map_err(|e| format!("{e:?}"))?;
+    print_threads(&update, args.limit);
     Ok(())
 }
 
@@ -655,17 +635,11 @@ async fn run_probe_diff(args: ProbeDiffArgs) -> Result<(), Box<dyn Error>> {
     let url = require_server_socket()?;
     let client: ProfilerClient = vox::connect(&url).await?;
     let _debug_registration = register_profiler_client("probe-diff", &client);
-    let (tx, mut rx) = vox::channel();
-    client
-        .subscribe_probe_diff(args.tid, tx)
+    let update = client
+        .probe_diff(args.tid)
         .await
         .map_err(|e| format!("{e:?}"))?;
-    let update_sref = rx
-        .recv()
-        .await
-        .map_err(|e| format!("{e:?}"))?
-        .ok_or("probe-diff stream closed before sending an update")?;
-    update_sref.map(|update| print_probe_diff(&update, args.recent));
+    print_probe_diff(&update, args.recent);
     Ok(())
 }
 
@@ -988,30 +962,17 @@ async fn run_flame(args: FlameArgs) -> Result<(), Box<dyn Error>> {
     let url = require_server_socket()?;
     let client: ProfilerClient = vox::connect(&url).await?;
     let _debug_registration = register_profiler_client("flame", &client);
-    // subscribe_flamegraph streams updates every ~500ms; take the
-    // first snapshot and drop the channel.
-    let (tx, mut rx) = vox::channel();
-    client
-        .subscribe_flamegraph(
-            ViewParams {
-                tid: args.tid,
-                filter: LiveFilter {
-                    time_range: None,
-                    exclude_symbols: Vec::new(),
-                },
+    let update = client
+        .flamegraph(ViewParams {
+            tid: args.tid,
+            filter: LiveFilter {
+                time_range: None,
+                exclude_symbols: Vec::new(),
             },
-            tx,
-        )
+        })
         .await
         .map_err(|e| format!("{e:?}"))?;
-    let view_sref = rx
-        .recv()
-        .await
-        .map_err(|e| format!("{e:?}"))?
-        .ok_or("flamegraph stream closed before sending an update")?;
-    view_sref.map(|update| {
-        print_flame(&update, args.max_depth, args.threshold_pct);
-    });
+    print_flame(&update, args.max_depth, args.threshold_pct);
     Ok(())
 }
 

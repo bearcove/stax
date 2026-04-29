@@ -1,5 +1,4 @@
 import Foundation
-@preconcurrency import NIOCore
 import Observation
 import SwiftUI
 import VoxRuntime
@@ -249,9 +248,9 @@ final class AppModel {
 
     /// Why a connection isn't live (or empty when everything's fine).
     var connectionStatus: String = "disconnected"
-    /// Per-stream update counters surfaced in the status bar so you
-    /// can see whether anything is actually flowing without scraping
-    /// the unified log.
+    /// Per-view update counters surfaced in the status bar so you
+    /// can see whether anything is actually refreshing without
+    /// scraping the unified log.
     var streamStats = StreamStats()
     private let service = ProfilerService()
     private var streamTasks: [Task<Void, Never>] = []
@@ -270,7 +269,7 @@ final class AppModel {
     private var annotatedTask: Task<Void, Never>?
     private var neighborsTask: Task<Void, Never>?
 
-    /// Connect to stax-server, then start subscriptions that drive
+    /// Connect to stax-server, then start polling tasks that drive
     /// live-data fields (`threads`, `functions`, total stats, …).
     /// Idempotent.
     func start() async {
@@ -281,12 +280,10 @@ final class AppModel {
         case .ready(let client):
             connectionStatus = "connected"
 
-            // Spawn all streams concurrently. Don't gate them on a
-            // unary smoke-test — if any one stream is slow or hangs
-            // we want the others to keep flowing, and the visible
-            // streamStats counters tell us exactly which ones woke
-            // up. The unary `totalOnCpuNs` is a separate fire-and-
-            // forget below, just for one extra signal in the log.
+            // Spawn all pollers concurrently. Don't gate them on a
+            // smoke-test — if any one view is slow, the others should
+            // keep refreshing, and the visible counters tell us which
+            // ones woke up.
             streamTasks.append(Task { [weak self] in
                 await self?.runThreadsSubscription(client: client)
             })
@@ -320,27 +317,10 @@ final class AppModel {
     }
 
     private func runThreadsSubscription(client: ProfilerClient) async {
-        let (tx, rx) = channel(
-            serialize: { (val: ThreadsUpdate, buf: inout ByteBuffer) in
-                encodeThreadsUpdate(val, into: &buf)
-            },
-            deserialize: { (buf: inout ByteBuffer) in
-                try decodeThreadsUpdate(from: &buf)
-            }
-        )
-
-        Task {
+        var count = 0
+        while !Task.isCancelled {
             do {
-                try await client.subscribeThreads(output: tx)
-                NSLog("stax: subscribeThreads call returned")
-            } catch {
-                NSLog("stax: subscribeThreads call failed: %@", "\(error)")
-            }
-        }
-
-        do {
-            var count = 0
-            for try await update in rx {
+                let update = try await client.threads()
                 count += 1
                 NSLog("stax: threads update #%d (%d threads)", count, update.threads.count)
                 self.streamStats.threads = count
@@ -351,45 +331,26 @@ final class AppModel {
                         onCPU: TimeInterval(wire.onCpuNs) / 1_000_000_000
                     )
                 }
+            } catch {
+                NSLog("stax: threads poll failed: %@", "\(error)")
             }
-            NSLog("stax: threads stream ended")
-        } catch {
-            NSLog("stax: threads stream error: %@", "\(error)")
+            try? await Task.sleep(nanoseconds: 500_000_000)
         }
     }
 
     private func runTopSubscription(client: ProfilerClient) async {
-        let (tx, rx) = channel(
-            serialize: { (val: TopUpdate, buf: inout ByteBuffer) in
-                encodeTopUpdate(val, into: &buf)
-            },
-            deserialize: { (buf: inout ByteBuffer) in
-                try decodeTopUpdate(from: &buf)
-            }
-        )
-
-        let params = ViewParams(
-            tid: model_tidFilterAsU32(),
-            filter: LiveFilter(timeRange: nil, excludeSymbols: [])
-        )
-
-        Task {
+        var count = 0
+        while !Task.isCancelled {
+            let params = ViewParams(
+                tid: model_tidFilterAsU32(),
+                filter: LiveFilter(timeRange: nil, excludeSymbols: [])
+            )
             do {
-                try await client.subscribeTop(
+                let update = try await client.topUpdate(
                     limit: 100,
                     sort: .bySelf,
-                    params: params,
-                    output: tx
+                    params: params
                 )
-                NSLog("stax: subscribeTop call returned")
-            } catch {
-                NSLog("stax: subscribeTop call failed: %@", "\(error)")
-            }
-        }
-
-        do {
-            var count = 0
-            for try await update in rx {
                 count += 1
                 NSLog(
                     "stax: top update #%d (%d entries, total on-cpu=%llu ns)",
@@ -414,40 +375,22 @@ final class AppModel {
                 }
                 self.symbolCount = update.entries.count
                 self.onCPUTime = TimeInterval(update.totalOnCpuNs) / 1_000_000_000
+            } catch {
+                NSLog("stax: top poll failed: %@", "\(error)")
             }
-            NSLog("stax: top stream ended")
-        } catch {
-            NSLog("stax: top stream error: %@", "\(error)")
+            try? await Task.sleep(nanoseconds: 500_000_000)
         }
     }
 
     private func runFlamegraphSubscription(client: ProfilerClient) async {
-        let (tx, rx) = channel(
-            serialize: { (val: FlamegraphUpdate, buf: inout ByteBuffer) in
-                encodeFlamegraphUpdate(val, into: &buf)
-            },
-            deserialize: { (buf: inout ByteBuffer) in
-                try decodeFlamegraphUpdate(from: &buf)
-            }
-        )
-
-        let params = ViewParams(
-            tid: model_tidFilterAsU32(),
-            filter: LiveFilter(timeRange: nil, excludeSymbols: [])
-        )
-
-        Task {
+        var count = 0
+        while !Task.isCancelled {
+            let params = ViewParams(
+                tid: model_tidFilterAsU32(),
+                filter: LiveFilter(timeRange: nil, excludeSymbols: [])
+            )
             do {
-                try await client.subscribeFlamegraph(params: params, output: tx)
-                NSLog("stax: subscribeFlamegraph call returned")
-            } catch {
-                NSLog("stax: subscribeFlamegraph call failed: %@", "\(error)")
-            }
-        }
-
-        do {
-            var count = 0
-            for try await update in rx {
+                let update = try await client.flamegraph(params: params)
                 count += 1
                 NSLog(
                     "stax: flamegraph update #%d (%d strings, root.children=%d)",
@@ -457,38 +400,21 @@ final class AppModel {
                 )
                 self.streamStats.flamegraph = count
                 self.flamegraph = update
+            } catch {
+                NSLog("stax: flamegraph poll failed: %@", "\(error)")
             }
-            NSLog("stax: flamegraph stream ended")
-        } catch {
-            NSLog("stax: flamegraph stream error: %@", "\(error)")
+            try? await Task.sleep(nanoseconds: 500_000_000)
         }
     }
 
     private func runTimelineSubscription(client: ProfilerClient) async {
-        let (tx, rx) = channel(
-            serialize: { (val: TimelineUpdate, buf: inout ByteBuffer) in
-                encodeTimelineUpdate(val, into: &buf)
-            },
-            deserialize: { (buf: inout ByteBuffer) in
-                try decodeTimelineUpdate(from: &buf)
-            }
-        )
-
         // The timeline is always relative to the whole recording —
         // brush selection is applied client-side. `tid: nil` means
         // "all threads".
-        Task {
+        var count = 0
+        while !Task.isCancelled {
             do {
-                try await client.subscribeTimeline(tid: nil, output: tx)
-                NSLog("stax: subscribeTimeline call returned")
-            } catch {
-                NSLog("stax: subscribeTimeline call failed: %@", "\(error)")
-            }
-        }
-
-        do {
-            var count = 0
-            for try await update in rx {
+                let update = try await client.timeline(tid: nil)
                 count += 1
                 NSLog(
                     "stax: timeline update #%d (%d buckets, duration=%llu ns)",
@@ -498,10 +424,10 @@ final class AppModel {
                 )
                 self.streamStats.timeline = count
                 self.timeline = update
+            } catch {
+                NSLog("stax: timeline poll failed: %@", "\(error)")
             }
-            NSLog("stax: timeline stream ended")
-        } catch {
-            NSLog("stax: timeline stream error: %@", "\(error)")
+            try? await Task.sleep(nanoseconds: 500_000_000)
         }
     }
 
@@ -558,36 +484,16 @@ final class AppModel {
         client: ProfilerClient,
         address: UInt64
     ) async {
-        let (tx, rx) = channel(
-            serialize: { (val: NeighborsUpdate, buf: inout ByteBuffer) in
-                encodeNeighborsUpdate(val, into: &buf)
-            },
-            deserialize: { (buf: inout ByteBuffer) in
-                try decodeNeighborsUpdate(from: &buf)
-            }
-        )
-
-        let params = ViewParams(
-            tid: model_tidFilterAsU32(),
-            filter: LiveFilter(timeRange: nil, excludeSymbols: [])
-        )
-
-        Task {
+        while !Task.isCancelled {
+            let params = ViewParams(
+                tid: model_tidFilterAsU32(),
+                filter: LiveFilter(timeRange: nil, excludeSymbols: [])
+            )
             do {
-                try await client.subscribeNeighbors(
+                let update = try await client.neighbors(
                     address: address,
-                    params: params,
-                    output: tx
+                    params: params
                 )
-                NSLog("stax: subscribeNeighbors call returned")
-            } catch {
-                NSLog("stax: subscribeNeighbors call failed: %@", "\(error)")
-            }
-        }
-
-        do {
-            for try await update in rx {
-                if Task.isCancelled { break }
                 NSLog(
                     "stax: neighbors update (%d callers, %d callees)",
                     update.callersTree.children.count,
@@ -596,9 +502,10 @@ final class AppModel {
                 self.streamStats.neighbors += 1
                 self.neighbors = update
                 applyNeighbors(update)
+            } catch {
+                NSLog("stax: neighbors poll failed: %@", "\(error)")
             }
-        } catch {
-            NSLog("stax: neighbors stream error: %@", "\(error)")
+            try? await Task.sleep(nanoseconds: 500_000_000)
         }
     }
 
@@ -647,36 +554,16 @@ final class AppModel {
         client: ProfilerClient,
         address: UInt64
     ) async {
-        let (tx, rx) = channel(
-            serialize: { (val: AnnotatedView, buf: inout ByteBuffer) in
-                encodeAnnotatedView(val, into: &buf)
-            },
-            deserialize: { (buf: inout ByteBuffer) in
-                try decodeAnnotatedView(from: &buf)
-            }
-        )
-
-        let params = ViewParams(
-            tid: model_tidFilterAsU32(),
-            filter: LiveFilter(timeRange: nil, excludeSymbols: [])
-        )
-
-        Task {
+        while !Task.isCancelled {
+            let params = ViewParams(
+                tid: model_tidFilterAsU32(),
+                filter: LiveFilter(timeRange: nil, excludeSymbols: [])
+            )
             do {
-                try await client.subscribeAnnotated(
+                let update = try await client.annotated(
                     address: address,
-                    params: params,
-                    output: tx
+                    params: params
                 )
-                NSLog("stax: subscribeAnnotated call returned")
-            } catch {
-                NSLog("stax: subscribeAnnotated call failed: %@", "\(error)")
-            }
-        }
-
-        do {
-            for try await update in rx {
-                if Task.isCancelled { break }
                 NSLog(
                     "stax: annotated update for %@ (%d lines)",
                     update.functionName,
@@ -684,9 +571,10 @@ final class AppModel {
                 )
                 self.streamStats.annotated += 1
                 self.annotated = update
+            } catch {
+                NSLog("stax: annotated poll failed: %@", "\(error)")
             }
-        } catch {
-            NSLog("stax: annotated stream error: %@", "\(error)")
+            try? await Task.sleep(nanoseconds: 500_000_000)
         }
     }
 }
