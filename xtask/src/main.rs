@@ -102,17 +102,6 @@ fn install() -> Result<(), Box<dyn Error>> {
                     .join("entitlements")
                     .join("eu.bearcove.stax-shade.debugger.plist");
                 codesign_binary(&dst, Some(&entitlements), &codesign_identity)?;
-            } else if bin == SERVER_BIN {
-                // App-group membership so the sandboxed Mac client
-                // can reach the unix socket inside
-                // ~/Library/Group Containers/B2N6FSRTPV.eu.bearcove.stax/
-                // without triggering a TCC "access data from other
-                // apps" prompt.
-                let entitlements = workspace_root
-                    .join(SERVER_BIN)
-                    .join("entitlements")
-                    .join("eu.bearcove.stax-server.plist");
-                codesign_binary(&dst, Some(&entitlements), &codesign_identity)?;
             } else {
                 codesign_binary(&dst, None, &codesign_identity)?;
             }
@@ -272,10 +261,7 @@ fn codesign_binary(
         command.arg("--timestamp=none");
     }
     if let Some(entitlements) = entitlements {
-        command
-            .arg("--entitlements")
-            .arg(entitlements)
-            .arg("--generate-entitlement-der");
+        command.arg("--entitlements").arg(entitlements);
     }
     command.arg(binary);
 

@@ -19,9 +19,6 @@ use stax_live_proto::{
     TerminalOutput, TerminalSize, ThreadsUpdate, TopSort, ViewParams, WaitCondition, WaitOutcome,
 };
 
-#[cfg(target_os = "macos")]
-const DEFAULT_APP_GROUP: &str = "B2N6FSRTPV.eu.bearcove.stax";
-
 fn main_impl() -> Result<(), Box<dyn Error>> {
     if env::var("RUST_LOG").is_err() {
         // cranelift_jit/cranelift_codegen log every JIT'd function at info,
@@ -103,18 +100,6 @@ fn stax_server_socket() -> Option<PathBuf> {
     if let Ok(p) = env::var("STAX_SERVER_SOCKET") {
         let p = PathBuf::from(p);
         return p.exists().then_some(p);
-    }
-    #[cfg(target_os = "macos")]
-    if let Some(home) = env::var_os("HOME") {
-        let app_group = env::var("STAX_APP_GROUP").unwrap_or_else(|_| DEFAULT_APP_GROUP.into());
-        let p = PathBuf::from(home)
-            .join("Library")
-            .join("Group Containers")
-            .join(app_group)
-            .join("stax-server.sock");
-        if p.exists() {
-            return Some(p);
-        }
     }
     if let Ok(rt) = env::var("XDG_RUNTIME_DIR") {
         let p = PathBuf::from(rt).join("stax-server.sock");

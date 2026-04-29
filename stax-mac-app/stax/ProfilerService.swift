@@ -50,10 +50,6 @@ final class ProfilerService {
         state = .idle
     }
 
-    /// stax-server places its unix socket at
-    /// `<app-group-container>/stax-server.sock` so a sandboxed peer
-    /// (us) can reach it via the `application-groups` entitlement.
-    private static let appGroup = "B2N6FSRTPV.eu.bearcove.stax"
     private static let socketName = "stax-server.sock"
 
     private static func resolveSocketPath() -> String? {
@@ -63,10 +59,12 @@ final class ProfilerService {
         {
             return env
         }
-        if let containerURL = fm.containerURL(forSecurityApplicationGroupIdentifier: appGroup) {
-            let p = containerURL.appendingPathComponent(socketName).path
+        if let runtime = ProcessInfo.processInfo.environment["XDG_RUNTIME_DIR"] {
+            let p = URL(fileURLWithPath: runtime).appendingPathComponent(socketName).path
             if fm.fileExists(atPath: p) { return p }
         }
+        let p = "/tmp/stax-server-\(getuid()).sock"
+        if fm.fileExists(atPath: p) { return p }
         return nil
     }
 }

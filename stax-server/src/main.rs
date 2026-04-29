@@ -236,49 +236,15 @@ fn cleanup_session_shade(server: &ServerState, slot: &ShadeSlot) {
     }
 }
 
-/// macOS app-group container path for the stax-server socket. The
-/// sandboxed stax macOS app uses this shared unix socket, so the
-/// default group must match the app's signed app-group entitlement.
-const DEFAULT_APP_GROUP: &str = "B2N6FSRTPV.eu.bearcove.stax";
-
 fn resolve_socket_path() -> PathBuf {
     if let Ok(p) = std::env::var("STAX_SERVER_SOCKET") {
         return PathBuf::from(p);
-    }
-    if let Some(p) = group_container_socket() {
-        return p;
     }
     if let Ok(rt) = std::env::var("XDG_RUNTIME_DIR") {
         return PathBuf::from(rt).join(DEFAULT_SOCK_NAME);
     }
     let uid = unsafe { libc::getuid() };
     PathBuf::from(format!("/tmp/stax-server-{uid}.sock"))
-}
-
-#[cfg(target_os = "macos")]
-fn group_container_socket() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    let app_group = std::env::var("STAX_APP_GROUP").unwrap_or_else(|_| DEFAULT_APP_GROUP.into());
-    let dir = PathBuf::from(home)
-        .join("Library")
-        .join("Group Containers")
-        .join(app_group);
-    // The container is a regular directory under the user's home;
-    // the app-group entitlement merely *grants access* to sandboxed
-    // peers. Non-sandboxed processes (us) can mkdir it freely.
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        tracing::warn!(
-            "stax-server: cannot create group container {}: {e}",
-            dir.display()
-        );
-        return None;
-    }
-    Some(dir.join(DEFAULT_SOCK_NAME))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn group_container_socket() -> Option<PathBuf> {
-    None
 }
 
 /// Shared state. The aggregator + binary registry persist across
