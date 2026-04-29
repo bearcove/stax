@@ -84,6 +84,9 @@ pub struct KdBufBatch {
     pub read_started_mach_ticks: u64,
     /// mach_absolute_time immediately after KERN_KDREADTR returned.
     pub drained_mach_ticks: u64,
+    /// mach_absolute_time immediately before staxd put this batch
+    /// into its local sender queue.
+    pub queued_for_send_mach_ticks: u64,
     /// mach_absolute_time immediately before the daemon handed this
     /// batch to vox.
     pub send_started_mach_ticks: u64,

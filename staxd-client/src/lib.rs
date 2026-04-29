@@ -73,6 +73,9 @@ pub struct KperfProbeTriggerTiming {
     pub staxd_read_started: u64,
     /// mach_absolute_time immediately after staxd's KERN_KDREADTR returned.
     pub staxd_drained: u64,
+    /// mach_absolute_time immediately before staxd queued the batch
+    /// for its sender task.
+    pub staxd_queued_for_send: u64,
     /// mach_absolute_time immediately before staxd handed the batch to vox.
     pub staxd_send_started: u64,
     /// mach_absolute_time immediately after this client received the batch.
@@ -328,7 +331,7 @@ where
             if !seen_first_batch {
                 seen_first_batch = true;
                 info!(
-                    "staxd-client: first batch arrived records={} since_client_start={:?} since_record_rpc_spawn={:?} since_recv_loop_start={:?} drained_at_unix_ns={} received_at_unix_ns={} read_started_mach={} drained_mach={} send_started_mach={} client_received_mach={}",
+                    "staxd-client: first batch arrived records={} since_client_start={:?} since_record_rpc_spawn={:?} since_recv_loop_start={:?} drained_at_unix_ns={} received_at_unix_ns={} read_started_mach={} drained_mach={} queued_for_send_mach={} send_started_mach={} client_received_mach={}",
                     batch.records.len(),
                     client_start.elapsed(),
                     record_rpc_start.elapsed(),
@@ -337,6 +340,7 @@ where
                     client_received_unix_ns,
                     batch.read_started_mach_ticks,
                     batch.drained_mach_ticks,
+                    batch.queued_for_send_mach_ticks,
                     batch.send_started_mach_ticks,
                     client_received_mach_ticks
                 );
@@ -345,7 +349,7 @@ where
             if !batch.records.is_empty() && !seen_first_nonempty_batch {
                 seen_first_nonempty_batch = true;
                 info!(
-                    "staxd-client: first non-empty batch arrived records={} first_ts={} last_ts={} drained_at_unix_ns={} received_at_unix_ns={} read_started_mach={} drained_mach={} send_started_mach={} client_received_mach={} since_client_start={:?} since_record_rpc_spawn={:?}",
+                    "staxd-client: first non-empty batch arrived records={} first_ts={} last_ts={} drained_at_unix_ns={} received_at_unix_ns={} read_started_mach={} drained_mach={} queued_for_send_mach={} send_started_mach={} client_received_mach={} since_client_start={:?} since_record_rpc_spawn={:?}",
                     batch.records.len(),
                     batch.records.first().map(|rec| rec.timestamp).unwrap_or(0),
                     batch.records.last().map(|rec| rec.timestamp).unwrap_or(0),
@@ -353,6 +357,7 @@ where
                     client_received_unix_ns,
                     batch.read_started_mach_ticks,
                     batch.drained_mach_ticks,
+                    batch.queued_for_send_mach_ticks,
                     batch.send_started_mach_ticks,
                     client_received_mach_ticks,
                     client_start.elapsed(),
@@ -377,6 +382,7 @@ where
                             kperf_ts: ts,
                             staxd_read_started: batch.read_started_mach_ticks,
                             staxd_drained: batch.drained_mach_ticks,
+                            staxd_queued_for_send: batch.queued_for_send_mach_ticks,
                             staxd_send_started: batch.send_started_mach_ticks,
                             client_received: client_received_mach_ticks,
                         },

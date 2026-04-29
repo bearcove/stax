@@ -555,6 +555,7 @@ pub struct ProbeTimingBreakdown {
     pub kperf_ts_ticks: u64,
     pub staxd_read_started_ticks: u64,
     pub staxd_drained_ticks: u64,
+    pub staxd_queued_for_send_ticks: u64,
     pub staxd_send_started_ticks: u64,
     pub client_received_ticks: u64,
     pub enqueued_ticks: u64,
@@ -571,6 +572,10 @@ pub struct ProbeTimingBreakdown {
     pub staxd_read_ns: u64,
     /// Daemon post-read batch build / pre-send delay.
     pub staxd_drain_to_send_ns: u64,
+    /// Daemon post-read batch build / local queue handoff delay.
+    pub staxd_drain_to_queue_ns: u64,
+    /// Time spent in staxd's local sender queue before Vox send.
+    pub staxd_queue_wait_ns: u64,
     /// Daemon send start -> client receive.
     pub staxd_send_to_client_recv_ns: u64,
     /// Client receive -> race-probe enqueue.
@@ -600,6 +605,10 @@ pub struct ProbeTimingSummary {
     pub max_staxd_read_ns: u64,
     pub avg_staxd_drain_to_send_ns: u64,
     pub max_staxd_drain_to_send_ns: u64,
+    pub avg_staxd_drain_to_queue_ns: u64,
+    pub max_staxd_drain_to_queue_ns: u64,
+    pub avg_staxd_queue_wait_ns: u64,
+    pub max_staxd_queue_wait_ns: u64,
     pub avg_staxd_send_to_client_recv_ns: u64,
     pub max_staxd_send_to_client_recv_ns: u64,
     pub avg_client_recv_to_enqueue_ns: u64,
@@ -1014,6 +1023,9 @@ pub struct ProbeTiming {
     pub staxd_read_started: u64,
     /// mach_absolute_time immediately after staxd's KERN_KDREADTR returned.
     pub staxd_drained: u64,
+    /// mach_absolute_time immediately before staxd queued the batch
+    /// for its sender task.
+    pub staxd_queued_for_send: u64,
     /// mach_absolute_time immediately before staxd handed the batch to vox.
     pub staxd_send_started: u64,
     /// mach_absolute_time immediately after the client received the batch.

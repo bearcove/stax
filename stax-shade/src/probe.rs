@@ -425,6 +425,7 @@ fn probe_timing_from_trigger(trigger: KperfProbeTriggerTiming, enqueued: u64) ->
         kperf_ts: trigger.kperf_ts,
         staxd_read_started: trigger.staxd_read_started,
         staxd_drained: trigger.staxd_drained,
+        staxd_queued_for_send: trigger.staxd_queued_for_send,
         staxd_send_started: trigger.staxd_send_started,
         client_received: trigger.client_received,
         enqueued,

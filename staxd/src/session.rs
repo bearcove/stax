@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use mach2::mach_time::mach_absolute_time;
+use mach2::mach_time::{mach_absolute_time, mach_timebase_info};
 use tracing::{info, warn};
 
 use stax_mac_kperf_sys::bindings::{self, Frameworks};
@@ -164,6 +164,115 @@ fn setup_kdebug(config: &SessionConfig) -> Result<(), RecordError> {
     Ok(())
 }
 
+const SEND_QUEUE_CAPACITY: usize = 256;
+const SEND_FLUSH_BUDGET: Duration = Duration::from_secs(2);
+const SLOW_SEND_WAIT: Duration = Duration::from_millis(10);
+
+#[derive(Clone, Copy, Debug, Default)]
+struct SendDropStats {
+    dropped_batches: u64,
+    dropped_empty_batches: u64,
+    dropped_records: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct SendSummary {
+    sent_batches: u64,
+    sent_records: u64,
+    max_send_wait_ns: u64,
+}
+
+struct BatchSendQueue {
+    tx: flume::Sender<KdBufBatch>,
+    drop_rx: flume::Receiver<KdBufBatch>,
+    drops: SendDropStats,
+}
+
+impl BatchSendQueue {
+    fn new(capacity: usize) -> Self {
+        let (tx, drop_rx) = flume::bounded(capacity);
+        Self {
+            tx,
+            drop_rx,
+            drops: SendDropStats::default(),
+        }
+    }
+
+    fn receiver(&self) -> flume::Receiver<KdBufBatch> {
+        self.drop_rx.clone()
+    }
+
+    fn stats(&self) -> SendDropStats {
+        self.drops
+    }
+
+    fn enqueue_drop_oldest(&mut self, mut batch: KdBufBatch) -> bool {
+        loop {
+            match self.tx.try_send(batch) {
+                Ok(()) => return true,
+                Err(flume::TrySendError::Full(returned)) => {
+                    batch = returned;
+                    if batch.records.is_empty() {
+                        self.drops.dropped_empty_batches =
+                            self.drops.dropped_empty_batches.saturating_add(1);
+                        return true;
+                    }
+                    match self.drop_rx.try_recv() {
+                        Ok(dropped) => self.record_drop(dropped),
+                        Err(flume::TryRecvError::Empty) => continue,
+                        Err(flume::TryRecvError::Disconnected) => return false,
+                    }
+                }
+                Err(flume::TrySendError::Disconnected(_)) => return false,
+            }
+        }
+    }
+
+    fn record_drop(&mut self, batch: KdBufBatch) {
+        if batch.records.is_empty() {
+            self.drops.dropped_empty_batches = self.drops.dropped_empty_batches.saturating_add(1);
+            return;
+        }
+        self.drops.dropped_batches = self.drops.dropped_batches.saturating_add(1);
+        self.drops.dropped_records = self
+            .drops
+            .dropped_records
+            .saturating_add(batch.records.len() as u64);
+    }
+}
+
+async fn send_batches(
+    records: vox::Tx<KdBufBatch>,
+    rx: flume::Receiver<KdBufBatch>,
+    cancel: Arc<AtomicBool>,
+) -> SendSummary {
+    let mut summary = SendSummary::default();
+    while let Ok(mut batch) = rx.recv_async().await {
+        let records_in_batch = batch.records.len() as u64;
+        batch.send_started_mach_ticks = mach_ticks_now();
+        let send_wait_start = Instant::now();
+        if let Err(e) = records.send(batch).await {
+            info!(?e, "client closed records channel; ending staxd sender");
+            cancel.store(true, Ordering::Relaxed);
+            break;
+        }
+        let send_wait = send_wait_start.elapsed();
+        summary.sent_batches = summary.sent_batches.saturating_add(1);
+        summary.sent_records = summary.sent_records.saturating_add(records_in_batch);
+        summary.max_send_wait_ns = summary
+            .max_send_wait_ns
+            .max(send_wait.as_nanos().min(u64::MAX as u128) as u64);
+        if send_wait >= SLOW_SEND_WAIT {
+            info!(
+                records = records_in_batch,
+                send_wait = ?send_wait,
+                "staxd sender waited on records channel"
+            );
+        }
+    }
+    summary
+}
+
 async fn drain(
     _fw: &Frameworks,
     config: &SessionConfig,
@@ -180,10 +289,18 @@ async fn drain(
     let mut total_drained: u64 = 0;
     let mut first_nonempty_logged = false;
     let mut send_count: u64 = 0;
+    let mut sleep_before_read = true;
+    let mut last_read_started_mach_ticks = 0u64;
+    let mut send_queue = BatchSendQueue::new(SEND_QUEUE_CAPACITY);
+    let mut sender_task =
+        tokio::spawn(send_batches(records, send_queue.receiver(), cancel.clone()));
+    let mut last_drop_log = Instant::now();
+    let mut last_logged_drops = SendDropStats::default();
 
     info!(
         drain_period = ?drain_period,
         buf_records = config.buf_records,
+        send_queue_capacity = SEND_QUEUE_CAPACITY,
         "staxd drain loop starting"
     );
 
@@ -194,17 +311,15 @@ async fn drain(
     // SCHED records unrelated to the target.
     let sent_ready_at_unix_ns = unix_ns_now();
     let sent_ready_mach_ticks = mach_ticks_now();
-    if let Err(e) = records
-        .send(KdBufBatch {
-            records: Vec::new(),
-            read_started_mach_ticks: sent_ready_mach_ticks,
-            drained_mach_ticks: sent_ready_mach_ticks,
-            send_started_mach_ticks: sent_ready_mach_ticks,
-            drained_at_unix_ns: sent_ready_at_unix_ns,
-        })
-        .await
-    {
-        info!(?e, "client closed records channel before ready batch");
+    if !send_queue.enqueue_drop_oldest(KdBufBatch {
+        records: Vec::new(),
+        read_started_mach_ticks: sent_ready_mach_ticks,
+        drained_mach_ticks: sent_ready_mach_ticks,
+        queued_for_send_mach_ticks: sent_ready_mach_ticks,
+        send_started_mach_ticks: 0,
+        drained_at_unix_ns: sent_ready_at_unix_ns,
+    }) {
+        info!("records sender closed before ready batch");
         return Ok(RecordSummary {
             records_drained: 0,
             session_ns: session_start.elapsed().as_nanos() as u64,
@@ -224,7 +339,11 @@ async fn drain(
             break;
         }
 
-        tokio::time::sleep(drain_period).await;
+        if sleep_before_read {
+            tokio::time::sleep(drain_period).await;
+        } else {
+            tokio::task::yield_now().await;
+        }
 
         if cancel.load(Ordering::Relaxed) {
             info!("stop requested; ending kdebug drain");
@@ -232,6 +351,12 @@ async fn drain(
         }
 
         let read_started_mach_ticks = mach_ticks_now();
+        let read_gap_ns = if last_read_started_mach_ticks == 0 {
+            0
+        } else {
+            elapsed_ticks_to_ns(read_started_mach_ticks, last_read_started_mach_ticks)
+        };
+        last_read_started_mach_ticks = read_started_mach_ticks;
         let n = match kdebug::read_trace(&mut buf) {
             Ok(n) => n,
             Err(e) => {
@@ -242,6 +367,8 @@ async fn drain(
         let drained_mach_ticks = mach_ticks_now();
         total_drained += n as u64;
         let drained_at_unix_ns = unix_ns_now();
+        let oldest_record_age_ns = oldest_record_age_ns(&buf, n, read_started_mach_ticks);
+        let newest_record_age_ns = newest_record_age_ns(&buf, n, read_started_mach_ticks);
         if n > 0 && !first_nonempty_logged {
             first_nonempty_logged = true;
             info!(
@@ -252,6 +379,9 @@ async fn drain(
                 drained_at_unix_ns,
                 read_started_mach_ticks,
                 drained_mach_ticks,
+                read_gap_ns,
+                oldest_record_age_ns,
+                newest_record_age_ns,
                 ready_to_first_nonempty_ns = drained_at_unix_ns.saturating_sub(sent_ready_at_unix_ns),
                 "staxd first non-empty kdebug drain"
             );
@@ -262,24 +392,69 @@ async fn drain(
         // drain loop spins forever holding ktrace ownership long
         // after the client disconnected.
         let records_vec = buf[..n].iter().map(kdbuf_to_wire).collect();
-        let send_started_mach_ticks = mach_ticks_now();
+        let queued_for_send_mach_ticks = mach_ticks_now();
         let batch = KdBufBatch {
             records: records_vec,
             read_started_mach_ticks,
             drained_mach_ticks,
-            send_started_mach_ticks,
+            queued_for_send_mach_ticks,
+            send_started_mach_ticks: 0,
             drained_at_unix_ns,
         };
-        if let Err(e) = records.send(batch).await {
-            info!(?e, "client closed records channel; ending session");
+        if !send_queue.enqueue_drop_oldest(batch) {
+            info!("records sender closed; ending session");
             break;
         }
+        let drops = send_queue.stats();
+        if drops.dropped_records != last_logged_drops.dropped_records
+            && last_drop_log.elapsed() >= Duration::from_secs(1)
+        {
+            warn!(
+                dropped_batches = drops.dropped_batches,
+                dropped_empty_batches = drops.dropped_empty_batches,
+                dropped_records = drops.dropped_records,
+                "staxd sender queue dropping batches"
+            );
+            last_logged_drops = drops;
+            last_drop_log = Instant::now();
+        }
+        if oldest_record_age_ns >= 100_000_000 || read_gap_ns >= 100_000_000 {
+            info!(
+                records = n,
+                read_gap_ns, oldest_record_age_ns, newest_record_age_ns, "staxd slow drain cycle"
+            );
+        }
+        sleep_before_read = n == 0;
         send_count += 1;
     }
 
+    let final_drops = send_queue.stats();
+    drop(send_queue);
+    let send_summary = match tokio::time::timeout(SEND_FLUSH_BUDGET, &mut sender_task).await {
+        Ok(Ok(summary)) => summary,
+        Ok(Err(e)) => {
+            warn!("staxd sender task join failed: {e}");
+            SendSummary::default()
+        }
+        Err(_) => {
+            sender_task.abort();
+            warn!(
+                budget = ?SEND_FLUSH_BUDGET,
+                "staxd sender did not flush before teardown; aborting"
+            );
+            SendSummary::default()
+        }
+    };
+
     info!(
         records_drained = total_drained,
-        sends = send_count,
+        batches_queued = send_count,
+        sent_batches = send_summary.sent_batches,
+        sent_records = send_summary.sent_records,
+        max_send_wait_ns = send_summary.max_send_wait_ns,
+        dropped_batches = final_drops.dropped_batches,
+        dropped_empty_batches = final_drops.dropped_empty_batches,
+        dropped_records = final_drops.dropped_records,
         elapsed = ?session_start.elapsed(),
         "staxd drain loop ended"
     );
@@ -391,4 +566,31 @@ fn unix_ns_now() -> u64 {
 #[inline]
 fn mach_ticks_now() -> u64 {
     unsafe { mach_absolute_time() }
+}
+
+fn elapsed_ticks_to_ns(later: u64, earlier: u64) -> u64 {
+    if later < earlier {
+        return 0;
+    }
+    let mut info = mach_timebase_info { numer: 0, denom: 0 };
+    let rc = unsafe { mach2::mach_time::mach_timebase_info(&mut info) };
+    if rc != 0 || info.denom == 0 {
+        return later - earlier;
+    }
+    (((later - earlier) as u128) * info.numer as u128 / info.denom as u128).min(u64::MAX as u128)
+        as u64
+}
+
+fn oldest_record_age_ns(buf: &[KdBuf], n: usize, read_started_mach_ticks: u64) -> u64 {
+    buf.first()
+        .filter(|_| n > 0)
+        .map(|rec| elapsed_ticks_to_ns(read_started_mach_ticks, rec.timestamp))
+        .unwrap_or(0)
+}
+
+fn newest_record_age_ns(buf: &[KdBuf], n: usize, read_started_mach_ticks: u64) -> u64 {
+    n.checked_sub(1)
+        .and_then(|idx| buf.get(idx))
+        .map(|rec| elapsed_ticks_to_ns(read_started_mach_ticks, rec.timestamp))
+        .unwrap_or(0)
 }

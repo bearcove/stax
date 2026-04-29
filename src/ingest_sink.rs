@@ -211,6 +211,7 @@ impl From<crate::live_sink::ProbeTiming> for stax_live_proto::ProbeTiming {
             kperf_ts: t.kperf_ts,
             staxd_read_started: t.staxd_read_started,
             staxd_drained: t.staxd_drained,
+            staxd_queued_for_send: t.staxd_queued_for_send,
             staxd_send_started: t.staxd_send_started,
             client_received: t.client_received,
             enqueued: t.enqueued,

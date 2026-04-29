@@ -758,7 +758,7 @@ fn print_probe_diff(update: &ProbeDiffUpdate, recent_limit: u32) {
     if t.samples > 0 {
         println!("\nprobe timing breakdown (avg / max, causal path):");
         println!(
-            "  kernel buffer wait {:>9} / {:>9}  (kperf_ts → staxd read)",
+            "  kernel ring age    {:>9} / {:>9}  (kperf_ts → staxd read)",
             fmt_ns(t.avg_kperf_to_staxd_read_ns),
             fmt_ns(t.max_kperf_to_staxd_read_ns)
         );
@@ -768,9 +768,14 @@ fn print_probe_diff(update: &ProbeDiffUpdate, recent_limit: u32) {
             fmt_ns(t.max_staxd_read_ns)
         );
         println!(
-            "  staxd drain→send   {:>9} / {:>9}",
-            fmt_ns(t.avg_staxd_drain_to_send_ns),
-            fmt_ns(t.max_staxd_drain_to_send_ns)
+            "  staxd drain→queue  {:>9} / {:>9}",
+            fmt_ns(t.avg_staxd_drain_to_queue_ns),
+            fmt_ns(t.max_staxd_drain_to_queue_ns)
+        );
+        println!(
+            "  staxd queue wait   {:>9} / {:>9}",
+            fmt_ns(t.avg_staxd_queue_wait_ns),
+            fmt_ns(t.max_staxd_queue_wait_ns)
         );
         println!(
             "  staxd→client recv  {:>9} / {:>9}",
@@ -875,10 +880,11 @@ fn print_probe_diff(update: &ProbeDiffUpdate, recent_limit: u32) {
             entry.used_framehop,
         );
         println!(
-            "    ticks: kperf={} staxd_read={} staxd_drained={} staxd_send={} client_recv={} enqueue={} worker={} lookup_done={} state_done={} resume_done={} walk_done={}",
+            "    ticks: kperf={} staxd_read={} staxd_drained={} staxd_queued={} staxd_send={} client_recv={} enqueue={} worker={} lookup_done={} state_done={} resume_done={} walk_done={}",
             entry.timing.kperf_ts_ticks,
             entry.timing.staxd_read_started_ticks,
             entry.timing.staxd_drained_ticks,
+            entry.timing.staxd_queued_for_send_ticks,
             entry.timing.staxd_send_started_ticks,
             entry.timing.client_received_ticks,
             entry.timing.enqueued_ticks,
@@ -889,10 +895,11 @@ fn print_probe_diff(update: &ProbeDiffUpdate, recent_limit: u32) {
             entry.timing.walk_done_ticks,
         );
         println!(
-            "    path: kernel_wait={} staxd_read={} drain→send={} staxd→client={} client→enqueue={} end_to_end_enqueue={} queue={} lookup={} suspend+state={} resume={} walk={} worker_total={} kperf→state={} coalesced={} batch={}",
+            "    path: kernel_age={} staxd_read={} drain→queue={} staxd_queue={} staxd→client={} client→enqueue={} end_to_end_enqueue={} queue={} lookup={} suspend+state={} resume={} walk={} worker_total={} kperf→state={} coalesced={} batch={}",
             fmt_ns(entry.timing.kperf_to_staxd_read_ns),
             fmt_ns(entry.timing.staxd_read_ns),
-            fmt_ns(entry.timing.staxd_drain_to_send_ns),
+            fmt_ns(entry.timing.staxd_drain_to_queue_ns),
+            fmt_ns(entry.timing.staxd_queue_wait_ns),
             fmt_ns(entry.timing.staxd_send_to_client_recv_ns),
             fmt_ns(entry.timing.client_recv_to_enqueue_ns),
             fmt_ns(entry.timing.kperf_to_enqueue_ns),

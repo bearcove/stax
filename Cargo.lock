@@ -2291,6 +2291,7 @@ name = "staxd"
 version = "0.1.0"
 dependencies = [
  "eyre",
+ "flume",
  "libc",
  "mach2",
  "stax-mac-kperf-sys",

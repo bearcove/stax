@@ -17,6 +17,7 @@ stax-telemetry = { path = "../stax-telemetry" }
 stax-vox-observe = { version = "0.1", path = "../stax-vox-observe" }
 vox = { path = "/Users/amos/bearcove/vox/rust/vox" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+flume = "0.11"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter"] }
 tracing-oslog = "0.3"

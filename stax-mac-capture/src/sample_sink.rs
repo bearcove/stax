@@ -75,6 +75,9 @@ pub struct ProbeTiming {
     pub staxd_read_started: u64,
     /// mach_absolute_time immediately after staxd's KERN_KDREADTR returned.
     pub staxd_drained: u64,
+    /// mach_absolute_time immediately before staxd put the batch on its
+    /// local send queue. Equal to `staxd_drained` for in-process captures.
+    pub staxd_queued_for_send: u64,
     /// mach_absolute_time immediately before staxd handed the batch to vox.
     pub staxd_send_started: u64,
     /// mach_absolute_time immediately after the client received the batch.
