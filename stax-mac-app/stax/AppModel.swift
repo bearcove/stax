@@ -54,6 +54,11 @@ final class AppModel {
     /// resolves string-table indices on draw.
     var flamegraph: FlamegraphUpdate? = nil
 
+    /// Callers + callees trees centered on the focused function.
+    /// Held verbatim so the call-graph layout can walk the FlameNode
+    /// trees and resolve `update.strings` on render.
+    var neighbors: NeighborsUpdate? = nil
+
     enum CPUMode: String, CaseIterable, Identifiable {
         case onCPU = "on-cpu"
         case offCPU = "off-cpu"
@@ -502,11 +507,13 @@ final class AppModel {
 
     /// Cancel any in-flight neighbors subscription and start a new
     /// one for the currently-focused function (if any). The result
-    /// populates `familyCallers` / `familyFocused` / `familyCallees`,
-    /// which the call-graph view reads.
+    /// populates `neighbors` (raw wire shape) plus the legacy
+    /// `familyCallers` / `familyFocused` / `familyCallees` flat lists
+    /// (for any remaining consumers).
     private func restartNeighborsSubscription() {
         neighborsTask?.cancel()
         neighborsTask = nil
+        neighbors = nil
         guard
             let id = focusedFunctionId,
             let fn = functions.first(where: { $0.id == id })
@@ -558,6 +565,7 @@ final class AppModel {
                     update.callersTree.children.count,
                     update.calleesTree.children.count
                 )
+                self.neighbors = update
                 applyNeighbors(update)
             }
         } catch {
