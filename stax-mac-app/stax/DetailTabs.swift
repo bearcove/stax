@@ -26,7 +26,7 @@ struct DetailTabs: View {
 
             ZStack {
                 switch tab {
-                case .disassembly: DisassemblyPlaceholder()
+                case .disassembly: DisassemblyView(model: model)
                 case .cfg:         CFGView()
                 case .intervals:   IntervalsView(model: model)
                 }
@@ -45,34 +45,101 @@ private struct AsmLine: Hashable {
     let cost: Double  // 0...1
 }
 
-private struct DisassemblyPlaceholder: View {
+private struct DisassemblyView: View {
+    @Bindable var model: AppModel
+
     var body: some View {
+        Group {
+            if let view = model.annotated {
+                liveBody(view)
+            } else if model.focusedFunctionId == nil {
+                emptyState("Select a function to drill into.")
+            } else {
+                emptyState("Loading disassembly…")
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(nsColor: .textBackgroundColor).opacity(0.3))
+    }
+
+    @ViewBuilder
+    private func liveBody(_ view: AnnotatedView) -> some View {
+        let maxCost = max(
+            1,
+            view.lines.map(\.selfOnCpuNs).max() ?? 0
+        )
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                AsmRow(label: "validations.rs:133", lines: [
-                    .init(addr: "+0x0",  op: "subs",  args: "x9, x1, #0xf",                cost: 0.04),
-                    .init(addr: "+0x4",  op: "csel",  args: "x10, xzr, x9, lo",            cost: 0.02),
-                ])
-                AsmRow(label: "validations.rs:145", lines: [
-                    .init(addr: "+0x8",  op: "cbz",   args: "x1, $+0x204",                  cost: 0.18),
-                    .init(addr: "+0xc",  op: "mov",   args: "x9, #0x0",                     cost: 0.01),
-                    .init(addr: "+0x10", op: "add",   args: "x11, x0, #0x7",                cost: 0.62),
-                    .init(addr: "+0x14", op: "and",   args: "x11, x11, #0xfffffffffffffff8",cost: 0.85),
-                    .init(addr: "+0x18", op: "sub",   args: "x11, x11, x0",                 cost: 0.10),
-                    .init(addr: "+0x1c", op: "adrp",  args: "x12, $+0x292000",              cost: 0.07),
-                    .init(addr: "+0x20", op: "add",   args: "x12, x12, #0x18d",             cost: 0.05),
-                    .init(addr: "+0x24", op: "b",     args: "$+0x10",                       cost: 0.03),
-                ])
-                AsmRow(label: "validations.rs:217", lines: [
-                    .init(addr: "+0x28", op: "add",   args: "x9, x13, #0x1",                cost: 0.08),
-                ])
+                ForEach(Array(view.lines.enumerated()), id: \.offset) { _, line in
+                    AnnotatedLineRow(line: line, baseAddress: view.baseAddress, maxCost: maxCost)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
         }
-        .background(Color(nsColor: .textBackgroundColor).opacity(0.3))
     }
+
+    private func emptyState(_ text: String) -> some View {
+        VStack {
+            Text(text)
+                .font(.mono(.callout))
+                .foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private struct AnnotatedLineRow: View {
+    let line: AnnotatedLine
+    let baseAddress: UInt64
+    let maxCost: UInt64
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if let header = line.sourceHeader {
+                Text("\(header.file):\(header.line)")
+                    .font(.mono(.caption))
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 4)
+                Text(stripHTML(header.html))
+                    .font(.mono(.caption))
+                    .foregroundStyle(.tertiary)
+                    .padding(.bottom, 2)
+            }
+            HStack(spacing: 8) {
+                BarTrack(ratio: Double(line.selfOnCpuNs) / Double(maxCost))
+                    .frame(width: 36, height: 3)
+                Text(percentLabel(Double(line.selfOnCpuNs) / Double(maxCost)))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 32, alignment: .trailing)
+                Text(addressOffset(line.address, base: baseAddress))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 64, alignment: .trailing)
+                Text(stripHTML(line.html))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+            }
+            .font(.mono(.caption))
+        }
+    }
+}
+
+private func addressOffset(_ addr: UInt64, base: UInt64) -> String {
+    if addr >= base {
+        return String(format: "+0x%llx", addr - base)
+    }
+    return String(format: "0x%llx", addr)
+}
+
+private func stripHTML(_ html: String) -> String {
+    var s = html.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+    s = s.replacingOccurrences(of: "&lt;", with: "<")
+    s = s.replacingOccurrences(of: "&gt;", with: ">")
+    s = s.replacingOccurrences(of: "&amp;", with: "&")
+    s = s.replacingOccurrences(of: "&quot;", with: "\"")
+    s = s.replacingOccurrences(of: "&#39;", with: "'")
+    return s
 }
 
 private struct AsmRow: View {

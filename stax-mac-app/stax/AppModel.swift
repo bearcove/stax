@@ -7,7 +7,22 @@ import VoxRuntime
 @Observable
 @MainActor
 final class AppModel {
-    var paused: Bool = false
+    var paused: Bool = false {
+        didSet {
+            guard oldValue != paused else { return }
+            let target = paused
+            Task { [weak self] in
+                guard case .ready(let client) = await self?.service.state else { return }
+                do {
+                    try await client.setPaused(paused: target)
+                    NSLog("stax: setPaused(%@)", target ? "true" : "false")
+                } catch {
+                    NSLog("stax: setPaused failed: %@", "\(error)")
+                }
+            }
+        }
+    }
+
     /// `nil` means all threads.
     var threadFilter: Int? = nil
     /// Quoted (`"foo"`) → exact substring. Slashed (`/foo/`) → regex.
@@ -16,7 +31,17 @@ final class AppModel {
 
     /// `nil` → top pane shows the flame graph. Non-nil → top pane shows the
     /// call graph centered on the focused function.
-    var focusedFunctionId: FunctionEntry.ID? = nil
+    var focusedFunctionId: FunctionEntry.ID? = nil {
+        didSet {
+            guard oldValue != focusedFunctionId else { return }
+            restartAnnotatedSubscription()
+        }
+    }
+
+    /// Live disassembly + source view for the focused function.
+    /// Populated by `subscribe_annotated` while a function is focused;
+    /// nil while the flame graph is the top pane.
+    var annotated: AnnotatedView? = nil
 
     enum CPUMode: String, CaseIterable, Identifiable {
         case onCPU = "on-cpu"
@@ -110,6 +135,9 @@ final class AppModel {
 
     struct FunctionEntry: Identifiable, Hashable {
         let id = UUID()
+        /// AVMA of (or near) this symbol — used to drill in via
+        /// `subscribe_annotated`.
+        let address: UInt64
         let name: String
         let binary: String
         let kind: SymbolKind
@@ -199,18 +227,7 @@ final class AppModel {
     var intervalsTotalCount: Int = 20577
     var intervalsTotalDuration: TimeInterval = 0.7874
 
-    var functions: [FunctionEntry] = [
-        .init(name: "start_wqthread",                                              binary: "libsystem_pthread.dylib", kind: .c,     selfTime: 0.0012,    totalTime: 0.0024),
-        .init(name: "core::str::converts::from_utf8",                              binary: "transcribe-metal",        kind: .rust,  selfTime: 0,         totalTime: 0),
-        .init(name: "__psynch_cvwait",                                             binary: "libsystem_kernel.dylib",  kind: .c,     selfTime: 0.0000766, totalTime: 0.0000766),
-        .init(name: "write",                                                       binary: "libsystem_kernel.dylib",  kind: .c,     selfTime: 0,         totalTime: 0),
-        .init(name: "iokit_user_client_trap",                                      binary: "IOKit",                   kind: .c,     selfTime: 0.0012,    totalTime: 0.0012),
-        .init(name: "rustfft::algorithm::mixed_radix",                             binary: "transcribe-metal",        kind: .rust,  selfTime: 0,         totalTime: 0),
-        .init(name: "core::hash::BuildHasher::hash_one",                           binary: "transcribe-metal",        kind: .rust,  selfTime: 0,         totalTime: 0),
-        .init(name: "-[_MTLCommandQueue _submitAvailableCommandBuffers]",          binary: "Metal",                   kind: .objc,  selfTime: 0,         totalTime: 0),
-        .init(name: "-[IOGPUMetalCommandQueue submitCommandBuffers:count:]",       binary: "IOGPU",                   kind: .objc,  selfTime: 0,         totalTime: 0),
-        .init(name: "0x1010728c8",                                                 binary: "(no binary)",             kind: .unknown, selfTime: 0.000991, totalTime: 0.000994),
-    ]
+    var functions: [FunctionEntry] = []
 
     // MARK: - Live data plumbing
 
@@ -218,9 +235,14 @@ final class AppModel {
     var connectionStatus: String = "disconnected"
     private let service = ProfilerService()
     private var streamTasks: [Task<Void, Never>] = []
+    /// Restartable subscription: cancel + relaunch every time
+    /// `focusedFunctionId` changes. Holds nil while the flame graph
+    /// is the top pane.
+    private var annotatedTask: Task<Void, Never>?
 
     /// Connect to stax-server, then start subscriptions that drive
-    /// live-data fields (`threads`, …). Idempotent.
+    /// live-data fields (`threads`, `functions`, total stats, …).
+    /// Idempotent.
     func start() async {
         guard streamTasks.isEmpty else { return }
         connectionStatus = "connecting"
@@ -228,8 +250,25 @@ final class AppModel {
         switch service.state {
         case .ready(let client):
             connectionStatus = "connected"
+
+            // Smoke-test the unary path on the way in. If this fails
+            // the streaming subscriptions won't work either, so we
+            // surface the failure up front.
+            do {
+                let total = try await client.totalOnCpuNs()
+                NSLog("stax: totalOnCpuNs = %llu", total)
+                self.onCPUTime = TimeInterval(total) / 1_000_000_000
+            } catch {
+                NSLog("stax: totalOnCpuNs failed: %@", "\(error)")
+                connectionStatus = "totalOnCpuNs failed"
+                return
+            }
+
             streamTasks.append(Task { [weak self] in
                 await self?.runThreadsSubscription(client: client)
+            })
+            streamTasks.append(Task { [weak self] in
+                await self?.runTopSubscription(client: client)
             })
         case .failed(let why):
             connectionStatus = why
@@ -239,17 +278,6 @@ final class AppModel {
     }
 
     private func runThreadsSubscription(client: ProfilerClient) async {
-        // Smoke test: if this fails, vox round-trips aren't working
-        // and there's no point trying the streaming subscription.
-        do {
-            let total = try await client.totalOnCpuNs()
-            NSLog("stax: totalOnCpuNs = %llu", total)
-        } catch {
-            NSLog("stax: totalOnCpuNs failed: %@", "\(error)")
-            connectionStatus = "totalOnCpuNs failed"
-            return
-        }
-
         let (tx, rx) = channel(
             serialize: { (val: ThreadsUpdate, buf: inout ByteBuffer) in
                 encodeThreadsUpdate(val, into: &buf)
@@ -285,5 +313,147 @@ final class AppModel {
         } catch {
             NSLog("stax: threads stream error: %@", "\(error)")
         }
+    }
+
+    private func runTopSubscription(client: ProfilerClient) async {
+        let (tx, rx) = channel(
+            serialize: { (val: TopUpdate, buf: inout ByteBuffer) in
+                encodeTopUpdate(val, into: &buf)
+            },
+            deserialize: { (buf: inout ByteBuffer) in
+                try decodeTopUpdate(from: &buf)
+            }
+        )
+
+        let params = ViewParams(
+            tid: model_tidFilterAsU32(),
+            filter: LiveFilter(timeRange: nil, excludeSymbols: [])
+        )
+
+        Task {
+            do {
+                try await client.subscribeTop(
+                    limit: 100,
+                    sort: .bySelf,
+                    params: params,
+                    output: tx
+                )
+                NSLog("stax: subscribeTop call returned")
+            } catch {
+                NSLog("stax: subscribeTop call failed: %@", "\(error)")
+            }
+        }
+
+        do {
+            var count = 0
+            for try await update in rx {
+                count += 1
+                NSLog(
+                    "stax: top update #%d (%d entries, total on-cpu=%llu ns)",
+                    count,
+                    update.entries.count,
+                    update.totalOnCpuNs
+                )
+                self.functions = update.entries.map { wire in
+                    let name =
+                        wire.functionName
+                        ?? String(format: "0x%llx", wire.address)
+                    let binary = wire.binary ?? "(no binary)"
+                    return FunctionEntry(
+                        address: wire.address,
+                        name: name,
+                        binary: binary,
+                        kind: symbolKind(forLanguage: wire.language),
+                        selfTime: TimeInterval(wire.selfOnCpuNs) / 1_000_000_000,
+                        totalTime: TimeInterval(wire.totalOnCpuNs) / 1_000_000_000
+                    )
+                }
+                self.symbolCount = update.entries.count
+                self.onCPUTime = TimeInterval(update.totalOnCpuNs) / 1_000_000_000
+            }
+            NSLog("stax: top stream ended")
+        } catch {
+            NSLog("stax: top stream error: %@", "\(error)")
+        }
+    }
+
+    private func model_tidFilterAsU32() -> UInt32? {
+        guard let tid = threadFilter else { return nil }
+        return UInt32(exactly: tid)
+    }
+
+    /// Cancel any in-flight annotated subscription and start a new
+    /// one for the currently-focused function (if any).
+    private func restartAnnotatedSubscription() {
+        annotatedTask?.cancel()
+        annotatedTask = nil
+        annotated = nil
+        guard
+            let id = focusedFunctionId,
+            let fn = functions.first(where: { $0.id == id })
+        else { return }
+        guard case .ready(let client) = service.state else { return }
+
+        let address = fn.address
+        annotatedTask = Task { [weak self] in
+            await self?.runAnnotatedSubscription(client: client, address: address)
+        }
+    }
+
+    private func runAnnotatedSubscription(
+        client: ProfilerClient,
+        address: UInt64
+    ) async {
+        let (tx, rx) = channel(
+            serialize: { (val: AnnotatedView, buf: inout ByteBuffer) in
+                encodeAnnotatedView(val, into: &buf)
+            },
+            deserialize: { (buf: inout ByteBuffer) in
+                try decodeAnnotatedView(from: &buf)
+            }
+        )
+
+        let params = ViewParams(
+            tid: model_tidFilterAsU32(),
+            filter: LiveFilter(timeRange: nil, excludeSymbols: [])
+        )
+
+        Task {
+            do {
+                try await client.subscribeAnnotated(
+                    address: address,
+                    params: params,
+                    output: tx
+                )
+                NSLog("stax: subscribeAnnotated call returned")
+            } catch {
+                NSLog("stax: subscribeAnnotated call failed: %@", "\(error)")
+            }
+        }
+
+        do {
+            for try await update in rx {
+                if Task.isCancelled { break }
+                NSLog(
+                    "stax: annotated update for %@ (%d lines)",
+                    update.functionName,
+                    update.lines.count
+                )
+                self.annotated = update
+            }
+        } catch {
+            NSLog("stax: annotated stream error: %@", "\(error)")
+        }
+    }
+}
+
+private func symbolKind(forLanguage language: String) -> SymbolKind {
+    switch language.lowercased() {
+    case "rust":           .rust
+    case "c":              .c
+    case "cpp", "c++":     .cpp
+    case "swift":          .swift
+    case "objc", "objective-c", "objectivec": .objc
+    default:               .unknown
     }
 }
