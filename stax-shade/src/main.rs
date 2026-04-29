@@ -389,9 +389,9 @@ async fn run_recording(
                 }
             }
         },
-        move |tid, timestamp| {
+        move |tid, timing| {
             if let Some(trigger) = race_probe_trigger.as_ref() {
-                trigger.enqueue(tid, timestamp);
+                trigger.enqueue(tid, timing);
             }
         },
     )

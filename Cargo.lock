@@ -2116,6 +2116,7 @@ dependencies = [
  "nwind",
  "stax-live-proto",
  "stax-mac-capture",
+ "stax-vox-observe",
  "staxd-client",
  "tokio",
  "vox",
@@ -2210,6 +2211,7 @@ dependencies = [
  "stax-mac-capture",
  "stax-mac-shared-cache",
  "stax-shade-proto",
+ "stax-vox-observe",
  "tokio",
  "tracing",
  "tracing-oslog",
@@ -2259,12 +2261,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "stax-vox-observe"
+version = "0.1.0"
+dependencies = [
+ "tracing",
+ "vox",
+]
+
+[[package]]
 name = "staxd"
 version = "0.1.0"
 dependencies = [
  "eyre",
  "libc",
+ "mach2",
  "stax-mac-kperf-sys",
+ "stax-vox-observe",
  "staxd-proto",
  "tokio",
  "tracing",
@@ -2279,10 +2291,12 @@ version = "0.1.0"
 dependencies = [
  "flume",
  "log",
+ "mach2",
  "stax-mac-capture",
  "stax-mac-kperf-parse",
  "stax-mac-kperf-sys",
  "stax-mac-shared-cache",
+ "stax-vox-observe",
  "staxd-proto",
  "thiserror",
  "tokio",

@@ -725,6 +725,31 @@ fn print_probe_diff(update: &ProbeDiffUpdate, recent_limit: u32) {
             fmt_ns(t.max_kperf_to_enqueue_ns)
         );
         println!(
+            "  kperf→staxd read   {:>9} / {:>9}",
+            fmt_ns(t.avg_kperf_to_staxd_read_ns),
+            fmt_ns(t.max_kperf_to_staxd_read_ns)
+        );
+        println!(
+            "  staxd read         {:>9} / {:>9}",
+            fmt_ns(t.avg_staxd_read_ns),
+            fmt_ns(t.max_staxd_read_ns)
+        );
+        println!(
+            "  staxd drain→send   {:>9} / {:>9}",
+            fmt_ns(t.avg_staxd_drain_to_send_ns),
+            fmt_ns(t.max_staxd_drain_to_send_ns)
+        );
+        println!(
+            "  staxd→client recv  {:>9} / {:>9}",
+            fmt_ns(t.avg_staxd_send_to_client_recv_ns),
+            fmt_ns(t.max_staxd_send_to_client_recv_ns)
+        );
+        println!(
+            "  client recv→enqueue {:>8} / {:>9}",
+            fmt_ns(t.avg_client_recv_to_enqueue_ns),
+            fmt_ns(t.max_client_recv_to_enqueue_ns)
+        );
+        println!(
             "  queue wait         {:>9} / {:>9}",
             fmt_ns(t.avg_queue_wait_ns),
             fmt_ns(t.max_queue_wait_ns)
@@ -811,8 +836,13 @@ fn print_probe_diff(update: &ProbeDiffUpdate, recent_limit: u32) {
             entry.used_framehop,
         );
         println!(
-            "    timing: kperf→enqueue={} queue={} lookup={} suspend+state={} resume={} walk={} total={} coalesced={} batch={}",
+            "    timing: kperf→enqueue={} kperf→staxd={} staxd-read={} drain→send={} staxd→client={} client→enqueue={} queue={} lookup={} suspend+state={} resume={} walk={} total={} coalesced={} batch={}",
             fmt_ns(entry.timing.kperf_to_enqueue_ns),
+            fmt_ns(entry.timing.kperf_to_staxd_read_ns),
+            fmt_ns(entry.timing.staxd_read_ns),
+            fmt_ns(entry.timing.staxd_drain_to_send_ns),
+            fmt_ns(entry.timing.staxd_send_to_client_recv_ns),
+            fmt_ns(entry.timing.client_recv_to_enqueue_ns),
             fmt_ns(entry.timing.queue_wait_ns),
             fmt_ns(entry.timing.lookup_ns),
             fmt_ns(entry.timing.suspend_state_ns),

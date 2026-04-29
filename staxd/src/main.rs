@@ -24,7 +24,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use eyre::{Context, Result};
 use tokio::sync::Mutex;
@@ -42,6 +42,7 @@ mod session;
 /// `/var/run/`). The default is `/tmp/` for hand-running during
 /// development; root daemon, but no permission gymnastics required.
 const DEFAULT_SOCKET: &str = "/tmp/staxd.sock";
+const STAXD_RECORD_CHANNEL_CAPACITY: u32 = 64;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<()> {
@@ -92,6 +93,8 @@ async fn main() -> Result<()> {
             tokio::spawn(async move {
                 let dispatcher = StaxdDispatcher::new(server);
                 let result = vox::acceptor_on(link)
+                    .channel_capacity(STAXD_RECORD_CHANNEL_CAPACITY)
+                    .observer(stax_vox_observe::VoxObserverLogger::new("staxd", "local"))
                     .non_resumable()
                     // Detect dead peers without flagging legit ones.
                     // The recorder fires a giant pile of synchronous
@@ -103,8 +106,8 @@ async fn main() -> Result<()> {
                     // 30s — still guarantees the slot frees within
                     // ~30s of a hard-kill.
                     .keepalive(vox::SessionKeepaliveConfig {
-                        ping_interval: std::time::Duration::from_secs(5),
-                        pong_timeout: std::time::Duration::from_secs(30),
+                        ping_interval: Duration::from_secs(5),
+                        pong_timeout: Duration::from_secs(30),
                     })
                     .on_connection(dispatcher)
                     .establish::<vox::NoopClient>()
@@ -260,8 +263,9 @@ fn init_logging() {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("staxd=info,stax_mac_kperf_sys=info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new("staxd=info,stax_vox_observe=info,stax_mac_kperf_sys=info")
+    });
 
     let oslog = tracing_oslog::OsLogger::new("eu.bearcove.staxd", "default");
 

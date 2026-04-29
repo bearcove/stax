@@ -12,11 +12,13 @@ stax-mac-kperf-sys = { version = "0.1", path = "../stax-mac-kperf-sys" }
 stax-mac-kperf-parse = { version = "0.1", path = "../stax-mac-kperf-parse" }
 stax-mac-capture = { version = "0.1", path = "../stax-mac-capture" }
 stax-mac-shared-cache = { version = "0.1", path = "../stax-mac-shared-cache" }
+stax-vox-observe = { version = "0.1", path = "../stax-vox-observe" }
 vox = { path = "/Users/amos/bearcove/vox/rust/vox" }
 tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
 log = "0.4"
 thiserror = "2"
 flume = "0.11"
+mach2 = "0.4"
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"], default-features = false }

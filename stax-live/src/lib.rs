@@ -33,6 +33,10 @@ impl From<stax_live_proto::ProbeTiming> for ProbeTiming {
     fn from(t: stax_live_proto::ProbeTiming) -> Self {
         Self {
             kperf_ts: t.kperf_ts,
+            staxd_read_started: t.staxd_read_started,
+            staxd_drained: t.staxd_drained,
+            staxd_send_started: t.staxd_send_started,
+            client_received: t.client_received,
             enqueued: t.enqueued,
             worker_started: t.worker_started,
             thread_lookup_done: t.thread_lookup_done,
@@ -716,6 +720,26 @@ fn elapsed_ticks_to_ns(later: u64, earlier: u64) -> u64 {
 fn probe_timing_breakdown(probe: &ProbeResultRecord) -> ProbeTimingBreakdown {
     ProbeTimingBreakdown {
         kperf_to_enqueue_ns: elapsed_ticks_to_ns(probe.timing.enqueued, probe.timing.kperf_ts),
+        kperf_to_staxd_read_ns: elapsed_ticks_to_ns(
+            probe.timing.staxd_read_started,
+            probe.timing.kperf_ts,
+        ),
+        staxd_read_ns: elapsed_ticks_to_ns(
+            probe.timing.staxd_drained,
+            probe.timing.staxd_read_started,
+        ),
+        staxd_drain_to_send_ns: elapsed_ticks_to_ns(
+            probe.timing.staxd_send_started,
+            probe.timing.staxd_drained,
+        ),
+        staxd_send_to_client_recv_ns: elapsed_ticks_to_ns(
+            probe.timing.client_received,
+            probe.timing.staxd_send_started,
+        ),
+        client_recv_to_enqueue_ns: elapsed_ticks_to_ns(
+            probe.timing.enqueued,
+            probe.timing.client_received,
+        ),
         queue_wait_ns: elapsed_ticks_to_ns(probe.timing.worker_started, probe.timing.enqueued),
         lookup_ns: elapsed_ticks_to_ns(
             probe.timing.thread_lookup_done,
@@ -736,6 +760,16 @@ struct ProbeTimingAccum {
     samples: u64,
     sum_kperf_to_enqueue_ns: u128,
     max_kperf_to_enqueue_ns: u64,
+    sum_kperf_to_staxd_read_ns: u128,
+    max_kperf_to_staxd_read_ns: u64,
+    sum_staxd_read_ns: u128,
+    max_staxd_read_ns: u64,
+    sum_staxd_drain_to_send_ns: u128,
+    max_staxd_drain_to_send_ns: u64,
+    sum_staxd_send_to_client_recv_ns: u128,
+    max_staxd_send_to_client_recv_ns: u64,
+    sum_client_recv_to_enqueue_ns: u128,
+    max_client_recv_to_enqueue_ns: u64,
     sum_queue_wait_ns: u128,
     max_queue_wait_ns: u64,
     sum_lookup_ns: u128,
@@ -757,6 +791,24 @@ impl ProbeTimingAccum {
         self.samples = self.samples.saturating_add(1);
         self.sum_kperf_to_enqueue_ns += t.kperf_to_enqueue_ns as u128;
         self.max_kperf_to_enqueue_ns = self.max_kperf_to_enqueue_ns.max(t.kperf_to_enqueue_ns);
+        self.sum_kperf_to_staxd_read_ns += t.kperf_to_staxd_read_ns as u128;
+        self.max_kperf_to_staxd_read_ns = self
+            .max_kperf_to_staxd_read_ns
+            .max(t.kperf_to_staxd_read_ns);
+        self.sum_staxd_read_ns += t.staxd_read_ns as u128;
+        self.max_staxd_read_ns = self.max_staxd_read_ns.max(t.staxd_read_ns);
+        self.sum_staxd_drain_to_send_ns += t.staxd_drain_to_send_ns as u128;
+        self.max_staxd_drain_to_send_ns = self
+            .max_staxd_drain_to_send_ns
+            .max(t.staxd_drain_to_send_ns);
+        self.sum_staxd_send_to_client_recv_ns += t.staxd_send_to_client_recv_ns as u128;
+        self.max_staxd_send_to_client_recv_ns = self
+            .max_staxd_send_to_client_recv_ns
+            .max(t.staxd_send_to_client_recv_ns);
+        self.sum_client_recv_to_enqueue_ns += t.client_recv_to_enqueue_ns as u128;
+        self.max_client_recv_to_enqueue_ns = self
+            .max_client_recv_to_enqueue_ns
+            .max(t.client_recv_to_enqueue_ns);
         self.sum_queue_wait_ns += t.queue_wait_ns as u128;
         self.max_queue_wait_ns = self.max_queue_wait_ns.max(t.queue_wait_ns);
         self.sum_lookup_ns += t.lookup_ns as u128;
@@ -785,6 +837,16 @@ impl ProbeTimingAccum {
             samples: self.samples,
             avg_kperf_to_enqueue_ns: avg(self.sum_kperf_to_enqueue_ns),
             max_kperf_to_enqueue_ns: self.max_kperf_to_enqueue_ns,
+            avg_kperf_to_staxd_read_ns: avg(self.sum_kperf_to_staxd_read_ns),
+            max_kperf_to_staxd_read_ns: self.max_kperf_to_staxd_read_ns,
+            avg_staxd_read_ns: avg(self.sum_staxd_read_ns),
+            max_staxd_read_ns: self.max_staxd_read_ns,
+            avg_staxd_drain_to_send_ns: avg(self.sum_staxd_drain_to_send_ns),
+            max_staxd_drain_to_send_ns: self.max_staxd_drain_to_send_ns,
+            avg_staxd_send_to_client_recv_ns: avg(self.sum_staxd_send_to_client_recv_ns),
+            max_staxd_send_to_client_recv_ns: self.max_staxd_send_to_client_recv_ns,
+            avg_client_recv_to_enqueue_ns: avg(self.sum_client_recv_to_enqueue_ns),
+            max_client_recv_to_enqueue_ns: self.max_client_recv_to_enqueue_ns,
             avg_queue_wait_ns: avg(self.sum_queue_wait_ns),
             max_queue_wait_ns: self.max_queue_wait_ns,
             avg_lookup_ns: avg(self.sum_lookup_ns),

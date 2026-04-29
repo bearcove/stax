@@ -13,6 +13,7 @@ eyre = "0.6"
 async-trait = "0.1"
 futures = { version = "0.3", default-features = false, features = ["executor"] }
 stax-live-proto = { path = "stax-live-proto" }
+stax-vox-observe = { path = "stax-vox-observe" }
 vox = { path = "/Users/amos/bearcove/vox/rust/vox" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -49,6 +50,7 @@ members = [
   "xtask",
   "stax-live",
   "stax-live-proto",
+  "stax-vox-observe",
   "stax-server",
   "stax-shade",
   "stax-shade-proto",
@@ -58,4 +60,3 @@ members = [
   "staxd",
   "staxd-client",
 ]
-

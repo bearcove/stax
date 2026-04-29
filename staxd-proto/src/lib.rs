@@ -79,6 +79,14 @@ pub struct KdBufWire {
 #[derive(Clone, Debug, Facet)]
 pub struct KdBufBatch {
     pub records: Vec<KdBufWire>,
+    /// mach_absolute_time immediately before the daemon called
+    /// KERN_KDREADTR for this batch.
+    pub read_started_mach_ticks: u64,
+    /// mach_absolute_time immediately after KERN_KDREADTR returned.
+    pub drained_mach_ticks: u64,
+    /// mach_absolute_time immediately before the daemon handed this
+    /// batch to vox.
+    pub send_started_mach_ticks: u64,
     /// Wall-clock timestamp the daemon recorded when this batch was
     /// drained, in nanoseconds since UNIX epoch. Used by the client
     /// only for diagnostics / latency tracking; sample timestamps

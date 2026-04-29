@@ -547,8 +547,18 @@ pub struct ProbeDiffDepthCell {
 
 #[derive(Clone, Copy, Debug, Default, Facet)]
 pub struct ProbeTimingBreakdown {
-    /// kperf sample timestamp -> shade parser enqueue.
+    /// kperf sample timestamp -> race-probe enqueue.
     pub kperf_to_enqueue_ns: u64,
+    /// kperf sample timestamp -> daemon read start.
+    pub kperf_to_staxd_read_ns: u64,
+    /// Daemon KERN_KDREADTR syscall duration.
+    pub staxd_read_ns: u64,
+    /// Daemon post-read batch build / pre-send delay.
+    pub staxd_drain_to_send_ns: u64,
+    /// Daemon send start -> client receive.
+    pub staxd_send_to_client_recv_ns: u64,
+    /// Client receive -> race-probe enqueue.
+    pub client_recv_to_enqueue_ns: u64,
     /// Waiting behind other pending probe requests.
     pub queue_wait_ns: u64,
     /// Worker-start -> thread-port lookup/cache refresh complete.
@@ -568,6 +578,16 @@ pub struct ProbeTimingSummary {
     pub samples: u64,
     pub avg_kperf_to_enqueue_ns: u64,
     pub max_kperf_to_enqueue_ns: u64,
+    pub avg_kperf_to_staxd_read_ns: u64,
+    pub max_kperf_to_staxd_read_ns: u64,
+    pub avg_staxd_read_ns: u64,
+    pub max_staxd_read_ns: u64,
+    pub avg_staxd_drain_to_send_ns: u64,
+    pub max_staxd_drain_to_send_ns: u64,
+    pub avg_staxd_send_to_client_recv_ns: u64,
+    pub max_staxd_send_to_client_recv_ns: u64,
+    pub avg_client_recv_to_enqueue_ns: u64,
+    pub max_client_recv_to_enqueue_ns: u64,
     pub avg_queue_wait_ns: u64,
     pub max_queue_wait_ns: u64,
     pub avg_lookup_ns: u64,
@@ -967,7 +987,15 @@ pub struct WireProbeResult {
 pub struct ProbeTiming {
     /// Kdebug timestamp of the matching kperf sample (mach ticks).
     pub kperf_ts: u64,
-    /// mach_absolute_time when the parser enqueued this probe.
+    /// mach_absolute_time immediately before staxd called KERN_KDREADTR.
+    pub staxd_read_started: u64,
+    /// mach_absolute_time immediately after staxd's KERN_KDREADTR returned.
+    pub staxd_drained: u64,
+    /// mach_absolute_time immediately before staxd handed the batch to vox.
+    pub staxd_send_started: u64,
+    /// mach_absolute_time immediately after the client received the batch.
+    pub client_received: u64,
+    /// mach_absolute_time when the client enqueued this race probe.
     pub enqueued: u64,
     /// mach_absolute_time when a probe worker started this request.
     pub worker_started: u64,

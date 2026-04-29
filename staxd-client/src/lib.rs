@@ -18,6 +18,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use log::{info, warn};
+use mach2::mach_time::mach_absolute_time;
 use stax_mac_capture::SampleSink;
 use stax_mac_kperf_parse::pipeline::{Pipeline, PipelineConfig};
 use stax_mac_kperf_sys::bindings::sampler;
@@ -46,6 +47,20 @@ pub struct RemoteOptions {
     pub duration: Option<Duration>,
     /// kdebug ringbuffer size in records. Mirrors the in-process default.
     pub buf_records: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct KperfProbeTriggerTiming {
+    /// Kdebug timestamp of the kperf sample start, in mach ticks.
+    pub kperf_ts: u64,
+    /// mach_absolute_time immediately before staxd called KERN_KDREADTR.
+    pub staxd_read_started: u64,
+    /// mach_absolute_time immediately after staxd's KERN_KDREADTR returned.
+    pub staxd_drained: u64,
+    /// mach_absolute_time immediately before staxd handed the batch to vox.
+    pub staxd_send_started: u64,
+    /// mach_absolute_time immediately after this client received the batch.
+    pub client_received: u64,
 }
 
 impl Default for RemoteOptions {
@@ -94,11 +109,11 @@ pub async fn drive_session<S: SampleSink + Send + 'static>(
     drive_session_with_hooks(opts, sink, should_stop, || {}, |_, _| {}).await
 }
 
-/// Like [`drive_session`], but calls `on_kperf_sample_start(tid,
-/// timestamp)` from the recv task as soon as the raw kperf records
-/// show that the current sample has a user stack. This hook exists for
-/// race-kperf: stack capture must not wait behind the heavier parser /
-/// symbol / image pipeline.
+/// Like [`drive_session`], but calls `on_kperf_sample_start` from the
+/// recv task as soon as the raw kperf records show that the current
+/// sample has a user stack. This hook exists for race-kperf: stack
+/// capture must not wait behind the heavier parser / symbol / image
+/// pipeline.
 pub async fn drive_session_with_hooks<S, Stop, FirstBatch, SampleStart>(
     opts: RemoteOptions,
     sink: S,
@@ -110,7 +125,7 @@ where
     S: SampleSink + Send + 'static,
     Stop: FnMut() -> bool,
     FirstBatch: FnMut(),
-    SampleStart: FnMut(u32, u64),
+    SampleStart: FnMut(u32, KperfProbeTriggerTiming),
 {
     let url = if opts.daemon_socket.starts_with("local://") {
         opts.daemon_socket.clone()
@@ -124,8 +139,15 @@ where
         opts.pid, opts.frequency_hz, opts.buf_records, opts.duration
     );
     let phase_start = Instant::now();
-    info!("staxd-client: connecting to {url}");
-    let client: StaxdClient = match vox::connect(&url).await {
+    info!("staxd-client: connecting to {url} channel_capacity={STAXD_RECORD_CHANNEL_CAPACITY}");
+    let client: StaxdClient = match vox::connect(&url)
+        .channel_capacity(STAXD_RECORD_CHANNEL_CAPACITY)
+        .observer(
+            stax_vox_observe::VoxObserverLogger::new("staxd-client", "staxd-records")
+                .with_pid(opts.pid),
+        )
+        .await
+    {
         Ok(c) => c,
         Err(e) => {
             // The "no such file" case dominates — the user forgot to
@@ -274,29 +296,39 @@ where
             Err(_) => continue,
         };
 
+        let client_received_mach_ticks = mach_ticks_now();
+        let client_received_unix_ns = unix_ns_now();
         let _ = batch_sref.map(|batch| {
             if !seen_first_batch {
                 seen_first_batch = true;
                 info!(
-                    "staxd-client: first batch arrived records={} since_client_start={:?} since_record_rpc_spawn={:?} since_recv_loop_start={:?} drained_at_unix_ns={} received_at_unix_ns={}",
+                    "staxd-client: first batch arrived records={} since_client_start={:?} since_record_rpc_spawn={:?} since_recv_loop_start={:?} drained_at_unix_ns={} received_at_unix_ns={} read_started_mach={} drained_mach={} send_started_mach={} client_received_mach={}",
                     batch.records.len(),
                     client_start.elapsed(),
                     record_rpc_start.elapsed(),
                     session_start.elapsed(),
                     batch.drained_at_unix_ns,
-                    unix_ns_now()
+                    client_received_unix_ns,
+                    batch.read_started_mach_ticks,
+                    batch.drained_mach_ticks,
+                    batch.send_started_mach_ticks,
+                    client_received_mach_ticks
                 );
                 on_first_batch();
             }
             if !batch.records.is_empty() && !seen_first_nonempty_batch {
                 seen_first_nonempty_batch = true;
                 info!(
-                    "staxd-client: first non-empty batch arrived records={} first_ts={} last_ts={} drained_at_unix_ns={} received_at_unix_ns={} since_client_start={:?} since_record_rpc_spawn={:?}",
+                    "staxd-client: first non-empty batch arrived records={} first_ts={} last_ts={} drained_at_unix_ns={} received_at_unix_ns={} read_started_mach={} drained_mach={} send_started_mach={} client_received_mach={} since_client_start={:?} since_record_rpc_spawn={:?}",
                     batch.records.len(),
                     batch.records.first().map(|rec| rec.timestamp).unwrap_or(0),
                     batch.records.last().map(|rec| rec.timestamp).unwrap_or(0),
                     batch.drained_at_unix_ns,
-                    unix_ns_now(),
+                    client_received_unix_ns,
+                    batch.read_started_mach_ticks,
+                    batch.drained_mach_ticks,
+                    batch.send_started_mach_ticks,
+                    client_received_mach_ticks,
                     client_start.elapsed(),
                     record_rpc_start.elapsed()
                 );
@@ -313,7 +345,16 @@ where
                             record_rpc_start.elapsed()
                         );
                     }
-                    on_kperf_sample_start(tid, ts);
+                    on_kperf_sample_start(
+                        tid,
+                        KperfProbeTriggerTiming {
+                            kperf_ts: ts,
+                            staxd_read_started: batch.read_started_mach_ticks,
+                            staxd_drained: batch.drained_mach_ticks,
+                            staxd_send_started: batch.send_started_mach_ticks,
+                            client_received: client_received_mach_ticks,
+                        },
+                    );
                 }
             }
             total_drained += batch.records.len() as u64;
@@ -377,11 +418,11 @@ where
     Ok(())
 }
 
+const STAXD_RECORD_CHANNEL_CAPACITY: u32 = 64;
 const WORKER_QUEUE_CAPACITY: usize = 16;
 const WORKER_BATCH_CHUNK_RECORDS: usize = 16 * 1024;
 const WORKER_SHUTDOWN_BUDGET: Duration = Duration::from_secs(2);
 const WORKER_ABORT_GRACE: Duration = Duration::from_millis(250);
-
 #[derive(Clone, Copy, Default)]
 struct ParserQueueStats {
     dropped_chunks: u64,
@@ -840,4 +881,9 @@ fn unix_ns_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0)
+}
+
+#[inline]
+fn mach_ticks_now() -> u64 {
+    unsafe { mach_absolute_time() }
 }

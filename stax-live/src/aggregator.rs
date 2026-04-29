@@ -174,6 +174,10 @@ pub struct ProbeTiming {
     /// Mach-tick timestamp of the matching kperf sample (matches
     /// the `PetSample::timestamp_ns` field on the same tid).
     pub kperf_ts: u64,
+    pub staxd_read_started: u64,
+    pub staxd_drained: u64,
+    pub staxd_send_started: u64,
+    pub client_received: u64,
     pub enqueued: u64,
     pub worker_started: u64,
     pub thread_lookup_done: u64,

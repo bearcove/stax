@@ -360,6 +360,10 @@ impl From<stax_mac_capture::ProbeTiming> for crate::live_sink::ProbeTiming {
     fn from(t: stax_mac_capture::ProbeTiming) -> Self {
         Self {
             kperf_ts: t.kperf_ts,
+            staxd_read_started: t.staxd_read_started,
+            staxd_drained: t.staxd_drained,
+            staxd_send_started: t.staxd_send_started,
+            client_received: t.client_received,
             enqueued: t.enqueued,
             worker_started: t.worker_started,
             thread_lookup_done: t.thread_lookup_done,

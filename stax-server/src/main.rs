@@ -33,6 +33,7 @@ use vox::VoxListener;
 
 const DEFAULT_SOCK_NAME: &str = "stax-server.sock";
 const DEFAULT_WS_BIND: &str = "127.0.0.1:8080";
+const STAX_SERVER_CHANNEL_CAPACITY: u32 = 64;
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
@@ -163,6 +164,11 @@ fn spawn_session_local(server: ServerState, link: vox::transport::local::LocalLi
     let factory = build_factory(server.clone(), shade_slot.clone());
     tokio::spawn(async move {
         let result = vox::acceptor_on(link)
+            .channel_capacity(STAX_SERVER_CHANNEL_CAPACITY)
+            .observer(stax_vox_observe::VoxObserverLogger::new(
+                "stax-server",
+                "local",
+            ))
             .non_resumable()
             .keepalive(vox::SessionKeepaliveConfig {
                 ping_interval: std::time::Duration::from_secs(5),
@@ -190,6 +196,11 @@ fn spawn_session_ws(server: ServerState, link: <vox::WsListener as vox::VoxListe
     let factory = build_factory(server.clone(), shade_slot.clone());
     tokio::spawn(async move {
         let result = vox::acceptor_on(link)
+            .channel_capacity(STAX_SERVER_CHANNEL_CAPACITY)
+            .observer(stax_vox_observe::VoxObserverLogger::new(
+                "stax-server",
+                "ws",
+            ))
             .on_connection(factory)
             .establish::<vox::NoopClient>()
             .await;

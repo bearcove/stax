@@ -21,6 +21,7 @@ use stax_mac_capture::{
     BinaryLoadedEvent, BinaryUnloadedEvent, JitdumpEvent, MachOByteSource, ProbeQueueStats,
     ProbeResultEvent, ProbeTiming, SampleEvent, SampleSink, ThreadNameEvent, WakeupEvent,
 };
+use staxd_client::KperfProbeTriggerTiming;
 
 const MAX_FP_FRAMES: usize = 64;
 const MAX_FP_DELTA: u64 = 8 * 1024 * 1024;
@@ -147,18 +148,14 @@ impl RaceProbeWorker {
                             first_request_logged = true;
                             tracing::info!(
                                 tid = req.tid,
-                                kperf_ts = req.kperf_ts,
+                                kperf_ts = req.timing.kperf_ts,
                                 coalesced = req.coalesced_requests,
                                 worker_batch_len,
                                 "race-kperf probe worker received first request"
                             );
                         }
-                        let timing = ProbeTiming {
-                            kperf_ts: req.kperf_ts,
-                            enqueued: req.enqueued_ticks,
-                            worker_started: unsafe { mach_absolute_time() },
-                            ..ProbeTiming::default()
-                        };
+                        let mut timing = req.timing;
+                        timing.worker_started = unsafe { mach_absolute_time() };
                         if let Some(snapshot) = probe.probe_sample(req.tid, timing) {
                             let out = ProbeSnapshotWithKey {
                                 tid: req.tid,
@@ -187,7 +184,7 @@ impl RaceProbeWorker {
                                 first_result_logged = true;
                                 tracing::info!(
                                     tid = req.tid,
-                                    kperf_ts = req.kperf_ts,
+                                    kperf_ts = req.timing.kperf_ts,
                                     results_sent,
                                     coalesced = req.coalesced_requests,
                                     worker_batch_len,
@@ -246,21 +243,21 @@ impl RaceProbeTrigger {
     /// sample start. Returns true when this replaced an older pending
     /// request for the same tid; that is intentional because
     /// race-kperf wants fresh observations, not FIFO delivery.
-    pub fn enqueue(&self, tid: u32, kperf_ts: u64) -> bool {
+    pub fn enqueue(&self, tid: u32, trigger: KperfProbeTriggerTiming) -> bool {
         let enqueued = self
             .enqueued_probe_requests
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
+        let enqueued_ticks = unsafe { mach_absolute_time() };
         let replaced = self.requests.push(ProbeRequest {
             tid,
-            kperf_ts,
-            enqueued_ticks: unsafe { mach_absolute_time() },
+            timing: probe_timing_from_trigger(trigger, enqueued_ticks),
             coalesced_requests: 0,
         });
         if enqueued == 1 {
             tracing::info!(
                 tid,
-                kperf_ts,
+                kperf_ts = trigger.kperf_ts,
                 replaced,
                 "race-kperf first probe request enqueued"
             );
@@ -419,9 +416,20 @@ struct ProbeSnapshot {
 
 struct ProbeRequest {
     tid: u32,
-    kperf_ts: u64,
-    enqueued_ticks: u64,
+    timing: ProbeTiming,
     coalesced_requests: u64,
+}
+
+fn probe_timing_from_trigger(trigger: KperfProbeTriggerTiming, enqueued: u64) -> ProbeTiming {
+    ProbeTiming {
+        kperf_ts: trigger.kperf_ts,
+        staxd_read_started: trigger.staxd_read_started,
+        staxd_drained: trigger.staxd_drained,
+        staxd_send_started: trigger.staxd_send_started,
+        client_received: trigger.client_received,
+        enqueued,
+        ..ProbeTiming::default()
+    }
 }
 
 struct ProbeSnapshotWithKey {

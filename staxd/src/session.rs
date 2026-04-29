@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use mach2::mach_time::mach_absolute_time;
 use tracing::{info, warn};
 
 use stax_mac_kperf_sys::bindings::{self, Frameworks};
@@ -192,9 +193,13 @@ async fn drain(
     // read can add hundreds of ms and can include stale system-wide
     // SCHED records unrelated to the target.
     let sent_ready_at_unix_ns = unix_ns_now();
+    let sent_ready_mach_ticks = mach_ticks_now();
     if let Err(e) = records
         .send(KdBufBatch {
             records: Vec::new(),
+            read_started_mach_ticks: sent_ready_mach_ticks,
+            drained_mach_ticks: sent_ready_mach_ticks,
+            send_started_mach_ticks: sent_ready_mach_ticks,
             drained_at_unix_ns: sent_ready_at_unix_ns,
         })
         .await
@@ -209,6 +214,7 @@ async fn drain(
     info!(
         elapsed = ?session_start.elapsed(),
         drained_at_unix_ns = sent_ready_at_unix_ns,
+        mach_ticks = sent_ready_mach_ticks,
         "staxd sent ready batch"
     );
 
@@ -225,6 +231,7 @@ async fn drain(
             break;
         }
 
+        let read_started_mach_ticks = mach_ticks_now();
         let n = match kdebug::read_trace(&mut buf) {
             Ok(n) => n,
             Err(e) => {
@@ -232,6 +239,7 @@ async fn drain(
                 return Err(map_kperf_err(e));
             }
         };
+        let drained_mach_ticks = mach_ticks_now();
         total_drained += n as u64;
         let drained_at_unix_ns = unix_ns_now();
         if n > 0 && !first_nonempty_logged {
@@ -242,6 +250,8 @@ async fn drain(
                 first_ts = buf.first().map(|rec| rec.timestamp).unwrap_or(0),
                 last_ts = buf.get(n.saturating_sub(1)).map(|rec| rec.timestamp).unwrap_or(0),
                 drained_at_unix_ns,
+                read_started_mach_ticks,
+                drained_mach_ticks,
                 ready_to_first_nonempty_ns = drained_at_unix_ns.saturating_sub(sent_ready_at_unix_ns),
                 "staxd first non-empty kdebug drain"
             );
@@ -251,8 +261,13 @@ async fn drain(
         // as our detection of "client went away" — without it, the
         // drain loop spins forever holding ktrace ownership long
         // after the client disconnected.
+        let records_vec = buf[..n].iter().map(kdbuf_to_wire).collect();
+        let send_started_mach_ticks = mach_ticks_now();
         let batch = KdBufBatch {
-            records: buf[..n].iter().map(kdbuf_to_wire).collect(),
+            records: records_vec,
+            read_started_mach_ticks,
+            drained_mach_ticks,
+            send_started_mach_ticks,
             drained_at_unix_ns,
         };
         if let Err(e) = records.send(batch).await {
@@ -371,4 +386,9 @@ fn unix_ns_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0)
+}
+
+#[inline]
+fn mach_ticks_now() -> u64 {
+    unsafe { mach_absolute_time() }
 }

@@ -71,7 +71,15 @@ pub trait SampleSink {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ProbeTiming {
     pub kperf_ts: u64,
-    /// mach_absolute_time when the parser enqueued this probe.
+    /// mach_absolute_time immediately before staxd called KERN_KDREADTR.
+    pub staxd_read_started: u64,
+    /// mach_absolute_time immediately after staxd's KERN_KDREADTR returned.
+    pub staxd_drained: u64,
+    /// mach_absolute_time immediately before staxd handed the batch to vox.
+    pub staxd_send_started: u64,
+    /// mach_absolute_time immediately after the client received the batch.
+    pub client_received: u64,
+    /// mach_absolute_time when the client enqueued this race probe.
     pub enqueued: u64,
     /// mach_absolute_time when a probe worker started this request.
     pub worker_started: u64,

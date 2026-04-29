@@ -22,6 +22,8 @@ use crate::live_sink::{
 #[cfg(target_os = "macos")]
 use crate::live_sink::MachOByteSource;
 
+const INGEST_CHANNEL_CAPACITY: u32 = 64;
+
 /// `LiveSink` impl that drops every event into a channel which a
 /// forwarder task drains and pushes into a vox `Tx<IngestEvent>`.
 ///
@@ -208,6 +210,10 @@ impl From<crate::live_sink::ProbeTiming> for stax_live_proto::ProbeTiming {
     fn from(t: crate::live_sink::ProbeTiming) -> Self {
         Self {
             kperf_ts: t.kperf_ts,
+            staxd_read_started: t.staxd_read_started,
+            staxd_drained: t.staxd_drained,
+            staxd_send_started: t.staxd_send_started,
+            client_received: t.client_received,
             enqueued: t.enqueued,
             worker_started: t.worker_started,
             thread_lookup_done: t.thread_lookup_done,
@@ -241,7 +247,13 @@ pub async fn connect_and_register(
     tokio::task::JoinHandle<()>,
 )> {
     let url = format!("local://{server_socket}");
-    let client: RunIngestClient = vox::connect(&url).await?;
+    let client: RunIngestClient = vox::connect(&url)
+        .channel_capacity(INGEST_CHANNEL_CAPACITY)
+        .observer(stax_vox_observe::VoxObserverLogger::new(
+            "ingest-sink",
+            "start_run",
+        ))
+        .await?;
     let client = client.with_middleware(vox::ClientLogging::default());
 
     let (vox_tx, vox_rx) = vox::channel::<IngestEvent>();
@@ -280,7 +292,13 @@ pub async fn connect_to_existing_run(
     run_id: stax_live_proto::RunId,
 ) -> eyre::Result<(IngestSink, tokio::task::JoinHandle<()>)> {
     let url = format!("local://{server_socket}");
-    let client: RunIngestClient = vox::connect(&url).await?;
+    let client: RunIngestClient = vox::connect(&url)
+        .channel_capacity(INGEST_CHANNEL_CAPACITY)
+        .observer(stax_vox_observe::VoxObserverLogger::new(
+            "ingest-sink",
+            "attach_run",
+        ))
+        .await?;
     let client = client.with_middleware(vox::ClientLogging::default());
 
     let (vox_tx, vox_rx) = vox::channel::<IngestEvent>();
