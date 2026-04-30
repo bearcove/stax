@@ -525,6 +525,8 @@ public struct ProbeDiffThread: Codable, Sendable {
     public var probeOnly: UInt64
     public var pcMatch: UInt64
     public var stitchable: UInt64
+    public var richerThanKperf: UInt64
+    public var dwarfRicherThanFp: UInt64
     public var compactStitchable: UInt64
     public var compactDwarfStitchable: UInt64
     public var dwarfStitchable: UInt64
@@ -534,7 +536,7 @@ public struct ProbeDiffThread: Codable, Sendable {
     public var avgDwarfCommonSuffix: Float
     public var threadName: String?
 
-    nonisolated public init(tid: UInt32, kperfSamples: UInt64, kperfKernelStackSamples: UInt64, probeResults: UInt64, paired: UInt64, kperfOnly: UInt64, probeOnly: UInt64, pcMatch: UInt64, stitchable: UInt64, compactStitchable: UInt64, compactDwarfStitchable: UInt64, dwarfStitchable: UInt64, avgCommonSuffix: Float, avgCompactCommonSuffix: Float, avgCompactDwarfCommonSuffix: Float, avgDwarfCommonSuffix: Float, threadName: String?) {
+    nonisolated public init(tid: UInt32, kperfSamples: UInt64, kperfKernelStackSamples: UInt64, probeResults: UInt64, paired: UInt64, kperfOnly: UInt64, probeOnly: UInt64, pcMatch: UInt64, stitchable: UInt64, richerThanKperf: UInt64, dwarfRicherThanFp: UInt64, compactStitchable: UInt64, compactDwarfStitchable: UInt64, dwarfStitchable: UInt64, avgCommonSuffix: Float, avgCompactCommonSuffix: Float, avgCompactDwarfCommonSuffix: Float, avgDwarfCommonSuffix: Float, threadName: String?) {
         self.tid = tid
         self.kperfSamples = kperfSamples
         self.kperfKernelStackSamples = kperfKernelStackSamples
@@ -544,6 +546,8 @@ public struct ProbeDiffThread: Codable, Sendable {
         self.probeOnly = probeOnly
         self.pcMatch = pcMatch
         self.stitchable = stitchable
+        self.richerThanKperf = richerThanKperf
+        self.dwarfRicherThanFp = dwarfRicherThanFp
         self.compactStitchable = compactStitchable
         self.compactDwarfStitchable = compactDwarfStitchable
         self.dwarfStitchable = dwarfStitchable
@@ -704,6 +708,8 @@ public struct ProbeDiffUpdate: Codable, Sendable {
     public var timing: ProbeTimingSummary
     public var pcMatch: UInt64
     public var stitchable: UInt64
+    public var richerThanKperf: UInt64
+    public var dwarfRicherThanFp: UInt64
     public var compactStitchable: UInt64
     public var compactDwarfStitchable: UInt64
     public var dwarfStitchable: UInt64
@@ -713,9 +719,10 @@ public struct ProbeDiffUpdate: Codable, Sendable {
     public var fpWalkUsed: UInt64
     public var threads: [ProbeDiffThread]
     public var richer: [ProbeDiffEntry]
+    public var dwarfRicher: [ProbeDiffEntry]
     public var recent: [ProbeDiffEntry]
 
-    nonisolated public init(totalKperfSamples: UInt64, totalProbes: UInt64, kperfKernelStackSamples: UInt64, kperfKernelFrames: UInt64, maxKperfKernelFrames: UInt32, paired: UInt64, pairedKernelStackSamples: UInt64, kperfOnly: UInt64, probeOnly: UInt64, probeAugmentedKperf: UInt64, probeWalkedDeeper: UInt64, commonSuffixHist: [UInt64], compactSuffixHist: [UInt64], compactDwarfSuffixHist: [UInt64], dwarfSuffixHist: [UInt64], depthMatch: [ProbeDiffDepthCell], driftBuckets: [ProbeDiffBucket], timing: ProbeTimingSummary, pcMatch: UInt64, stitchable: UInt64, compactStitchable: UInt64, compactDwarfStitchable: UInt64, dwarfStitchable: UInt64, framehopUsed: UInt64, compactUsed: UInt64, compactDwarfUsed: UInt64, fpWalkUsed: UInt64, threads: [ProbeDiffThread], richer: [ProbeDiffEntry], recent: [ProbeDiffEntry]) {
+    nonisolated public init(totalKperfSamples: UInt64, totalProbes: UInt64, kperfKernelStackSamples: UInt64, kperfKernelFrames: UInt64, maxKperfKernelFrames: UInt32, paired: UInt64, pairedKernelStackSamples: UInt64, kperfOnly: UInt64, probeOnly: UInt64, probeAugmentedKperf: UInt64, probeWalkedDeeper: UInt64, commonSuffixHist: [UInt64], compactSuffixHist: [UInt64], compactDwarfSuffixHist: [UInt64], dwarfSuffixHist: [UInt64], depthMatch: [ProbeDiffDepthCell], driftBuckets: [ProbeDiffBucket], timing: ProbeTimingSummary, pcMatch: UInt64, stitchable: UInt64, richerThanKperf: UInt64, dwarfRicherThanFp: UInt64, compactStitchable: UInt64, compactDwarfStitchable: UInt64, dwarfStitchable: UInt64, framehopUsed: UInt64, compactUsed: UInt64, compactDwarfUsed: UInt64, fpWalkUsed: UInt64, threads: [ProbeDiffThread], richer: [ProbeDiffEntry], dwarfRicher: [ProbeDiffEntry], recent: [ProbeDiffEntry]) {
         self.totalKperfSamples = totalKperfSamples
         self.totalProbes = totalProbes
         self.kperfKernelStackSamples = kperfKernelStackSamples
@@ -736,6 +743,8 @@ public struct ProbeDiffUpdate: Codable, Sendable {
         self.timing = timing
         self.pcMatch = pcMatch
         self.stitchable = stitchable
+        self.richerThanKperf = richerThanKperf
+        self.dwarfRicherThanFp = dwarfRicherThanFp
         self.compactStitchable = compactStitchable
         self.compactDwarfStitchable = compactDwarfStitchable
         self.dwarfStitchable = dwarfStitchable
@@ -745,6 +754,7 @@ public struct ProbeDiffUpdate: Codable, Sendable {
         self.fpWalkUsed = fpWalkUsed
         self.threads = threads
         self.richer = richer
+        self.dwarfRicher = dwarfRicher
         self.recent = recent
     }
 }
@@ -1497,6 +1507,8 @@ nonisolated internal func encodeProbeDiffThread(_ value: ProbeDiffThread, into b
     encodeVarint(value.probeOnly, into: &buffer)
     encodeVarint(value.pcMatch, into: &buffer)
     encodeVarint(value.stitchable, into: &buffer)
+    encodeVarint(value.richerThanKperf, into: &buffer)
+    encodeVarint(value.dwarfRicherThanFp, into: &buffer)
     encodeVarint(value.compactStitchable, into: &buffer)
     encodeVarint(value.compactDwarfStitchable, into: &buffer)
     encodeVarint(value.dwarfStitchable, into: &buffer)
@@ -1592,6 +1604,8 @@ nonisolated internal func encodeProbeDiffUpdate(_ value: ProbeDiffUpdate, into b
     encodeProbeTimingSummary(value.timing, into: &buffer)
     encodeVarint(value.pcMatch, into: &buffer)
     encodeVarint(value.stitchable, into: &buffer)
+    encodeVarint(value.richerThanKperf, into: &buffer)
+    encodeVarint(value.dwarfRicherThanFp, into: &buffer)
     encodeVarint(value.compactStitchable, into: &buffer)
     encodeVarint(value.compactDwarfStitchable, into: &buffer)
     encodeVarint(value.dwarfStitchable, into: &buffer)
@@ -1601,6 +1615,7 @@ nonisolated internal func encodeProbeDiffUpdate(_ value: ProbeDiffUpdate, into b
     encodeVarint(value.fpWalkUsed, into: &buffer)
     encodeVec(value.threads, into: &buffer, encoder: { val, buf in encodeProbeDiffThread(val, into: &buf) })
     encodeVec(value.richer, into: &buffer, encoder: { val, buf in encodeProbeDiffEntry(val, into: &buf) })
+    encodeVec(value.dwarfRicher, into: &buffer, encoder: { val, buf in encodeProbeDiffEntry(val, into: &buf) })
     encodeVec(value.recent, into: &buffer, encoder: { val, buf in encodeProbeDiffEntry(val, into: &buf) })
 }
 
@@ -2284,6 +2299,8 @@ nonisolated internal func decodeProbeDiffThread(from buffer: inout ByteBuffer) t
     let _probeOnly = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
     let _pcMatch = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
     let _stitchable = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
+    let _richerThanKperf = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
+    let _dwarfRicherThanFp = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
     let _compactStitchable = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
     let _compactDwarfStitchable = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
     let _dwarfStitchable = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
@@ -2292,7 +2309,7 @@ nonisolated internal func decodeProbeDiffThread(from buffer: inout ByteBuffer) t
     let _avgCompactDwarfCommonSuffix = try ({ buf in try decodeF32(from: &buf) })(&buffer)
     let _avgDwarfCommonSuffix = try ({ buf in try decodeF32(from: &buf) })(&buffer)
     let _threadName = try ({ buf in try decodeOption(from: &buf, decoder: { buf in try decodeString(from: &buf) }) })(&buffer)
-    return ProbeDiffThread(tid: _tid, kperfSamples: _kperfSamples, kperfKernelStackSamples: _kperfKernelStackSamples, probeResults: _probeResults, paired: _paired, kperfOnly: _kperfOnly, probeOnly: _probeOnly, pcMatch: _pcMatch, stitchable: _stitchable, compactStitchable: _compactStitchable, compactDwarfStitchable: _compactDwarfStitchable, dwarfStitchable: _dwarfStitchable, avgCommonSuffix: _avgCommonSuffix, avgCompactCommonSuffix: _avgCompactCommonSuffix, avgCompactDwarfCommonSuffix: _avgCompactDwarfCommonSuffix, avgDwarfCommonSuffix: _avgDwarfCommonSuffix, threadName: _threadName)
+    return ProbeDiffThread(tid: _tid, kperfSamples: _kperfSamples, kperfKernelStackSamples: _kperfKernelStackSamples, probeResults: _probeResults, paired: _paired, kperfOnly: _kperfOnly, probeOnly: _probeOnly, pcMatch: _pcMatch, stitchable: _stitchable, richerThanKperf: _richerThanKperf, dwarfRicherThanFp: _dwarfRicherThanFp, compactStitchable: _compactStitchable, compactDwarfStitchable: _compactDwarfStitchable, dwarfStitchable: _dwarfStitchable, avgCommonSuffix: _avgCommonSuffix, avgCompactCommonSuffix: _avgCompactCommonSuffix, avgCompactDwarfCommonSuffix: _avgCompactDwarfCommonSuffix, avgDwarfCommonSuffix: _avgDwarfCommonSuffix, threadName: _threadName)
 }
 
 nonisolated internal func decodeProbeTimingBreakdown(from buffer: inout ByteBuffer) throws -> ProbeTimingBreakdown {
@@ -2384,6 +2401,8 @@ nonisolated internal func decodeProbeDiffUpdate(from buffer: inout ByteBuffer) t
     let _timing = try ({ buf in try decodeProbeTimingSummary(from: &buf) })(&buffer)
     let _pcMatch = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
     let _stitchable = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
+    let _richerThanKperf = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
+    let _dwarfRicherThanFp = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
     let _compactStitchable = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
     let _compactDwarfStitchable = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
     let _dwarfStitchable = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
@@ -2393,8 +2412,9 @@ nonisolated internal func decodeProbeDiffUpdate(from buffer: inout ByteBuffer) t
     let _fpWalkUsed = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
     let _threads = try ({ buf in try decodeVec(from: &buf, decoder: { buf in try decodeProbeDiffThread(from: &buf) }) })(&buffer)
     let _richer = try ({ buf in try decodeVec(from: &buf, decoder: { buf in try decodeProbeDiffEntry(from: &buf) }) })(&buffer)
+    let _dwarfRicher = try ({ buf in try decodeVec(from: &buf, decoder: { buf in try decodeProbeDiffEntry(from: &buf) }) })(&buffer)
     let _recent = try ({ buf in try decodeVec(from: &buf, decoder: { buf in try decodeProbeDiffEntry(from: &buf) }) })(&buffer)
-    return ProbeDiffUpdate(totalKperfSamples: _totalKperfSamples, totalProbes: _totalProbes, kperfKernelStackSamples: _kperfKernelStackSamples, kperfKernelFrames: _kperfKernelFrames, maxKperfKernelFrames: _maxKperfKernelFrames, paired: _paired, pairedKernelStackSamples: _pairedKernelStackSamples, kperfOnly: _kperfOnly, probeOnly: _probeOnly, probeAugmentedKperf: _probeAugmentedKperf, probeWalkedDeeper: _probeWalkedDeeper, commonSuffixHist: _commonSuffixHist, compactSuffixHist: _compactSuffixHist, compactDwarfSuffixHist: _compactDwarfSuffixHist, dwarfSuffixHist: _dwarfSuffixHist, depthMatch: _depthMatch, driftBuckets: _driftBuckets, timing: _timing, pcMatch: _pcMatch, stitchable: _stitchable, compactStitchable: _compactStitchable, compactDwarfStitchable: _compactDwarfStitchable, dwarfStitchable: _dwarfStitchable, framehopUsed: _framehopUsed, compactUsed: _compactUsed, compactDwarfUsed: _compactDwarfUsed, fpWalkUsed: _fpWalkUsed, threads: _threads, richer: _richer, recent: _recent)
+    return ProbeDiffUpdate(totalKperfSamples: _totalKperfSamples, totalProbes: _totalProbes, kperfKernelStackSamples: _kperfKernelStackSamples, kperfKernelFrames: _kperfKernelFrames, maxKperfKernelFrames: _maxKperfKernelFrames, paired: _paired, pairedKernelStackSamples: _pairedKernelStackSamples, kperfOnly: _kperfOnly, probeOnly: _probeOnly, probeAugmentedKperf: _probeAugmentedKperf, probeWalkedDeeper: _probeWalkedDeeper, commonSuffixHist: _commonSuffixHist, compactSuffixHist: _compactSuffixHist, compactDwarfSuffixHist: _compactDwarfSuffixHist, dwarfSuffixHist: _dwarfSuffixHist, depthMatch: _depthMatch, driftBuckets: _driftBuckets, timing: _timing, pcMatch: _pcMatch, stitchable: _stitchable, richerThanKperf: _richerThanKperf, dwarfRicherThanFp: _dwarfRicherThanFp, compactStitchable: _compactStitchable, compactDwarfStitchable: _compactDwarfStitchable, dwarfStitchable: _dwarfStitchable, framehopUsed: _framehopUsed, compactUsed: _compactUsed, compactDwarfUsed: _compactDwarfUsed, fpWalkUsed: _fpWalkUsed, threads: _threads, richer: _richer, dwarfRicher: _dwarfRicher, recent: _recent)
 }
 
 nonisolated internal func decodeRunId(from buffer: inout ByteBuffer) throws -> RunId {

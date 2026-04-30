@@ -1047,6 +1047,8 @@ fn build_probe_diff_update(
     let mut probe_deeper: u64 = 0;
     let mut pc_match_n: u64 = 0;
     let mut stitchable_n: u64 = 0;
+    let mut richer_than_kperf_n: u64 = 0;
+    let mut dwarf_richer_than_fp_n: u64 = 0;
     let mut compact_stitchable_n: u64 = 0;
     let mut compact_dwarf_stitchable_n: u64 = 0;
     let mut dwarf_stitchable_n: u64 = 0;
@@ -1066,6 +1068,8 @@ fn build_probe_diff_update(
         std::collections::VecDeque<RawEntry>,
     > = std::collections::HashMap::new();
     let mut richer_raw: std::collections::VecDeque<(u32, RawEntry)> =
+        std::collections::VecDeque::with_capacity(PROBE_RICH_EXAMPLES_CAP);
+    let mut dwarf_richer_raw: std::collections::VecDeque<(u32, RawEntry)> =
         std::collections::VecDeque::with_capacity(PROBE_RICH_EXAMPLES_CAP);
 
     for thread_tid in agg.iter_threads() {
@@ -1090,6 +1094,8 @@ fn build_probe_diff_update(
         let mut t_probe_only: u64 = 0;
         let mut t_pc_match: u64 = 0;
         let mut t_stitchable: u64 = 0;
+        let mut t_richer_than_kperf: u64 = 0;
+        let mut t_dwarf_richer_than_fp: u64 = 0;
         let mut t_compact_stitchable: u64 = 0;
         let mut t_compact_dwarf_stitchable: u64 = 0;
         let mut t_dwarf_stitchable: u64 = 0;
@@ -1292,11 +1298,21 @@ fn build_probe_diff_update(
                 compact_dwarf_stack: compact_dwarf_stack.into_boxed_slice(),
                 dwarf_stack: dwarf_stack.into_boxed_slice(),
             };
-            if raw_is_richer(&raw) {
+            if raw_is_richer_than_kperf(&raw) {
+                richer_than_kperf_n = richer_than_kperf_n.saturating_add(1);
+                t_richer_than_kperf = t_richer_than_kperf.saturating_add(1);
                 if richer_raw.len() == PROBE_RICH_EXAMPLES_CAP {
                     richer_raw.pop_front();
                 }
                 richer_raw.push_back((thread_tid, raw.clone()));
+            }
+            if raw_is_dwarf_richer_than_fp(&raw) {
+                dwarf_richer_than_fp_n = dwarf_richer_than_fp_n.saturating_add(1);
+                t_dwarf_richer_than_fp = t_dwarf_richer_than_fp.saturating_add(1);
+                if dwarf_richer_raw.len() == PROBE_RICH_EXAMPLES_CAP {
+                    dwarf_richer_raw.pop_front();
+                }
+                dwarf_richer_raw.push_back((thread_tid, raw.clone()));
             }
 
             let ring = per_thread_recent
@@ -1324,6 +1340,8 @@ fn build_probe_diff_update(
                 probe_only: t_probe_only,
                 pc_match: t_pc_match,
                 stitchable: t_stitchable,
+                richer_than_kperf: t_richer_than_kperf,
+                dwarf_richer_than_fp: t_dwarf_richer_than_fp,
                 compact_stitchable: t_compact_stitchable,
                 compact_dwarf_stitchable: t_compact_dwarf_stitchable,
                 dwarf_stitchable: t_dwarf_stitchable,
@@ -1387,6 +1405,10 @@ fn build_probe_diff_update(
         .into_iter()
         .map(|(tid, raw)| resolve_probe_diff_entry(bins, tid, raw))
         .collect();
+    let dwarf_richer: Vec<ProbeDiffEntry> = dwarf_richer_raw
+        .into_iter()
+        .map(|(tid, raw)| resolve_probe_diff_entry(bins, tid, raw))
+        .collect();
 
     let mut drift_buckets: Vec<ProbeDiffBucket> =
         Vec::with_capacity(PROBE_DRIFT_BUCKETS_NS.len() + 1);
@@ -1436,6 +1458,8 @@ fn build_probe_diff_update(
         timing: timing.finish(),
         pc_match: pc_match_n,
         stitchable: stitchable_n,
+        richer_than_kperf: richer_than_kperf_n,
+        dwarf_richer_than_fp: dwarf_richer_than_fp_n,
         compact_stitchable: compact_stitchable_n,
         compact_dwarf_stitchable: compact_dwarf_stitchable_n,
         dwarf_stitchable: dwarf_stitchable_n,
@@ -1445,6 +1469,7 @@ fn build_probe_diff_update(
         fp_walk_used: fp_walk_n,
         threads: threads_summary,
         richer,
+        dwarf_richer,
         recent,
     }
 }
@@ -1535,7 +1560,7 @@ fn resolve_probe_diff_entry(bins: &BinaryRegistry, tid: u32, raw: RawEntry) -> P
     }
 }
 
-fn raw_is_richer(raw: &RawEntry) -> bool {
+fn raw_is_richer_than_kperf(raw: &RawEntry) -> bool {
     raw.stitchable
         && (!raw.kperf_kernel_stack.is_empty()
             || (raw.dwarf_stack.len() > raw.kperf_stack.len()
@@ -1543,6 +1568,15 @@ fn raw_is_richer(raw: &RawEntry) -> bool {
                     .dwarf_stack
                     .iter()
                     .any(|pc| !raw.kperf_stack.contains(pc))))
+}
+
+fn raw_is_dwarf_richer_than_fp(raw: &RawEntry) -> bool {
+    raw.stitchable
+        && raw.dwarf_stack.len() > raw.probe_stack.len()
+        && raw
+            .dwarf_stack
+            .iter()
+            .any(|pc| !raw.probe_stack.contains(pc))
 }
 
 fn longest_common_run(a: &[u64], b: &[u64]) -> usize {

@@ -769,6 +769,16 @@ fn print_probe_diff(update: &ProbeDiffUpdate, recent_limit: u32, verbose: bool) 
         update.stitchable,
         pct(update.stitchable)
     );
+    println!(
+        "richer than kperf           : {:>6}  ({:>5.1}%)",
+        update.richer_than_kperf,
+        pct(update.richer_than_kperf)
+    );
+    println!(
+        "dwarf richer than fp        : {:>6}  ({:>5.1}%)",
+        update.dwarf_richer_than_fp,
+        pct(update.dwarf_richer_than_fp)
+    );
     if verbose {
         println!(
             "compact run stitchable      : {:>6}  ({:>5.1}%)",
@@ -935,7 +945,7 @@ fn print_probe_diff(update: &ProbeDiffUpdate, recent_limit: u32, verbose: bool) 
         println!("\nthreads by kperf sample count:");
         if verbose {
             println!(
-                "  {:>10}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>11}  {:>9}  {:>9}  {:>9}  {:>9}  name",
+                "  {:>10}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>11}  {:>9}  {:>9}  {:>9}  {:>9}  {:>9}  name",
                 "tid",
                 "kperf",
                 "kstack",
@@ -948,10 +958,11 @@ fn print_probe_diff(update: &ProbeDiffUpdate, recent_limit: u32, verbose: bool) 
                 "c-run",
                 "c+fde",
                 "dw-run",
+                "dw>fp",
             );
         } else {
             println!(
-                "  {:>10}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>11}  {:>9}  {:>9}  name",
+                "  {:>10}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>11}  {:>9}  {:>9}  {:>9}  name",
                 "tid",
                 "kperf",
                 "kstack",
@@ -962,6 +973,7 @@ fn print_probe_diff(update: &ProbeDiffUpdate, recent_limit: u32, verbose: bool) 
                 "pc_match",
                 "fp-run",
                 "enriched",
+                "dw>fp",
             );
         }
         for t in &update.threads {
@@ -969,7 +981,7 @@ fn print_probe_diff(update: &ProbeDiffUpdate, recent_limit: u32, verbose: bool) 
             let denom = t.paired.max(1) as f64;
             if verbose {
                 println!(
-                    "  {:>10}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>5} {:>3.0}%  {:>9.2}  {:>9.2}  {:>9.2}  {:>9.2}  {name}",
+                    "  {:>10}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>5} {:>3.0}%  {:>9.2}  {:>9.2}  {:>9.2}  {:>9.2}  {:>9}  {name}",
                     t.tid,
                     t.kperf_samples,
                     t.kperf_kernel_stack_samples,
@@ -983,10 +995,11 @@ fn print_probe_diff(update: &ProbeDiffUpdate, recent_limit: u32, verbose: bool) 
                     t.avg_compact_common_suffix,
                     t.avg_compact_dwarf_common_suffix,
                     t.avg_dwarf_common_suffix,
+                    t.dwarf_richer_than_fp,
                 );
             } else {
                 println!(
-                    "  {:>10}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>5} {:>3.0}%  {:>9.2}  {:>9}  {name}",
+                    "  {:>10}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>5} {:>3.0}%  {:>9.2}  {:>9}  {:>9}  {name}",
                     t.tid,
                     t.kperf_samples,
                     t.kperf_kernel_stack_samples,
@@ -998,6 +1011,7 @@ fn print_probe_diff(update: &ProbeDiffUpdate, recent_limit: u32, verbose: bool) 
                     t.pc_match as f64 * 100.0 / denom,
                     t.avg_common_suffix,
                     t.stitchable,
+                    t.dwarf_richer_than_fp,
                 );
             }
         }
@@ -1007,8 +1021,8 @@ fn print_probe_diff(update: &ProbeDiffUpdate, recent_limit: u32, verbose: bool) 
         return;
     }
     let take = recent_limit as usize;
-    let entries: Vec<&ProbeDiffEntry> = if verbose {
-        update
+    if verbose {
+        let entries = update
             .recent
             .iter()
             .rev()
@@ -1016,47 +1030,69 @@ fn print_probe_diff(update: &ProbeDiffUpdate, recent_limit: u32, verbose: bool) 
             .collect::<Vec<_>>()
             .into_iter()
             .rev()
-            .collect()
+            .collect::<Vec<_>>();
+        println!(
+            "\nmost recent {} paired entries (oldest → newest):",
+            entries.len()
+        );
+        for entry in entries {
+            print_probe_diff_entry(entry, verbose, StitchedTagBaseline::Kperf);
+        }
     } else {
-        update
+        let kernel_entries = update
             .richer
+            .iter()
+            .filter(|entry| !entry.kperf_kernel_stack.is_empty())
+            .rev()
+            .take(take)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>();
+        println!(
+            "\nkernel-bearing stitched entries from full scan: {} shown",
+            kernel_entries.len()
+        );
+        if kernel_entries.is_empty() {
+            println!("  (no kernel-bearing stitched entries found in the full scan)");
+        }
+        for entry in kernel_entries {
+            print_probe_diff_entry(entry, verbose, StitchedTagBaseline::Kperf);
+        }
+
+        let dwarf_entries = update
+            .dwarf_richer
             .iter()
             .rev()
             .take(take)
             .collect::<Vec<_>>()
             .into_iter()
             .rev()
-            .collect()
-    };
-    if verbose {
+            .collect::<Vec<_>>();
         println!(
-            "\nmost recent {} paired entries (oldest → newest):",
-            entries.len()
+            "\ndwarf-richer stitched entries from full scan: {} shown (tags compare against FP; use -n to show more, --verbose for comparator stacks)",
+            dwarf_entries.len()
         );
-    } else {
-        println!(
-            "\nricher stitched entries from full scan: {} shown (use -n to show more, --verbose for comparator stacks)",
-            entries.len()
-        );
-    }
-    if entries.is_empty() && !verbose {
-        println!("  (no richer stitched entries found in the full scan)");
-        return;
-    }
-    for entry in entries {
-        print_probe_diff_entry(entry, verbose);
+        if dwarf_entries.is_empty() {
+            println!("  (no DWARF-richer stitched entries found in the full scan)");
+        }
+        for entry in dwarf_entries {
+            print_probe_diff_entry(entry, verbose, StitchedTagBaseline::Fp);
+        }
     }
 }
 
-fn print_probe_diff_entry(entry: &ProbeDiffEntry, verbose: bool) {
-    let user_depth_delta = signed_len_delta(entry.dwarf_stack.len(), entry.kperf_stack.len());
-    let total_depth_delta = signed_len_delta(
+fn print_probe_diff_entry(entry: &ProbeDiffEntry, verbose: bool, baseline: StitchedTagBaseline) {
+    let user_delta_vs_kperf = signed_len_delta(entry.dwarf_stack.len(), entry.kperf_stack.len());
+    let user_delta_vs_fp = signed_len_delta(entry.dwarf_stack.len(), entry.probe_stack.len());
+    let stitched_delta_vs_kperf_total = signed_len_delta(
         entry.stitched_stack.len(),
         entry.kperf_kernel_stack.len() + entry.kperf_stack.len(),
     );
     let dwarf_only_pcs = distinct_dwarf_only_pc_count(&entry.kperf_stack, &entry.dwarf_stack);
+    let dwarf_only_vs_fp_pcs = distinct_dwarf_only_pc_count(&entry.probe_stack, &entry.dwarf_stack);
     println!(
-        "\n  tid={} t={}ms drift={:+}ns fp_run={} compact_run={} compact+fde_run={} dwarf_run={} pc_match={} stitchable={} dwarf={} kperf_user_frames={} kernel_frames={} dwarf_user_frames={} stitched_frames={} user_depth_delta={:+} total_depth_delta={:+} dwarf_only_pcs={}",
+        "\n  tid={} t={}ms drift={:+}ns fp_run={} compact_run={} compact+fde_run={} dwarf_run={} pc_match={} stitchable={} dwarf={} kperf_user={} kperf_kernel={} kperf_total={} fp_user={} dwarf_user={} stitched_total={} user_delta_vs_kperf={:+} user_delta_vs_fp={:+} stitched_delta_vs_kperf_total={:+} dwarf_only_vs_kperf_pcs={} dwarf_only_vs_fp_pcs={}",
         entry.tid,
         entry.timestamp_ns / 1_000_000,
         entry.drift_ns,
@@ -1069,11 +1105,15 @@ fn print_probe_diff_entry(entry: &ProbeDiffEntry, verbose: bool) {
         entry.used_framehop,
         entry.kperf_stack.len(),
         entry.kperf_kernel_stack.len(),
+        entry.kperf_kernel_stack.len() + entry.kperf_stack.len(),
+        entry.probe_stack.len(),
         entry.dwarf_stack.len(),
         entry.stitched_stack.len(),
-        user_depth_delta,
-        total_depth_delta,
+        user_delta_vs_kperf,
+        user_delta_vs_fp,
+        stitched_delta_vs_kperf_total,
         dwarf_only_pcs,
+        dwarf_only_vs_fp_pcs,
     );
     if verbose {
         println!(
@@ -1131,7 +1171,7 @@ fn print_probe_diff_entry(entry: &ProbeDiffEntry, verbose: bool) {
         );
     }
     if !entry.stitched_stack.is_empty() {
-        print_stitched_stack(entry);
+        print_stitched_stack(entry, baseline);
     }
 }
 
@@ -1156,13 +1196,26 @@ fn print_stack_with_tag(label: &str, frames: &[stax_live_proto::ResolvedFrame], 
     print_frame_groups(frames, |_| tag);
 }
 
-fn print_stitched_stack(entry: &ProbeDiffEntry) {
-    println!("    stitched_stack (would-ship, tagged by source):");
-    let kperf_user_addrs = frame_address_set(&entry.kperf_stack);
+#[derive(Clone, Copy)]
+enum StitchedTagBaseline {
+    Kperf,
+    Fp,
+}
+
+fn print_stitched_stack(entry: &ProbeDiffEntry, baseline: StitchedTagBaseline) {
+    let baseline_label = match baseline {
+        StitchedTagBaseline::Kperf => "kperf",
+        StitchedTagBaseline::Fp => "fp",
+    };
+    println!("    stitched_stack (would-ship, tags vs {baseline_label}):");
+    let baseline_user_addrs = match baseline {
+        StitchedTagBaseline::Kperf => frame_address_set(&entry.kperf_stack),
+        StitchedTagBaseline::Fp => frame_address_set(&entry.probe_stack),
+    };
     print_frame_groups(&entry.stitched_stack, |frame| {
         if is_kernel_frame(frame) {
             FrameTag::Kernel
-        } else if frame.address != 0 && kperf_user_addrs.contains(&frame.address) {
+        } else if frame.address != 0 && baseline_user_addrs.contains(&frame.address) {
             FrameTag::User
         } else {
             FrameTag::Dwarf

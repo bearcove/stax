@@ -668,6 +668,8 @@ pub struct ProbeDiffThread {
     pub probe_only: u64,
     pub pc_match: u64,
     pub stitchable: u64,
+    pub richer_than_kperf: u64,
+    pub dwarf_richer_than_fp: u64,
     pub compact_stitchable: u64,
     pub compact_dwarf_stitchable: u64,
     pub dwarf_stitchable: u64,
@@ -731,6 +733,13 @@ pub struct ProbeDiffUpdate {
     /// race-against-return shipping mode would produce a
     /// high-confidence enriched stack for.
     pub stitchable: u64,
+    /// Stitchable paired samples where the would-ship stack adds at
+    /// least one kperf kernel frame or at least one new user PC beyond
+    /// kperf's user stack.
+    pub richer_than_kperf: u64,
+    /// Stitchable paired samples where DWARF/metadata adds at least
+    /// one user PC beyond the suspended-thread FP validator stack.
+    pub dwarf_richer_than_fp: u64,
     pub compact_stitchable: u64,
     pub compact_dwarf_stitchable: u64,
     pub dwarf_stitchable: u64,
@@ -744,6 +753,10 @@ pub struct ProbeDiffUpdate {
     /// Entries are ordered oldest → newest and are intended for focused
     /// CLI/UI drill-down.
     pub richer: Vec<ProbeDiffEntry>,
+    /// Examples where DWARF/metadata provides value beyond the FP
+    /// validator itself. This isolates DWARF-specific value from the
+    /// easier "FP beat kperf" case.
+    pub dwarf_richer: Vec<ProbeDiffEntry>,
     /// The N most recent paired entries for drill-down. Ordered
     /// oldest → newest.
     pub recent: Vec<ProbeDiffEntry>,
