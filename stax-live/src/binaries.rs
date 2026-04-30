@@ -131,6 +131,11 @@ pub struct BinaryRegistry {
     /// against this cache instead.
     #[cfg(target_os = "macos")]
     shared_cache: Option<Arc<stax_mac_shared_cache::SharedCache>>,
+    /// Lazy fileset-aware symbol resolver for kperf kernel PCs.
+    /// The kernel collection is only opened if a high-half kernel
+    /// address reaches `lookup_symbol`.
+    #[cfg(target_os = "macos")]
+    kernel_symbols: crate::kernel_symbols::KernelSymbolResolver,
 }
 
 impl BinaryRegistry {
@@ -146,6 +151,8 @@ impl BinaryRegistry {
             macho_byte_source: None,
             #[cfg(target_os = "macos")]
             shared_cache: None,
+            #[cfg(target_os = "macos")]
+            kernel_symbols: crate::kernel_symbols::KernelSymbolResolver::default(),
         }
     }
 
@@ -258,6 +265,10 @@ impl BinaryRegistry {
     pub fn lookup_symbol(&self, address: u64) -> Option<ResolvedSymbol> {
         let Some(idx) = self.binary_for_address(address) else {
             #[cfg(target_os = "macos")]
+            if let Some(symbol) = self.lookup_symbol_in_kernel_collection(address) {
+                return Some(symbol);
+            }
+            #[cfg(target_os = "macos")]
             return self.lookup_symbol_in_shared_cache(address);
             #[cfg(not(target_os = "macos"))]
             return None;
@@ -295,6 +306,17 @@ impl BinaryRegistry {
             binary: basename,
             is_main,
             language,
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn lookup_symbol_in_kernel_collection(&self, address: u64) -> Option<ResolvedSymbol> {
+        let symbol = self.kernel_symbols.lookup(address)?;
+        Some(ResolvedSymbol {
+            function_name: symbol.function_name,
+            binary: format!("kernel:{}", symbol.module),
+            is_main: false,
+            language: symbol.language,
         })
     }
 

@@ -660,6 +660,8 @@ pub struct ProbeTimingSummary {
 pub struct ProbeDiffThread {
     pub tid: u32,
     pub kperf_samples: u64,
+    /// kperf samples on this thread that carried a non-empty kernel stack.
+    pub kperf_kernel_stack_samples: u64,
     pub probe_results: u64,
     pub paired: u64,
     pub kperf_only: u64,
@@ -680,9 +682,17 @@ pub struct ProbeDiffThread {
 pub struct ProbeDiffUpdate {
     pub total_kperf_samples: u64,
     pub total_probes: u64,
+    /// kperf samples that carried a non-empty kernel stack, before pairing.
+    pub kperf_kernel_stack_samples: u64,
+    /// Total kernel frames carried by kperf samples, before pairing.
+    pub kperf_kernel_frames: u64,
+    /// Largest kernel stack depth seen in any kperf sample.
+    pub max_kperf_kernel_frames: u32,
     /// (tid, kperf_ts) pairs where both a kperf sample and a probe
     /// result exist.
     pub paired: u64,
+    /// Paired samples whose kperf side carried a non-empty kernel stack.
+    pub paired_kernel_stack_samples: u64,
     /// kperf samples observed without a matching probe result. A
     /// run of `kperf_only > 0` while `total_probes == 0` means the
     /// correlated shade probe is disabled/unimplemented; otherwise
@@ -729,6 +739,11 @@ pub struct ProbeDiffUpdate {
     pub compact_dwarf_used: u64,
     pub fp_walk_used: u64,
     pub threads: Vec<ProbeDiffThread>,
+    /// Richer stitched examples found during the full probe-diff scan.
+    /// Unlike `recent`, this is not limited to the last retained pairs.
+    /// Entries are ordered oldest → newest and are intended for focused
+    /// CLI/UI drill-down.
+    pub richer: Vec<ProbeDiffEntry>,
     /// The N most recent paired entries for drill-down. Ordered
     /// oldest → newest.
     pub recent: Vec<ProbeDiffEntry>,

@@ -518,25 +518,39 @@ public struct ProbeTimingSummary: Codable, Sendable {
 public struct ProbeDiffThread: Codable, Sendable {
     public var tid: UInt32
     public var kperfSamples: UInt64
+    public var kperfKernelStackSamples: UInt64
     public var probeResults: UInt64
     public var paired: UInt64
     public var kperfOnly: UInt64
     public var probeOnly: UInt64
     public var pcMatch: UInt64
     public var stitchable: UInt64
+    public var compactStitchable: UInt64
+    public var compactDwarfStitchable: UInt64
+    public var dwarfStitchable: UInt64
     public var avgCommonSuffix: Float
+    public var avgCompactCommonSuffix: Float
+    public var avgCompactDwarfCommonSuffix: Float
+    public var avgDwarfCommonSuffix: Float
     public var threadName: String?
 
-    nonisolated public init(tid: UInt32, kperfSamples: UInt64, probeResults: UInt64, paired: UInt64, kperfOnly: UInt64, probeOnly: UInt64, pcMatch: UInt64, stitchable: UInt64, avgCommonSuffix: Float, threadName: String?) {
+    nonisolated public init(tid: UInt32, kperfSamples: UInt64, kperfKernelStackSamples: UInt64, probeResults: UInt64, paired: UInt64, kperfOnly: UInt64, probeOnly: UInt64, pcMatch: UInt64, stitchable: UInt64, compactStitchable: UInt64, compactDwarfStitchable: UInt64, dwarfStitchable: UInt64, avgCommonSuffix: Float, avgCompactCommonSuffix: Float, avgCompactDwarfCommonSuffix: Float, avgDwarfCommonSuffix: Float, threadName: String?) {
         self.tid = tid
         self.kperfSamples = kperfSamples
+        self.kperfKernelStackSamples = kperfKernelStackSamples
         self.probeResults = probeResults
         self.paired = paired
         self.kperfOnly = kperfOnly
         self.probeOnly = probeOnly
         self.pcMatch = pcMatch
         self.stitchable = stitchable
+        self.compactStitchable = compactStitchable
+        self.compactDwarfStitchable = compactDwarfStitchable
+        self.dwarfStitchable = dwarfStitchable
         self.avgCommonSuffix = avgCommonSuffix
+        self.avgCompactCommonSuffix = avgCompactCommonSuffix
+        self.avgCompactDwarfCommonSuffix = avgCompactDwarfCommonSuffix
+        self.avgDwarfCommonSuffix = avgDwarfCommonSuffix
         self.threadName = threadName
     }
 }
@@ -634,13 +648,19 @@ public struct ProbeDiffEntry: Codable, Sendable {
     public var kperfStack: [ResolvedFrame]
     public var kperfKernelStack: [ResolvedFrame]
     public var probeStack: [ResolvedFrame]
+    public var compactStack: [ResolvedFrame]
+    public var compactDwarfStack: [ResolvedFrame]
+    public var dwarfStack: [ResolvedFrame]
     public var stitchedStack: [ResolvedFrame]
     public var commonSuffix: UInt32
+    public var compactCommonSuffix: UInt32
+    public var compactDwarfCommonSuffix: UInt32
+    public var dwarfCommonSuffix: UInt32
     public var pcMatch: Bool
     public var stitchable: Bool
     public var usedFramehop: Bool
 
-    nonisolated public init(tid: UInt32, timestampNs: UInt64, driftNs: Int64, timing: ProbeTimingBreakdown, queue: ProbeQueueStats, kperfStack: [ResolvedFrame], kperfKernelStack: [ResolvedFrame], probeStack: [ResolvedFrame], stitchedStack: [ResolvedFrame], commonSuffix: UInt32, pcMatch: Bool, stitchable: Bool, usedFramehop: Bool) {
+    nonisolated public init(tid: UInt32, timestampNs: UInt64, driftNs: Int64, timing: ProbeTimingBreakdown, queue: ProbeQueueStats, kperfStack: [ResolvedFrame], kperfKernelStack: [ResolvedFrame], probeStack: [ResolvedFrame], compactStack: [ResolvedFrame], compactDwarfStack: [ResolvedFrame], dwarfStack: [ResolvedFrame], stitchedStack: [ResolvedFrame], commonSuffix: UInt32, compactCommonSuffix: UInt32, compactDwarfCommonSuffix: UInt32, dwarfCommonSuffix: UInt32, pcMatch: Bool, stitchable: Bool, usedFramehop: Bool) {
         self.tid = tid
         self.timestampNs = timestampNs
         self.driftNs = driftNs
@@ -649,8 +669,14 @@ public struct ProbeDiffEntry: Codable, Sendable {
         self.kperfStack = kperfStack
         self.kperfKernelStack = kperfKernelStack
         self.probeStack = probeStack
+        self.compactStack = compactStack
+        self.compactDwarfStack = compactDwarfStack
+        self.dwarfStack = dwarfStack
         self.stitchedStack = stitchedStack
         self.commonSuffix = commonSuffix
+        self.compactCommonSuffix = compactCommonSuffix
+        self.compactDwarfCommonSuffix = compactDwarfCommonSuffix
+        self.dwarfCommonSuffix = dwarfCommonSuffix
         self.pcMatch = pcMatch
         self.stitchable = stitchable
         self.usedFramehop = usedFramehop
@@ -660,39 +686,65 @@ public struct ProbeDiffEntry: Codable, Sendable {
 public struct ProbeDiffUpdate: Codable, Sendable {
     public var totalKperfSamples: UInt64
     public var totalProbes: UInt64
+    public var kperfKernelStackSamples: UInt64
+    public var kperfKernelFrames: UInt64
+    public var maxKperfKernelFrames: UInt32
     public var paired: UInt64
+    public var pairedKernelStackSamples: UInt64
     public var kperfOnly: UInt64
     public var probeOnly: UInt64
     public var probeAugmentedKperf: UInt64
     public var probeWalkedDeeper: UInt64
     public var commonSuffixHist: [UInt64]
+    public var compactSuffixHist: [UInt64]
+    public var compactDwarfSuffixHist: [UInt64]
+    public var dwarfSuffixHist: [UInt64]
     public var depthMatch: [ProbeDiffDepthCell]
     public var driftBuckets: [ProbeDiffBucket]
     public var timing: ProbeTimingSummary
     public var pcMatch: UInt64
     public var stitchable: UInt64
+    public var compactStitchable: UInt64
+    public var compactDwarfStitchable: UInt64
+    public var dwarfStitchable: UInt64
     public var framehopUsed: UInt64
+    public var compactUsed: UInt64
+    public var compactDwarfUsed: UInt64
     public var fpWalkUsed: UInt64
     public var threads: [ProbeDiffThread]
+    public var richer: [ProbeDiffEntry]
     public var recent: [ProbeDiffEntry]
 
-    nonisolated public init(totalKperfSamples: UInt64, totalProbes: UInt64, paired: UInt64, kperfOnly: UInt64, probeOnly: UInt64, probeAugmentedKperf: UInt64, probeWalkedDeeper: UInt64, commonSuffixHist: [UInt64], depthMatch: [ProbeDiffDepthCell], driftBuckets: [ProbeDiffBucket], timing: ProbeTimingSummary, pcMatch: UInt64, stitchable: UInt64, framehopUsed: UInt64, fpWalkUsed: UInt64, threads: [ProbeDiffThread], recent: [ProbeDiffEntry]) {
+    nonisolated public init(totalKperfSamples: UInt64, totalProbes: UInt64, kperfKernelStackSamples: UInt64, kperfKernelFrames: UInt64, maxKperfKernelFrames: UInt32, paired: UInt64, pairedKernelStackSamples: UInt64, kperfOnly: UInt64, probeOnly: UInt64, probeAugmentedKperf: UInt64, probeWalkedDeeper: UInt64, commonSuffixHist: [UInt64], compactSuffixHist: [UInt64], compactDwarfSuffixHist: [UInt64], dwarfSuffixHist: [UInt64], depthMatch: [ProbeDiffDepthCell], driftBuckets: [ProbeDiffBucket], timing: ProbeTimingSummary, pcMatch: UInt64, stitchable: UInt64, compactStitchable: UInt64, compactDwarfStitchable: UInt64, dwarfStitchable: UInt64, framehopUsed: UInt64, compactUsed: UInt64, compactDwarfUsed: UInt64, fpWalkUsed: UInt64, threads: [ProbeDiffThread], richer: [ProbeDiffEntry], recent: [ProbeDiffEntry]) {
         self.totalKperfSamples = totalKperfSamples
         self.totalProbes = totalProbes
+        self.kperfKernelStackSamples = kperfKernelStackSamples
+        self.kperfKernelFrames = kperfKernelFrames
+        self.maxKperfKernelFrames = maxKperfKernelFrames
         self.paired = paired
+        self.pairedKernelStackSamples = pairedKernelStackSamples
         self.kperfOnly = kperfOnly
         self.probeOnly = probeOnly
         self.probeAugmentedKperf = probeAugmentedKperf
         self.probeWalkedDeeper = probeWalkedDeeper
         self.commonSuffixHist = commonSuffixHist
+        self.compactSuffixHist = compactSuffixHist
+        self.compactDwarfSuffixHist = compactDwarfSuffixHist
+        self.dwarfSuffixHist = dwarfSuffixHist
         self.depthMatch = depthMatch
         self.driftBuckets = driftBuckets
         self.timing = timing
         self.pcMatch = pcMatch
         self.stitchable = stitchable
+        self.compactStitchable = compactStitchable
+        self.compactDwarfStitchable = compactDwarfStitchable
+        self.dwarfStitchable = dwarfStitchable
         self.framehopUsed = framehopUsed
+        self.compactUsed = compactUsed
+        self.compactDwarfUsed = compactDwarfUsed
         self.fpWalkUsed = fpWalkUsed
         self.threads = threads
+        self.richer = richer
         self.recent = recent
     }
 }
@@ -1101,10 +1153,12 @@ public struct WireProbeResult: Codable, Sendable {
     public var machFp: UInt64
     public var machSp: UInt64
     public var machWalked: [UInt64]
+    public var compactWalked: [UInt64]
+    public var compactDwarfWalked: [UInt64]
     public var dwarfWalked: [UInt64]
     public var usedFramehop: Bool
 
-    nonisolated public init(tid: UInt32, timing: ProbeTiming, queue: ProbeQueueStats, machPc: UInt64, machLr: UInt64, machFp: UInt64, machSp: UInt64, machWalked: [UInt64], dwarfWalked: [UInt64], usedFramehop: Bool) {
+    nonisolated public init(tid: UInt32, timing: ProbeTiming, queue: ProbeQueueStats, machPc: UInt64, machLr: UInt64, machFp: UInt64, machSp: UInt64, machWalked: [UInt64], compactWalked: [UInt64], compactDwarfWalked: [UInt64], dwarfWalked: [UInt64], usedFramehop: Bool) {
         self.tid = tid
         self.timing = timing
         self.queue = queue
@@ -1113,6 +1167,8 @@ public struct WireProbeResult: Codable, Sendable {
         self.machFp = machFp
         self.machSp = machSp
         self.machWalked = machWalked
+        self.compactWalked = compactWalked
+        self.compactDwarfWalked = compactDwarfWalked
         self.dwarfWalked = dwarfWalked
         self.usedFramehop = usedFramehop
     }
@@ -1434,13 +1490,20 @@ nonisolated internal func encodeProbeTimingSummary(_ value: ProbeTimingSummary, 
 nonisolated internal func encodeProbeDiffThread(_ value: ProbeDiffThread, into buffer: inout ByteBuffer) {
     encodeU32(value.tid, into: &buffer)
     encodeVarint(value.kperfSamples, into: &buffer)
+    encodeVarint(value.kperfKernelStackSamples, into: &buffer)
     encodeVarint(value.probeResults, into: &buffer)
     encodeVarint(value.paired, into: &buffer)
     encodeVarint(value.kperfOnly, into: &buffer)
     encodeVarint(value.probeOnly, into: &buffer)
     encodeVarint(value.pcMatch, into: &buffer)
     encodeVarint(value.stitchable, into: &buffer)
+    encodeVarint(value.compactStitchable, into: &buffer)
+    encodeVarint(value.compactDwarfStitchable, into: &buffer)
+    encodeVarint(value.dwarfStitchable, into: &buffer)
     encodeF32(value.avgCommonSuffix, into: &buffer)
+    encodeF32(value.avgCompactCommonSuffix, into: &buffer)
+    encodeF32(value.avgCompactDwarfCommonSuffix, into: &buffer)
+    encodeF32(value.avgDwarfCommonSuffix, into: &buffer)
     encodeOption(value.threadName, into: &buffer, encoder: { val, buf in encodeString(val, into: &buf) })
 }
 
@@ -1495,8 +1558,14 @@ nonisolated internal func encodeProbeDiffEntry(_ value: ProbeDiffEntry, into buf
     encodeVec(value.kperfStack, into: &buffer, encoder: { val, buf in encodeResolvedFrame(val, into: &buf) })
     encodeVec(value.kperfKernelStack, into: &buffer, encoder: { val, buf in encodeResolvedFrame(val, into: &buf) })
     encodeVec(value.probeStack, into: &buffer, encoder: { val, buf in encodeResolvedFrame(val, into: &buf) })
+    encodeVec(value.compactStack, into: &buffer, encoder: { val, buf in encodeResolvedFrame(val, into: &buf) })
+    encodeVec(value.compactDwarfStack, into: &buffer, encoder: { val, buf in encodeResolvedFrame(val, into: &buf) })
+    encodeVec(value.dwarfStack, into: &buffer, encoder: { val, buf in encodeResolvedFrame(val, into: &buf) })
     encodeVec(value.stitchedStack, into: &buffer, encoder: { val, buf in encodeResolvedFrame(val, into: &buf) })
     encodeU32(value.commonSuffix, into: &buffer)
+    encodeU32(value.compactCommonSuffix, into: &buffer)
+    encodeU32(value.compactDwarfCommonSuffix, into: &buffer)
+    encodeU32(value.dwarfCommonSuffix, into: &buffer)
     encodeBool(value.pcMatch, into: &buffer)
     encodeBool(value.stitchable, into: &buffer)
     encodeBool(value.usedFramehop, into: &buffer)
@@ -1505,20 +1574,33 @@ nonisolated internal func encodeProbeDiffEntry(_ value: ProbeDiffEntry, into buf
 nonisolated internal func encodeProbeDiffUpdate(_ value: ProbeDiffUpdate, into buffer: inout ByteBuffer) {
     encodeVarint(value.totalKperfSamples, into: &buffer)
     encodeVarint(value.totalProbes, into: &buffer)
+    encodeVarint(value.kperfKernelStackSamples, into: &buffer)
+    encodeVarint(value.kperfKernelFrames, into: &buffer)
+    encodeU32(value.maxKperfKernelFrames, into: &buffer)
     encodeVarint(value.paired, into: &buffer)
+    encodeVarint(value.pairedKernelStackSamples, into: &buffer)
     encodeVarint(value.kperfOnly, into: &buffer)
     encodeVarint(value.probeOnly, into: &buffer)
     encodeVarint(value.probeAugmentedKperf, into: &buffer)
     encodeVarint(value.probeWalkedDeeper, into: &buffer)
     encodeVec(value.commonSuffixHist, into: &buffer, encoder: { val, buf in encodeVarint(val, into: &buf) })
+    encodeVec(value.compactSuffixHist, into: &buffer, encoder: { val, buf in encodeVarint(val, into: &buf) })
+    encodeVec(value.compactDwarfSuffixHist, into: &buffer, encoder: { val, buf in encodeVarint(val, into: &buf) })
+    encodeVec(value.dwarfSuffixHist, into: &buffer, encoder: { val, buf in encodeVarint(val, into: &buf) })
     encodeVec(value.depthMatch, into: &buffer, encoder: { val, buf in encodeProbeDiffDepthCell(val, into: &buf) })
     encodeVec(value.driftBuckets, into: &buffer, encoder: { val, buf in encodeProbeDiffBucket(val, into: &buf) })
     encodeProbeTimingSummary(value.timing, into: &buffer)
     encodeVarint(value.pcMatch, into: &buffer)
     encodeVarint(value.stitchable, into: &buffer)
+    encodeVarint(value.compactStitchable, into: &buffer)
+    encodeVarint(value.compactDwarfStitchable, into: &buffer)
+    encodeVarint(value.dwarfStitchable, into: &buffer)
     encodeVarint(value.framehopUsed, into: &buffer)
+    encodeVarint(value.compactUsed, into: &buffer)
+    encodeVarint(value.compactDwarfUsed, into: &buffer)
     encodeVarint(value.fpWalkUsed, into: &buffer)
     encodeVec(value.threads, into: &buffer, encoder: { val, buf in encodeProbeDiffThread(val, into: &buf) })
+    encodeVec(value.richer, into: &buffer, encoder: { val, buf in encodeProbeDiffEntry(val, into: &buf) })
     encodeVec(value.recent, into: &buffer, encoder: { val, buf in encodeProbeDiffEntry(val, into: &buf) })
 }
 
@@ -1804,6 +1886,8 @@ nonisolated internal func encodeWireProbeResult(_ value: WireProbeResult, into b
     encodeVarint(value.machFp, into: &buffer)
     encodeVarint(value.machSp, into: &buffer)
     encodeVec(value.machWalked, into: &buffer, encoder: { val, buf in encodeVarint(val, into: &buf) })
+    encodeVec(value.compactWalked, into: &buffer, encoder: { val, buf in encodeVarint(val, into: &buf) })
+    encodeVec(value.compactDwarfWalked, into: &buffer, encoder: { val, buf in encodeVarint(val, into: &buf) })
     encodeVec(value.dwarfWalked, into: &buffer, encoder: { val, buf in encodeVarint(val, into: &buf) })
     encodeBool(value.usedFramehop, into: &buffer)
 }
@@ -2193,15 +2277,22 @@ nonisolated internal func decodeProbeTimingSummary(from buffer: inout ByteBuffer
 nonisolated internal func decodeProbeDiffThread(from buffer: inout ByteBuffer) throws -> ProbeDiffThread {
     let _tid = try ({ buf in try decodeU32(from: &buf) })(&buffer)
     let _kperfSamples = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
+    let _kperfKernelStackSamples = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
     let _probeResults = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
     let _paired = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
     let _kperfOnly = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
     let _probeOnly = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
     let _pcMatch = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
     let _stitchable = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
+    let _compactStitchable = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
+    let _compactDwarfStitchable = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
+    let _dwarfStitchable = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
     let _avgCommonSuffix = try ({ buf in try decodeF32(from: &buf) })(&buffer)
+    let _avgCompactCommonSuffix = try ({ buf in try decodeF32(from: &buf) })(&buffer)
+    let _avgCompactDwarfCommonSuffix = try ({ buf in try decodeF32(from: &buf) })(&buffer)
+    let _avgDwarfCommonSuffix = try ({ buf in try decodeF32(from: &buf) })(&buffer)
     let _threadName = try ({ buf in try decodeOption(from: &buf, decoder: { buf in try decodeString(from: &buf) }) })(&buffer)
-    return ProbeDiffThread(tid: _tid, kperfSamples: _kperfSamples, probeResults: _probeResults, paired: _paired, kperfOnly: _kperfOnly, probeOnly: _probeOnly, pcMatch: _pcMatch, stitchable: _stitchable, avgCommonSuffix: _avgCommonSuffix, threadName: _threadName)
+    return ProbeDiffThread(tid: _tid, kperfSamples: _kperfSamples, kperfKernelStackSamples: _kperfKernelStackSamples, probeResults: _probeResults, paired: _paired, kperfOnly: _kperfOnly, probeOnly: _probeOnly, pcMatch: _pcMatch, stitchable: _stitchable, compactStitchable: _compactStitchable, compactDwarfStitchable: _compactDwarfStitchable, dwarfStitchable: _dwarfStitchable, avgCommonSuffix: _avgCommonSuffix, avgCompactCommonSuffix: _avgCompactCommonSuffix, avgCompactDwarfCommonSuffix: _avgCompactDwarfCommonSuffix, avgDwarfCommonSuffix: _avgDwarfCommonSuffix, threadName: _threadName)
 }
 
 nonisolated internal func decodeProbeTimingBreakdown(from buffer: inout ByteBuffer) throws -> ProbeTimingBreakdown {
@@ -2258,33 +2349,52 @@ nonisolated internal func decodeProbeDiffEntry(from buffer: inout ByteBuffer) th
     let _kperfStack = try ({ buf in try decodeVec(from: &buf, decoder: { buf in try decodeResolvedFrame(from: &buf) }) })(&buffer)
     let _kperfKernelStack = try ({ buf in try decodeVec(from: &buf, decoder: { buf in try decodeResolvedFrame(from: &buf) }) })(&buffer)
     let _probeStack = try ({ buf in try decodeVec(from: &buf, decoder: { buf in try decodeResolvedFrame(from: &buf) }) })(&buffer)
+    let _compactStack = try ({ buf in try decodeVec(from: &buf, decoder: { buf in try decodeResolvedFrame(from: &buf) }) })(&buffer)
+    let _compactDwarfStack = try ({ buf in try decodeVec(from: &buf, decoder: { buf in try decodeResolvedFrame(from: &buf) }) })(&buffer)
+    let _dwarfStack = try ({ buf in try decodeVec(from: &buf, decoder: { buf in try decodeResolvedFrame(from: &buf) }) })(&buffer)
     let _stitchedStack = try ({ buf in try decodeVec(from: &buf, decoder: { buf in try decodeResolvedFrame(from: &buf) }) })(&buffer)
     let _commonSuffix = try ({ buf in try decodeU32(from: &buf) })(&buffer)
+    let _compactCommonSuffix = try ({ buf in try decodeU32(from: &buf) })(&buffer)
+    let _compactDwarfCommonSuffix = try ({ buf in try decodeU32(from: &buf) })(&buffer)
+    let _dwarfCommonSuffix = try ({ buf in try decodeU32(from: &buf) })(&buffer)
     let _pcMatch = try ({ buf in try decodeBool(from: &buf) })(&buffer)
     let _stitchable = try ({ buf in try decodeBool(from: &buf) })(&buffer)
     let _usedFramehop = try ({ buf in try decodeBool(from: &buf) })(&buffer)
-    return ProbeDiffEntry(tid: _tid, timestampNs: _timestampNs, driftNs: _driftNs, timing: _timing, queue: _queue, kperfStack: _kperfStack, kperfKernelStack: _kperfKernelStack, probeStack: _probeStack, stitchedStack: _stitchedStack, commonSuffix: _commonSuffix, pcMatch: _pcMatch, stitchable: _stitchable, usedFramehop: _usedFramehop)
+    return ProbeDiffEntry(tid: _tid, timestampNs: _timestampNs, driftNs: _driftNs, timing: _timing, queue: _queue, kperfStack: _kperfStack, kperfKernelStack: _kperfKernelStack, probeStack: _probeStack, compactStack: _compactStack, compactDwarfStack: _compactDwarfStack, dwarfStack: _dwarfStack, stitchedStack: _stitchedStack, commonSuffix: _commonSuffix, compactCommonSuffix: _compactCommonSuffix, compactDwarfCommonSuffix: _compactDwarfCommonSuffix, dwarfCommonSuffix: _dwarfCommonSuffix, pcMatch: _pcMatch, stitchable: _stitchable, usedFramehop: _usedFramehop)
 }
 
 nonisolated internal func decodeProbeDiffUpdate(from buffer: inout ByteBuffer) throws -> ProbeDiffUpdate {
     let _totalKperfSamples = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
     let _totalProbes = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
+    let _kperfKernelStackSamples = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
+    let _kperfKernelFrames = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
+    let _maxKperfKernelFrames = try ({ buf in try decodeU32(from: &buf) })(&buffer)
     let _paired = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
+    let _pairedKernelStackSamples = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
     let _kperfOnly = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
     let _probeOnly = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
     let _probeAugmentedKperf = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
     let _probeWalkedDeeper = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
     let _commonSuffixHist = try ({ buf in try decodeVec(from: &buf, decoder: { buf in try decodeVarint(from: &buf) }) })(&buffer)
+    let _compactSuffixHist = try ({ buf in try decodeVec(from: &buf, decoder: { buf in try decodeVarint(from: &buf) }) })(&buffer)
+    let _compactDwarfSuffixHist = try ({ buf in try decodeVec(from: &buf, decoder: { buf in try decodeVarint(from: &buf) }) })(&buffer)
+    let _dwarfSuffixHist = try ({ buf in try decodeVec(from: &buf, decoder: { buf in try decodeVarint(from: &buf) }) })(&buffer)
     let _depthMatch = try ({ buf in try decodeVec(from: &buf, decoder: { buf in try decodeProbeDiffDepthCell(from: &buf) }) })(&buffer)
     let _driftBuckets = try ({ buf in try decodeVec(from: &buf, decoder: { buf in try decodeProbeDiffBucket(from: &buf) }) })(&buffer)
     let _timing = try ({ buf in try decodeProbeTimingSummary(from: &buf) })(&buffer)
     let _pcMatch = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
     let _stitchable = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
+    let _compactStitchable = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
+    let _compactDwarfStitchable = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
+    let _dwarfStitchable = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
     let _framehopUsed = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
+    let _compactUsed = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
+    let _compactDwarfUsed = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
     let _fpWalkUsed = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
     let _threads = try ({ buf in try decodeVec(from: &buf, decoder: { buf in try decodeProbeDiffThread(from: &buf) }) })(&buffer)
+    let _richer = try ({ buf in try decodeVec(from: &buf, decoder: { buf in try decodeProbeDiffEntry(from: &buf) }) })(&buffer)
     let _recent = try ({ buf in try decodeVec(from: &buf, decoder: { buf in try decodeProbeDiffEntry(from: &buf) }) })(&buffer)
-    return ProbeDiffUpdate(totalKperfSamples: _totalKperfSamples, totalProbes: _totalProbes, paired: _paired, kperfOnly: _kperfOnly, probeOnly: _probeOnly, probeAugmentedKperf: _probeAugmentedKperf, probeWalkedDeeper: _probeWalkedDeeper, commonSuffixHist: _commonSuffixHist, depthMatch: _depthMatch, driftBuckets: _driftBuckets, timing: _timing, pcMatch: _pcMatch, stitchable: _stitchable, framehopUsed: _framehopUsed, fpWalkUsed: _fpWalkUsed, threads: _threads, recent: _recent)
+    return ProbeDiffUpdate(totalKperfSamples: _totalKperfSamples, totalProbes: _totalProbes, kperfKernelStackSamples: _kperfKernelStackSamples, kperfKernelFrames: _kperfKernelFrames, maxKperfKernelFrames: _maxKperfKernelFrames, paired: _paired, pairedKernelStackSamples: _pairedKernelStackSamples, kperfOnly: _kperfOnly, probeOnly: _probeOnly, probeAugmentedKperf: _probeAugmentedKperf, probeWalkedDeeper: _probeWalkedDeeper, commonSuffixHist: _commonSuffixHist, compactSuffixHist: _compactSuffixHist, compactDwarfSuffixHist: _compactDwarfSuffixHist, dwarfSuffixHist: _dwarfSuffixHist, depthMatch: _depthMatch, driftBuckets: _driftBuckets, timing: _timing, pcMatch: _pcMatch, stitchable: _stitchable, compactStitchable: _compactStitchable, compactDwarfStitchable: _compactDwarfStitchable, dwarfStitchable: _dwarfStitchable, framehopUsed: _framehopUsed, compactUsed: _compactUsed, compactDwarfUsed: _compactDwarfUsed, fpWalkUsed: _fpWalkUsed, threads: _threads, richer: _richer, recent: _recent)
 }
 
 nonisolated internal func decodeRunId(from buffer: inout ByteBuffer) throws -> RunId {
@@ -2627,9 +2737,11 @@ nonisolated internal func decodeWireProbeResult(from buffer: inout ByteBuffer) t
     let _machFp = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
     let _machSp = try ({ buf in try decodeVarint(from: &buf) })(&buffer)
     let _machWalked = try ({ buf in try decodeVec(from: &buf, decoder: { buf in try decodeVarint(from: &buf) }) })(&buffer)
+    let _compactWalked = try ({ buf in try decodeVec(from: &buf, decoder: { buf in try decodeVarint(from: &buf) }) })(&buffer)
+    let _compactDwarfWalked = try ({ buf in try decodeVec(from: &buf, decoder: { buf in try decodeVarint(from: &buf) }) })(&buffer)
     let _dwarfWalked = try ({ buf in try decodeVec(from: &buf, decoder: { buf in try decodeVarint(from: &buf) }) })(&buffer)
     let _usedFramehop = try ({ buf in try decodeBool(from: &buf) })(&buffer)
-    return WireProbeResult(tid: _tid, timing: _timing, queue: _queue, machPc: _machPc, machLr: _machLr, machFp: _machFp, machSp: _machSp, machWalked: _machWalked, dwarfWalked: _dwarfWalked, usedFramehop: _usedFramehop)
+    return WireProbeResult(tid: _tid, timing: _timing, queue: _queue, machPc: _machPc, machLr: _machLr, machFp: _machFp, machSp: _machSp, machWalked: _machWalked, compactWalked: _compactWalked, compactDwarfWalked: _compactDwarfWalked, dwarfWalked: _dwarfWalked, usedFramehop: _usedFramehop)
 }
 
 nonisolated internal func decodeIngestEvent(from buffer: inout ByteBuffer) throws -> IngestEvent {

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::env;
 use std::error::Error;
 use std::io::{Read, Write};
@@ -728,6 +728,18 @@ fn print_probe_diff(update: &ProbeDiffUpdate, recent_limit: u32, verbose: bool) 
         "kperf-only (unpaired) : {}\nprobe-only (unpaired) : {}",
         update.kperf_only, update.probe_only,
     );
+    let total_kperf = update.total_kperf_samples.max(1) as f64;
+    let paired_for_kernel = update.paired.max(1) as f64;
+    println!(
+        "kperf kernel stacks   : {:>6} / {:<6} ({:>5.1}%)  paired {:>6} ({:>5.1}%)  frames={} max_depth={}",
+        update.kperf_kernel_stack_samples,
+        update.total_kperf_samples,
+        update.kperf_kernel_stack_samples as f64 * 100.0 / total_kperf,
+        update.paired_kernel_stack_samples,
+        update.paired_kernel_stack_samples as f64 * 100.0 / paired_for_kernel,
+        update.kperf_kernel_frames,
+        update.max_kperf_kernel_frames,
+    );
     if update.paired == 0 {
         println!("(no paired samples yet — no correlated shade probe results have landed)");
         return;
@@ -923,9 +935,10 @@ fn print_probe_diff(update: &ProbeDiffUpdate, recent_limit: u32, verbose: bool) 
         println!("\nthreads by kperf sample count:");
         if verbose {
             println!(
-                "  {:>10}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>11}  {:>9}  {:>9}  {:>9}  {:>9}  name",
+                "  {:>10}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>11}  {:>9}  {:>9}  {:>9}  {:>9}  name",
                 "tid",
                 "kperf",
+                "kstack",
                 "probe",
                 "paired",
                 "k-only",
@@ -938,9 +951,10 @@ fn print_probe_diff(update: &ProbeDiffUpdate, recent_limit: u32, verbose: bool) 
             );
         } else {
             println!(
-                "  {:>10}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>11}  {:>9}  {:>9}  name",
+                "  {:>10}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>11}  {:>9}  {:>9}  name",
                 "tid",
                 "kperf",
+                "kstack",
                 "probe",
                 "paired",
                 "k-only",
@@ -955,9 +969,10 @@ fn print_probe_diff(update: &ProbeDiffUpdate, recent_limit: u32, verbose: bool) 
             let denom = t.paired.max(1) as f64;
             if verbose {
                 println!(
-                    "  {:>10}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>5} {:>3.0}%  {:>9.2}  {:>9.2}  {:>9.2}  {:>9.2}  {name}",
+                    "  {:>10}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>5} {:>3.0}%  {:>9.2}  {:>9.2}  {:>9.2}  {:>9.2}  {name}",
                     t.tid,
                     t.kperf_samples,
+                    t.kperf_kernel_stack_samples,
                     t.probe_results,
                     t.paired,
                     t.kperf_only,
@@ -971,9 +986,10 @@ fn print_probe_diff(update: &ProbeDiffUpdate, recent_limit: u32, verbose: bool) 
                 );
             } else {
                 println!(
-                    "  {:>10}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>5} {:>3.0}%  {:>9.2}  {:>9}  {name}",
+                    "  {:>10}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>5} {:>3.0}%  {:>9.2}  {:>9}  {name}",
                     t.tid,
                     t.kperf_samples,
+                    t.kperf_kernel_stack_samples,
                     t.probe_results,
                     t.paired,
                     t.kperf_only,
@@ -1003,9 +1019,8 @@ fn print_probe_diff(update: &ProbeDiffUpdate, recent_limit: u32, verbose: bool) 
             .collect()
     } else {
         update
-            .recent
+            .richer
             .iter()
-            .filter(|entry| stitched_has_new_frames(entry))
             .rev()
             .take(take)
             .collect::<Vec<_>>()
@@ -1020,12 +1035,12 @@ fn print_probe_diff(update: &ProbeDiffUpdate, recent_limit: u32, verbose: bool) 
         );
     } else {
         println!(
-            "\nricher stitched entries from recent window: {} shown (use -n to scan more, --verbose for comparator stacks)",
+            "\nricher stitched entries from full scan: {} shown (use -n to show more, --verbose for comparator stacks)",
             entries.len()
         );
     }
     if entries.is_empty() && !verbose {
-        println!("  (no richer stitched entries in the retained recent window)");
+        println!("  (no richer stitched entries found in the full scan)");
         return;
     }
     for entry in entries {
@@ -1034,8 +1049,14 @@ fn print_probe_diff(update: &ProbeDiffUpdate, recent_limit: u32, verbose: bool) 
 }
 
 fn print_probe_diff_entry(entry: &ProbeDiffEntry, verbose: bool) {
+    let user_depth_delta = signed_len_delta(entry.dwarf_stack.len(), entry.kperf_stack.len());
+    let total_depth_delta = signed_len_delta(
+        entry.stitched_stack.len(),
+        entry.kperf_kernel_stack.len() + entry.kperf_stack.len(),
+    );
+    let dwarf_only_pcs = distinct_dwarf_only_pc_count(&entry.kperf_stack, &entry.dwarf_stack);
     println!(
-        "\n  tid={} t={}ms drift={:+}ns fp_run={} compact_run={} compact+fde_run={} dwarf_run={} pc_match={} stitchable={} dwarf={} kperf_frames={} stitched_frames={} new_frames={}",
+        "\n  tid={} t={}ms drift={:+}ns fp_run={} compact_run={} compact+fde_run={} dwarf_run={} pc_match={} stitchable={} dwarf={} kperf_user_frames={} kernel_frames={} dwarf_user_frames={} stitched_frames={} user_depth_delta={:+} total_depth_delta={:+} dwarf_only_pcs={}",
         entry.tid,
         entry.timestamp_ns / 1_000_000,
         entry.drift_ns,
@@ -1047,8 +1068,12 @@ fn print_probe_diff_entry(entry: &ProbeDiffEntry, verbose: bool) {
         entry.stitchable,
         entry.used_framehop,
         entry.kperf_stack.len(),
+        entry.kperf_kernel_stack.len(),
+        entry.dwarf_stack.len(),
         entry.stitched_stack.len(),
-        new_frame_count(&entry.kperf_stack, &entry.stitched_stack),
+        user_depth_delta,
+        total_depth_delta,
+        dwarf_only_pcs,
     );
     if verbose {
         println!(
@@ -1099,14 +1124,14 @@ fn print_probe_diff_entry(entry: &ProbeDiffEntry, verbose: bool) {
         }
     }
     if !entry.kperf_kernel_stack.is_empty() {
-        print_stack_highlight_all("kperf_kernel_stack (new)", &entry.kperf_kernel_stack);
+        print_stack_with_tag(
+            "kperf_kernel_stack (new)",
+            &entry.kperf_kernel_stack,
+            FrameTag::Kernel,
+        );
     }
     if !entry.stitched_stack.is_empty() {
-        print_stack_highlight_new(
-            "stitched_stack (would-ship, new frames highlighted)",
-            &entry.stitched_stack,
-            &entry.kperf_stack,
-        );
+        print_stitched_stack(entry);
     }
 }
 
@@ -1123,73 +1148,121 @@ fn print_run_hist(hist: &[u64], paired_total: f64) {
 
 fn print_stack(label: &str, frames: &[stax_live_proto::ResolvedFrame]) {
     println!("    {label}:");
-    for f in frames {
-        println!("      {:#018x}  {}", f.address, f.display);
-    }
+    print_frame_groups(frames, |_| FrameTag::Plain);
 }
 
-fn print_stack_highlight_all(label: &str, frames: &[stax_live_proto::ResolvedFrame]) {
+fn print_stack_with_tag(label: &str, frames: &[stax_live_proto::ResolvedFrame], tag: FrameTag) {
     println!("    {label}:");
-    let color = colors_enabled();
-    for f in frames {
-        print_frame(f, color);
+    print_frame_groups(frames, |_| tag);
+}
+
+fn print_stitched_stack(entry: &ProbeDiffEntry) {
+    println!("    stitched_stack (would-ship, tagged by source):");
+    let kperf_user_addrs = frame_address_set(&entry.kperf_stack);
+    print_frame_groups(&entry.stitched_stack, |frame| {
+        if is_kernel_frame(frame) {
+            FrameTag::Kernel
+        } else if frame.address != 0 && kperf_user_addrs.contains(&frame.address) {
+            FrameTag::User
+        } else {
+            FrameTag::Dwarf
+        }
+    });
+}
+
+#[derive(Clone, Copy)]
+enum FrameTag {
+    Plain,
+    Kernel,
+    User,
+    Dwarf,
+}
+
+impl FrameTag {
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::Plain => "",
+            Self::Kernel => "[K] ",
+            Self::User => "[U] ",
+            Self::Dwarf => "[D] ",
+        }
+    }
+
+    fn color(self) -> Option<&'static str> {
+        match self {
+            Self::Plain => None,
+            Self::Kernel => Some("\x1b[38;5;130m"),
+            Self::User => Some("\x1b[33m"),
+            Self::Dwarf => Some("\x1b[32m"),
+        }
     }
 }
 
-fn print_stack_highlight_new(
-    label: &str,
-    frames: &[stax_live_proto::ResolvedFrame],
-    baseline: &[stax_live_proto::ResolvedFrame],
-) {
-    println!("    {label}:");
-    let color = colors_enabled();
-    let mut baseline_counts = frame_counts(baseline);
-    for f in frames {
-        let is_new = consume_baseline_or_is_new(&mut baseline_counts, f.address);
-        print_frame(f, color && is_new);
+fn print_frame_groups<F>(frames: &[stax_live_proto::ResolvedFrame], mut tag: F)
+where
+    F: FnMut(&stax_live_proto::ResolvedFrame) -> FrameTag,
+{
+    let mut idx = 0usize;
+    while idx < frames.len() {
+        let frame = &frames[idx];
+        let mut repeat = 1usize;
+        while idx + repeat < frames.len() && frames[idx + repeat].address == frame.address {
+            repeat += 1;
+        }
+        print_frame(frame, tag(frame), repeat);
+        idx += repeat;
     }
 }
 
-fn print_frame(f: &stax_live_proto::ResolvedFrame, highlight: bool) {
-    if highlight {
-        println!("      \x1b[1;32m{:#018x}  {}\x1b[0m", f.address, f.display);
+fn print_frame(f: &stax_live_proto::ResolvedFrame, tag: FrameTag, repeat: usize) {
+    let repeat_suffix = if repeat > 1 {
+        format!("  ×{repeat}")
     } else {
-        println!("      {:#018x}  {}", f.address, f.display);
+        String::new()
+    };
+    let prefix = tag.prefix();
+    if colors_enabled()
+        && let Some(color) = tag.color()
+    {
+        println!(
+            "      {color}{prefix}{:#018x}  {}{}\x1b[0m",
+            f.address, f.display, repeat_suffix
+        );
+    } else {
+        println!(
+            "      {prefix}{:#018x}  {}{}",
+            f.address, f.display, repeat_suffix
+        );
     }
 }
 
-fn stitched_has_new_frames(entry: &ProbeDiffEntry) -> bool {
-    entry.stitched_stack.len() > entry.kperf_stack.len()
-        && new_frame_count(&entry.kperf_stack, &entry.stitched_stack) > 0
+fn is_kernel_frame(frame: &stax_live_proto::ResolvedFrame) -> bool {
+    frame.binary.starts_with("kernel:") || frame.address >= 0xffff_0000_0000_0000
 }
 
-fn new_frame_count(
+fn signed_len_delta(after: usize, before: usize) -> isize {
+    after as isize - before as isize
+}
+
+fn distinct_dwarf_only_pc_count(
     baseline: &[stax_live_proto::ResolvedFrame],
     enriched: &[stax_live_proto::ResolvedFrame],
 ) -> usize {
-    let mut baseline_counts = frame_counts(baseline);
+    let baseline_addrs = frame_address_set(baseline);
     enriched
         .iter()
-        .filter(|frame| consume_baseline_or_is_new(&mut baseline_counts, frame.address))
-        .count()
+        .filter(|frame| frame.address != 0 && !baseline_addrs.contains(&frame.address))
+        .map(|frame| frame.address)
+        .collect::<HashSet<_>>()
+        .len()
 }
 
-fn frame_counts(frames: &[stax_live_proto::ResolvedFrame]) -> HashMap<u64, usize> {
-    let mut counts = HashMap::new();
-    for frame in frames {
-        *counts.entry(frame.address).or_insert(0) += 1;
-    }
-    counts
-}
-
-fn consume_baseline_or_is_new(counts: &mut HashMap<u64, usize>, address: u64) -> bool {
-    match counts.get_mut(&address) {
-        Some(count) if *count > 0 => {
-            *count -= 1;
-            false
-        }
-        _ => true,
-    }
+fn frame_address_set(frames: &[stax_live_proto::ResolvedFrame]) -> HashSet<u64> {
+    frames
+        .iter()
+        .map(|frame| frame.address)
+        .filter(|&address| address != 0)
+        .collect()
 }
 
 fn colors_enabled() -> bool {

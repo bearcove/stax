@@ -24,6 +24,8 @@ mod binaries;
 mod classify;
 mod disassemble;
 mod highlight;
+#[cfg(target_os = "macos")]
+mod kernel_symbols;
 pub mod source;
 
 pub use aggregator::{Aggregator, ProbeQueueStats, ProbeResultRecord, ProbeTiming};
@@ -750,6 +752,7 @@ const PROBE_DRIFT_BUCKETS_NS: &[u64] =
 
 const PROBE_PAIR_WINDOW_NS: u64 = 600_000;
 const PROBE_RECENT_CAP: usize = 64;
+const PROBE_RICH_EXAMPLES_CAP: usize = 4096;
 const PROBE_DEPTH_CAP: usize = 32;
 const PROBE_THREADS_CAP: usize = 32;
 const INFERIOR_HELPER_THREAD_NAME: &str = "stax-inferior-helper";
@@ -1033,7 +1036,11 @@ fn build_probe_diff_update(
 
     let mut total_kperf: u64 = 0;
     let mut total_probes: u64 = 0;
+    let mut kperf_kernel_stack_samples: u64 = 0;
+    let mut kperf_kernel_frames: u64 = 0;
+    let mut max_kperf_kernel_frames: u32 = 0;
     let mut paired: u64 = 0;
+    let mut paired_kernel_stack_samples: u64 = 0;
     let mut kperf_only: u64 = 0;
     let mut probe_only: u64 = 0;
     let mut probe_augmented: u64 = 0;
@@ -1058,6 +1065,8 @@ fn build_probe_diff_update(
         u32,
         std::collections::VecDeque<RawEntry>,
     > = std::collections::HashMap::new();
+    let mut richer_raw: std::collections::VecDeque<(u32, RawEntry)> =
+        std::collections::VecDeque::with_capacity(PROBE_RICH_EXAMPLES_CAP);
 
     for thread_tid in agg.iter_threads() {
         if let Some(want) = only_tid {
@@ -1076,6 +1085,7 @@ fn build_probe_diff_update(
         total_probes = total_probes.saturating_add(t_probes);
 
         let mut t_paired: u64 = 0;
+        let mut t_kernel_stack_samples: u64 = 0;
         let mut t_kperf_only: u64 = 0;
         let mut t_probe_only: u64 = 0;
         let mut t_pc_match: u64 = 0;
@@ -1095,6 +1105,15 @@ fn build_probe_diff_update(
         // neighborhood.
         let mut pets: Vec<_> = stats.pet_samples.iter().collect();
         pets.sort_by_key(|pet| pet.timestamp_ns);
+        for pet in &pets {
+            let kernel_depth = pet.kernel_stack.len();
+            if kernel_depth > 0 {
+                t_kernel_stack_samples = t_kernel_stack_samples.saturating_add(1);
+                kperf_kernel_stack_samples = kperf_kernel_stack_samples.saturating_add(1);
+                kperf_kernel_frames = kperf_kernel_frames.saturating_add(kernel_depth as u64);
+                max_kperf_kernel_frames = max_kperf_kernel_frames.max(kernel_depth as u32);
+            }
+        }
         let mut probes: Vec<_> = stats.probe_results.iter().collect();
         probes.sort_by_key(|probe| probe.timing.kperf_ts);
         let mut pet_idx = 0usize;
@@ -1144,6 +1163,9 @@ fn build_probe_diff_update(
 
             paired += 1;
             t_paired += 1;
+            if !pet.kernel_stack.is_empty() {
+                paired_kernel_stack_samples = paired_kernel_stack_samples.saturating_add(1);
+            }
             if !probe.dwarf_walked.is_empty() {
                 framehop_n += 1;
             }
@@ -1251,13 +1273,7 @@ fn build_probe_diff_update(
                 t_stitchable += 1;
             }
 
-            let ring = per_thread_recent
-                .entry(thread_tid)
-                .or_insert_with(|| std::collections::VecDeque::with_capacity(PROBE_RECENT_CAP));
-            if ring.len() == PROBE_RECENT_CAP {
-                ring.pop_front();
-            }
-            ring.push_back(RawEntry {
+            let raw = RawEntry {
                 timestamp_ns: pet.timestamp_ns.saturating_sub(session_start),
                 drift_ns: drift_ns_signed.clamp(i64::MIN as i128, i64::MAX as i128) as i64,
                 timing: timing_breakdown,
@@ -1275,7 +1291,21 @@ fn build_probe_diff_update(
                 compact_stack: compact_stack.into_boxed_slice(),
                 compact_dwarf_stack: compact_dwarf_stack.into_boxed_slice(),
                 dwarf_stack: dwarf_stack.into_boxed_slice(),
-            });
+            };
+            if raw_is_richer(&raw) {
+                if richer_raw.len() == PROBE_RICH_EXAMPLES_CAP {
+                    richer_raw.pop_front();
+                }
+                richer_raw.push_back((thread_tid, raw.clone()));
+            }
+
+            let ring = per_thread_recent
+                .entry(thread_tid)
+                .or_insert_with(|| std::collections::VecDeque::with_capacity(PROBE_RECENT_CAP));
+            if ring.len() == PROBE_RECENT_CAP {
+                ring.pop_front();
+            }
+            ring.push_back(raw);
         }
         while pet_idx < pets.len() {
             pet_idx += 1;
@@ -1287,6 +1317,7 @@ fn build_probe_diff_update(
             threads_summary.push(ProbeDiffThread {
                 tid: thread_tid,
                 kperf_samples: t_kperf,
+                kperf_kernel_stack_samples: t_kernel_stack_samples,
                 probe_results: t_probes,
                 paired: t_paired,
                 kperf_only: t_kperf_only,
@@ -1347,70 +1378,15 @@ fn build_probe_diff_update(
         .and_then(|t| per_thread_recent.remove(&t))
         .map(|ring| {
             ring.into_iter()
-                .map(|raw| {
-                    let probe_stack: Vec<ResolvedFrame> = raw
-                        .probe_stack
-                        .iter()
-                        .map(|&addr| resolve_frame(bins, addr))
-                        .collect();
-                    let compact_stack: Vec<ResolvedFrame> = raw
-                        .compact_stack
-                        .iter()
-                        .map(|&addr| resolve_frame(bins, addr))
-                        .collect();
-                    let compact_dwarf_stack: Vec<ResolvedFrame> = raw
-                        .compact_dwarf_stack
-                        .iter()
-                        .map(|&addr| resolve_frame(bins, addr))
-                        .collect();
-                    let dwarf_stack: Vec<ResolvedFrame> = raw
-                        .dwarf_stack
-                        .iter()
-                        .map(|&addr| resolve_frame(bins, addr))
-                        .collect();
-                    let kperf_kernel_stack: Vec<ResolvedFrame> = raw
-                        .kperf_kernel_stack
-                        .iter()
-                        .map(|&addr| resolve_frame(bins, addr))
-                        .collect();
-                    let stitched_stack: Vec<ResolvedFrame> = if raw.stitchable {
-                        kperf_kernel_stack
-                            .iter()
-                            .cloned()
-                            .chain(dwarf_stack.iter().cloned())
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
-                    ProbeDiffEntry {
-                        tid: focus_tid_for_recent.unwrap_or(0),
-                        timestamp_ns: raw.timestamp_ns,
-                        drift_ns: raw.drift_ns,
-                        timing: raw.timing,
-                        queue: raw.queue.into(),
-                        kperf_stack: raw
-                            .kperf_stack
-                            .iter()
-                            .map(|&addr| resolve_frame(bins, addr))
-                            .collect(),
-                        kperf_kernel_stack,
-                        probe_stack,
-                        compact_stack,
-                        compact_dwarf_stack,
-                        dwarf_stack,
-                        stitched_stack,
-                        common_suffix: raw.common_suffix,
-                        compact_common_suffix: raw.compact_common_suffix,
-                        compact_dwarf_common_suffix: raw.compact_dwarf_common_suffix,
-                        dwarf_common_suffix: raw.dwarf_common_suffix,
-                        pc_match: raw.pc_match,
-                        stitchable: raw.stitchable,
-                        used_framehop: raw.used_framehop,
-                    }
-                })
+                .map(|raw| resolve_probe_diff_entry(bins, focus_tid_for_recent.unwrap_or(0), raw))
                 .collect()
         })
         .unwrap_or_default();
+
+    let richer: Vec<ProbeDiffEntry> = richer_raw
+        .into_iter()
+        .map(|(tid, raw)| resolve_probe_diff_entry(bins, tid, raw))
+        .collect();
 
     let mut drift_buckets: Vec<ProbeDiffBucket> =
         Vec::with_capacity(PROBE_DRIFT_BUCKETS_NS.len() + 1);
@@ -1442,7 +1418,11 @@ fn build_probe_diff_update(
     ProbeDiffUpdate {
         total_kperf_samples: total_kperf,
         total_probes,
+        kperf_kernel_stack_samples,
+        kperf_kernel_frames,
+        max_kperf_kernel_frames,
         paired,
+        paired_kernel_stack_samples,
         kperf_only,
         probe_only,
         probe_augmented_kperf: probe_augmented,
@@ -1464,6 +1444,7 @@ fn build_probe_diff_update(
         compact_dwarf_used: compact_dwarf_n,
         fp_walk_used: fp_walk_n,
         threads: threads_summary,
+        richer,
         recent,
     }
 }
@@ -1471,6 +1452,7 @@ fn build_probe_diff_update(
 /// Minimal per-pair record kept during the main scan. Avoids
 /// ResolvedFrame allocation until we know which thread we're going
 /// to keep entries from.
+#[derive(Clone)]
 struct RawEntry {
     timestamp_ns: u64,
     drift_ns: i64,
@@ -1489,6 +1471,78 @@ struct RawEntry {
     compact_stack: Box<[u64]>,
     compact_dwarf_stack: Box<[u64]>,
     dwarf_stack: Box<[u64]>,
+}
+
+fn resolve_probe_diff_entry(bins: &BinaryRegistry, tid: u32, raw: RawEntry) -> ProbeDiffEntry {
+    let probe_stack: Vec<ResolvedFrame> = raw
+        .probe_stack
+        .iter()
+        .map(|&addr| resolve_frame(bins, addr))
+        .collect();
+    let compact_stack: Vec<ResolvedFrame> = raw
+        .compact_stack
+        .iter()
+        .map(|&addr| resolve_frame(bins, addr))
+        .collect();
+    let compact_dwarf_stack: Vec<ResolvedFrame> = raw
+        .compact_dwarf_stack
+        .iter()
+        .map(|&addr| resolve_frame(bins, addr))
+        .collect();
+    let dwarf_stack: Vec<ResolvedFrame> = raw
+        .dwarf_stack
+        .iter()
+        .map(|&addr| resolve_frame(bins, addr))
+        .collect();
+    let kperf_kernel_stack: Vec<ResolvedFrame> = raw
+        .kperf_kernel_stack
+        .iter()
+        .map(|&addr| resolve_frame(bins, addr))
+        .collect();
+    let stitched_stack: Vec<ResolvedFrame> = if raw.stitchable {
+        kperf_kernel_stack
+            .iter()
+            .cloned()
+            .chain(dwarf_stack.iter().cloned())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    ProbeDiffEntry {
+        tid,
+        timestamp_ns: raw.timestamp_ns,
+        drift_ns: raw.drift_ns,
+        timing: raw.timing,
+        queue: raw.queue.into(),
+        kperf_stack: raw
+            .kperf_stack
+            .iter()
+            .map(|&addr| resolve_frame(bins, addr))
+            .collect(),
+        kperf_kernel_stack,
+        probe_stack,
+        compact_stack,
+        compact_dwarf_stack,
+        dwarf_stack,
+        stitched_stack,
+        common_suffix: raw.common_suffix,
+        compact_common_suffix: raw.compact_common_suffix,
+        compact_dwarf_common_suffix: raw.compact_dwarf_common_suffix,
+        dwarf_common_suffix: raw.dwarf_common_suffix,
+        pc_match: raw.pc_match,
+        stitchable: raw.stitchable,
+        used_framehop: raw.used_framehop,
+    }
+}
+
+fn raw_is_richer(raw: &RawEntry) -> bool {
+    raw.stitchable
+        && (!raw.kperf_kernel_stack.is_empty()
+            || (raw.dwarf_stack.len() > raw.kperf_stack.len()
+                && raw
+                    .dwarf_stack
+                    .iter()
+                    .any(|pc| !raw.kperf_stack.contains(pc))))
 }
 
 fn longest_common_run(a: &[u64], b: &[u64]) -> usize {
@@ -1687,11 +1741,17 @@ mod tests {
         let update = build_probe_diff_update(&agg, &bins, Some(tid));
 
         assert_eq!(update.paired, 1);
+        assert_eq!(update.kperf_kernel_stack_samples, 1);
+        assert_eq!(update.kperf_kernel_frames, 2);
+        assert_eq!(update.max_kperf_kernel_frames, 2);
+        assert_eq!(update.paired_kernel_stack_samples, 1);
         assert_eq!(update.pc_match, 1);
         assert_eq!(update.stitchable, 1);
         assert_eq!(update.framehop_used, 1);
         assert_eq!(update.fp_walk_used, 1);
         assert_eq!(update.recent.len(), 1);
+        assert_eq!(update.richer.len(), 1);
+        assert_eq!(update.threads[0].kperf_kernel_stack_samples, 1);
 
         let entry = &update.recent[0];
         let probe_addrs: Vec<_> = entry
@@ -1757,6 +1817,133 @@ mod tests {
         assert_eq!(update.dwarf_suffix_hist[0], 1);
         assert_eq!(update.stitchable, 0);
         assert!(update.recent[0].stitched_stack.is_empty());
+        assert!(update.richer.is_empty());
+    }
+
+    #[test]
+    fn probe_diff_does_not_count_duplicate_recursive_frames_as_richer() {
+        let mut agg = Aggregator::default();
+        let tid = 7;
+
+        agg.record_pet_sample(
+            tid,
+            ticks_for_ns(1_000_000),
+            &[0x10, 0x20, 0x20, 0x30],
+            &[],
+            PmuSample::default(),
+        );
+
+        agg.record_probe_result(ProbeResultRecord {
+            tid,
+            timing: ProbeTiming {
+                kperf_ts: ticks_for_ns(1_000_000),
+                state_done: ticks_for_ns(1_000_000),
+                ..ProbeTiming::default()
+            },
+            queue: ProbeQueueStats::default(),
+            mach_pc: 0x10,
+            mach_lr: 0,
+            mach_fp: 0,
+            mach_sp: 0,
+            mach_walked: Box::new([0x20, 0x20, 0x30]),
+            compact_walked: Box::new([]),
+            compact_dwarf_walked: Box::new([]),
+            dwarf_walked: Box::new([0x20, 0x20, 0x20, 0x30]),
+            used_framehop: true,
+        });
+
+        let bins = BinaryRegistry::new();
+        let update = build_probe_diff_update(&agg, &bins, Some(tid));
+
+        assert_eq!(update.paired, 1);
+        assert_eq!(update.stitchable, 1);
+        assert!(update.richer.is_empty());
+    }
+
+    #[test]
+    fn probe_diff_keeps_distinct_user_frame_richer_examples() {
+        let mut agg = Aggregator::default();
+        let tid = 7;
+
+        agg.record_pet_sample(
+            tid,
+            ticks_for_ns(1_000_000),
+            &[0x10, 0x20, 0x30, 0x40],
+            &[],
+            PmuSample::default(),
+        );
+
+        agg.record_probe_result(ProbeResultRecord {
+            tid,
+            timing: ProbeTiming {
+                kperf_ts: ticks_for_ns(1_000_000),
+                state_done: ticks_for_ns(1_000_000),
+                ..ProbeTiming::default()
+            },
+            queue: ProbeQueueStats::default(),
+            mach_pc: 0x10,
+            mach_lr: 0,
+            mach_fp: 0,
+            mach_sp: 0,
+            mach_walked: Box::new([0x20, 0x30, 0x40]),
+            compact_walked: Box::new([]),
+            compact_dwarf_walked: Box::new([]),
+            dwarf_walked: Box::new([0x20, 0x30, 0x40, 0x80]),
+            used_framehop: true,
+        });
+
+        let bins = BinaryRegistry::new();
+        let update = build_probe_diff_update(&agg, &bins, Some(tid));
+
+        assert_eq!(update.paired, 1);
+        assert_eq!(update.stitchable, 1);
+        assert_eq!(update.richer.len(), 1);
+        let stitched_addrs: Vec<_> = update.richer[0]
+            .stitched_stack
+            .iter()
+            .map(|frame| frame.address)
+            .collect();
+        assert_eq!(stitched_addrs, [0x10, 0x20, 0x30, 0x40, 0x80]);
+    }
+
+    #[test]
+    fn probe_diff_does_not_keep_different_but_not_deeper_user_stack_as_richer() {
+        let mut agg = Aggregator::default();
+        let tid = 7;
+
+        agg.record_pet_sample(
+            tid,
+            ticks_for_ns(1_000_000),
+            &[0x10, 0x20, 0x30, 0x40, 0x50],
+            &[],
+            PmuSample::default(),
+        );
+
+        agg.record_probe_result(ProbeResultRecord {
+            tid,
+            timing: ProbeTiming {
+                kperf_ts: ticks_for_ns(1_000_000),
+                state_done: ticks_for_ns(1_000_000),
+                ..ProbeTiming::default()
+            },
+            queue: ProbeQueueStats::default(),
+            mach_pc: 0x10,
+            mach_lr: 0,
+            mach_fp: 0,
+            mach_sp: 0,
+            mach_walked: Box::new([0x20, 0x30, 0x40]),
+            compact_walked: Box::new([]),
+            compact_dwarf_walked: Box::new([]),
+            dwarf_walked: Box::new([0x20, 0x30, 0x40, 0x90]),
+            used_framehop: true,
+        });
+
+        let bins = BinaryRegistry::new();
+        let update = build_probe_diff_update(&agg, &bins, Some(tid));
+
+        assert_eq!(update.paired, 1);
+        assert_eq!(update.stitchable, 1);
+        assert!(update.richer.is_empty());
     }
 }
 
