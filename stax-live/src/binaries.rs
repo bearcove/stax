@@ -1,12 +1,8 @@
 //! Live binary registry: tracks which images the target has loaded and
 //! lazily fetches their on-disk bytes when the user asks for an
 //! annotation. Symbol tables come from the sampler (Mach-O `nlist_64`s
-//! pulled by `stax-mac-capture`); the bytes come from disk or the
-//! macOS dyld shared cache.
-//!
-//! All state here is plain owned `Vec`/`String`; no nwind / no archive
-//! plumbing. Fed by `LiveSinkImpl::on_binary_loaded`, which serialises
-//! events from the (sync) sampler thread onto the tokio side.
+//! pulled by `stax-mac-capture`); normal binary image parsing is delegated
+//! to nwind so annotation and unwinding share the same segment metadata.
 
 use std::sync::Arc;
 
@@ -36,32 +32,25 @@ pub struct LoadedBinary {
     pub text_bytes: Option<Vec<u8>>,
 }
 
-/// Cached on-disk image: bytes + segment table, mirroring
-/// `cmd_annotate::CodeImage`. Built lazily, possibly from the dyld cache.
+/// Cached on-disk image backed by nwind's binary parser. `bytes` is kept
+/// for addr2line/source lookup, while `binary` is the authoritative source
+/// for load-header-to-file-offset translation.
 pub struct CodeImage {
     pub bytes: Arc<Vec<u8>>,
-    pub segments: Vec<CodeSegment>,
-}
-
-#[derive(Clone, Copy)]
-pub struct CodeSegment {
-    pub address: u64,
-    pub size: u64,
-    pub file_offset: u64,
-    pub file_size: u64,
+    pub binary: Arc<nwind::BinaryData>,
 }
 
 impl CodeImage {
     pub fn fetch(&self, start_svma: u64, len: usize) -> Option<&[u8]> {
         let end = start_svma.checked_add(len as u64)?;
-        for seg in &self.segments {
-            let seg_end = seg.address.checked_add(seg.size)?;
-            if seg.address <= start_svma && end <= seg_end {
-                let in_segment = start_svma - seg.address;
-                if in_segment.checked_add(len as u64)? > seg.file_size {
+        for header in self.binary.load_headers() {
+            let header_end = header.address.checked_add(header.memory_size)?;
+            if header.address <= start_svma && end <= header_end {
+                let in_segment = start_svma - header.address;
+                if in_segment.checked_add(len as u64)? > header.file_size {
                     return None;
                 }
-                let file_off = (seg.file_offset + in_segment) as usize;
+                let file_off = (header.file_offset + in_segment) as usize;
                 if file_off.checked_add(len)? > self.bytes.len() {
                     return None;
                 }
@@ -119,11 +108,9 @@ pub struct BinaryRegistry {
     /// interior mutability of just this cache.
     by_base_index: parking_lot::Mutex<Option<Vec<(u64, u64, usize)>>>,
     /// CodeImage cache keyed by binary path. `Option` so a failed load
-    /// is remembered (don't keep re-trying the dyld cache for an image
-    /// we already proved isn't there).
+    /// is remembered (don't keep re-opening a binary we already proved
+    /// isn't loadable).
     images: std::collections::HashMap<String, Option<Arc<CodeImage>>>,
-    /// Lazily-opened macOS dyld shared cache (one per arch).
-    dyld_bundle: Option<Option<Arc<DyldCacheBundle>>>,
     dyld_arch: Option<String>,
     /// PID + Mach task port handed to us by `on_target_attached`.
     /// Used to read instruction bytes directly from the target when an
@@ -146,18 +133,12 @@ pub struct BinaryRegistry {
     shared_cache: Option<Arc<stax_mac_shared_cache::SharedCache>>,
 }
 
-struct DyldCacheBundle {
-    main: memmap2::Mmap,
-    subcaches: Vec<memmap2::Mmap>,
-}
-
 impl BinaryRegistry {
     pub fn new() -> Self {
         Self {
             by_base: Vec::new(),
             by_base_index: parking_lot::Mutex::new(None),
             images: std::collections::HashMap::new(),
-            dyld_bundle: None,
             dyld_arch: None,
             target_pid: None,
             target_task_port: None,
@@ -392,7 +373,7 @@ impl BinaryRegistry {
             )
         };
 
-        let image = self.image_for(&path, arch.as_deref());
+        let image = self.image_for(&path);
 
         // Re-borrow the binary now that the registry mutation is done.
         let binary = &self.by_base[binary_idx];
@@ -426,7 +407,7 @@ impl BinaryRegistry {
 
         // Disassembly bytes have four fallbacks, in order of
         // preference:
-        //   1. on-disk `CodeImage` -- gives us DWARF + source;
+        //   1. nwind-backed on-disk `CodeImage` -- gives us DWARF + source;
         //   2. `mach_vm_read` against the target -- only when we
         //      have a task port (samply backend / `--pid` path);
         //   3. inline `text_bytes` from the load event -- JIT'd
@@ -551,39 +532,13 @@ impl BinaryRegistry {
         None
     }
 
-    fn image_for(&mut self, path: &str, arch: Option<&str>) -> Option<Arc<CodeImage>> {
+    fn image_for(&mut self, path: &str) -> Option<Arc<CodeImage>> {
         if let Some(entry) = self.images.get(path) {
             return entry.clone();
         }
-        let loaded = load_image(path).or_else(|| {
-            // Try the macOS dyld shared cache for system-only install paths.
-            self.dyld_image(path, arch)
-        });
+        let loaded = load_image(path);
         self.images.insert(path.to_owned(), loaded.clone());
         loaded
-    }
-
-    fn dyld_image(&mut self, path: &str, arch: Option<&str>) -> Option<Arc<CodeImage>> {
-        let arch = arch.or(self.dyld_arch.as_deref())?;
-        if self.dyld_bundle.is_none() {
-            self.dyld_bundle = Some(open_local_dyld_cache(arch).map(Arc::new));
-        }
-        let bundle = self.dyld_bundle.as_ref()?.clone()?;
-        let main: &[u8] = &bundle.main;
-        let sub: Vec<&[u8]> = bundle.subcaches.iter().map(|m| &m[..]).collect();
-        let cache = object::read::macho::DyldCache::<object::Endianness>::parse(main, &sub).ok()?;
-        for image in cache.images() {
-            let img_path = match image.path() {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-            if img_path != path {
-                continue;
-            }
-            let parsed = image.parse_object().ok()?;
-            return Some(Arc::new(macho_to_code_image(&parsed)));
-        }
-        None
     }
 }
 
@@ -605,107 +560,7 @@ fn load_image(path: &str) -> Option<Arc<CodeImage>> {
     if path.starts_with('[') || path.is_empty() {
         return None;
     }
-    let bytes = std::fs::read(path).ok()?;
-    let bytes = Arc::new(bytes);
-    let segments = parse_segments(&bytes)?;
-    Some(Arc::new(CodeImage { bytes, segments }))
-}
-
-fn parse_segments(bytes: &[u8]) -> Option<Vec<CodeSegment>> {
-    use object::{Object, ObjectSegment};
-    let file = object::File::parse(bytes).ok()?;
-    let mut segments = Vec::new();
-    for seg in file.segments() {
-        let (file_offset, file_size) = seg.file_range();
-        segments.push(CodeSegment {
-            address: seg.address(),
-            size: seg.size(),
-            file_offset,
-            file_size,
-        });
-    }
-    Some(segments)
-}
-
-fn macho_to_code_image(file: &object::File) -> CodeImage {
-    use object::{Object, ObjectSegment};
-    let mut combined: Vec<u8> = Vec::new();
-    let mut segments: Vec<CodeSegment> = Vec::new();
-    for seg in file.segments() {
-        let data = match seg.data() {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-        if data.is_empty() {
-            continue;
-        }
-        let file_offset = combined.len() as u64;
-        combined.extend_from_slice(data);
-        segments.push(CodeSegment {
-            address: seg.address(),
-            size: seg.size(),
-            file_offset,
-            file_size: data.len() as u64,
-        });
-    }
-    CodeImage {
-        bytes: Arc::new(combined),
-        segments,
-    }
-}
-
-fn open_local_dyld_cache(arch: &str) -> Option<DyldCacheBundle> {
-    let suffixes: &[&str] = match arch {
-        "aarch64" => &["arm64e", "arm64"],
-        "amd64" => &["x86_64h", "x86_64"],
-        _ => return None,
-    };
-    let prefixes: &[&str] = &[
-        "/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld",
-        "/System/Cryptexes/OS/System/Library/dyld",
-        "/System/Library/dyld",
-    ];
-    for prefix in prefixes {
-        for suffix in suffixes {
-            let main_path =
-                std::path::Path::new(prefix).join(format!("dyld_shared_cache_{}", suffix));
-            if !main_path.exists() {
-                continue;
-            }
-            if let Ok(bundle) = open_dyld_bundle(&main_path) {
-                return Some(bundle);
-            }
-        }
-    }
-    None
-}
-
-fn open_dyld_bundle(main_path: &std::path::Path) -> std::io::Result<DyldCacheBundle> {
-    let main_file = std::fs::File::open(main_path)?;
-    let main = unsafe { memmap2::Mmap::map(&main_file)? };
-
-    let parent = main_path
-        .parent()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "no parent"))?;
-    let stem = main_path
-        .file_name()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "no file name"))?
-        .to_string_lossy()
-        .into_owned();
-
-    let mut subcaches = Vec::new();
-    for i in 1.. {
-        let p = parent.join(format!("{}.{}", stem, i));
-        if !p.exists() {
-            break;
-        }
-        let f = std::fs::File::open(&p)?;
-        subcaches.push(unsafe { memmap2::Mmap::map(&f)? });
-    }
-    let symbols = parent.join(format!("{}.symbols", stem));
-    if symbols.exists() {
-        let f = std::fs::File::open(&symbols)?;
-        subcaches.push(unsafe { memmap2::Mmap::map(&f)? });
-    }
-    Ok(DyldCacheBundle { main, subcaches })
+    let binary = nwind::BinaryData::load_from_fs(path).ok().map(Arc::new)?;
+    let bytes = Arc::new(binary.as_bytes().to_vec());
+    Some(Arc::new(CodeImage { bytes, binary }))
 }

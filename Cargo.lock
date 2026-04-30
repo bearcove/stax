@@ -2162,7 +2162,7 @@ dependencies = [
  "arborium",
  "mach2",
  "memchr",
- "memmap2",
+ "nwind",
  "object 0.39.1",
  "parking_lot",
  "stax-demangle",
