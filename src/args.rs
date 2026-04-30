@@ -63,9 +63,8 @@ pub enum Command {
     Threads(ThreadsArgs),
 
     /// One snapshot of the kperf-vs-probe diff: pairs each PET
-    /// sample with the matching race-against-return probe result,
-    /// prints suffix-match histogram, drift histogram, and the most
-    /// recent N entries with both stacks symbolicated.
+    /// sample with the matching correlated probe result and prints
+    /// focused richer stitched-stack examples.
     ProbeDiff(ProbeDiffArgs),
 }
 
@@ -126,6 +125,11 @@ pub struct ProbeDiffArgs {
     /// 0 prints just the histograms.
     #[facet(args::named, args::short = 'n', default = 8)]
     pub recent: u32,
+
+    /// Include comparator stacks/histograms used while debugging
+    /// unwind policy.
+    #[facet(args::named, default)]
+    pub verbose: bool,
 }
 
 #[derive(Facet, Debug)]

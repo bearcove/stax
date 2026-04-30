@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::env;
 use std::error::Error;
 use std::io::{Read, Write};
@@ -714,11 +715,11 @@ async fn run_probe_diff(args: ProbeDiffArgs) -> Result<(), Box<dyn Error>> {
         .probe_diff(args.tid)
         .await
         .map_err(|e| format!("{e:?}"))?;
-    print_probe_diff(&update, args.recent);
+    print_probe_diff(&update, args.recent, args.verbose);
     Ok(())
 }
 
-fn print_probe_diff(update: &ProbeDiffUpdate, recent_limit: u32) {
+fn print_probe_diff(update: &ProbeDiffUpdate, recent_limit: u32, verbose: bool) {
     println!(
         "kperf samples         : {}\nprobe results         : {}\npaired                : {}",
         update.total_kperf_samples, update.total_probes, update.paired,
@@ -756,21 +757,23 @@ fn print_probe_diff(update: &ProbeDiffUpdate, recent_limit: u32) {
         update.stitchable,
         pct(update.stitchable)
     );
-    println!(
-        "compact run stitchable      : {:>6}  ({:>5.1}%)",
-        update.compact_stitchable,
-        pct(update.compact_stitchable)
-    );
-    println!(
-        "compact+fde run stitchable  : {:>6}  ({:>5.1}%)",
-        update.compact_dwarf_stitchable,
-        pct(update.compact_dwarf_stitchable)
-    );
-    println!(
-        "dwarf run stitchable        : {:>6}  ({:>5.1}%)",
-        update.dwarf_stitchable,
-        pct(update.dwarf_stitchable)
-    );
+    if verbose {
+        println!(
+            "compact run stitchable      : {:>6}  ({:>5.1}%)",
+            update.compact_stitchable,
+            pct(update.compact_stitchable)
+        );
+        println!(
+            "compact+fde run stitchable  : {:>6}  ({:>5.1}%)",
+            update.compact_dwarf_stitchable,
+            pct(update.compact_dwarf_stitchable)
+        );
+        println!(
+            "dwarf run stitchable        : {:>6}  ({:>5.1}%)",
+            update.dwarf_stitchable,
+            pct(update.dwarf_stitchable)
+        );
+    }
     println!(
         "probe augments kperf  : {:>6}  ({:>5.1}%)  (kperf walked 0, probe ≥1)",
         update.probe_augmented_kperf,
@@ -781,56 +784,63 @@ fn print_probe_diff(update: &ProbeDiffUpdate, recent_limit: u32) {
         update.probe_walked_deeper,
         pct(update.probe_walked_deeper),
     );
-    println!(
-        "compact / c+fde / dwarf / fp validator: {} / {} / {} / {}",
-        update.compact_used, update.compact_dwarf_used, update.framehop_used, update.fp_walk_used,
-    );
-
-    println!("\nfp common_run histogram:");
-    print_run_hist(&update.common_suffix_hist, paired_total);
-    println!("\ncompact common_run histogram:");
-    print_run_hist(&update.compact_suffix_hist, paired_total);
-    println!("\ncompact+fde common_run histogram:");
-    print_run_hist(&update.compact_dwarf_suffix_hist, paired_total);
-    println!("\ndwarf common_run histogram:");
-    print_run_hist(&update.dwarf_suffix_hist, paired_total);
-
-    println!("\nmatch rate by frame depth (0 = leaf, fp validator):");
-    for cell in &update.depth_match {
-        let rate = if cell.total == 0 {
-            0.0
-        } else {
-            cell.matched as f64 * 100.0 / cell.total as f64
-        };
-        let bar = bar_str(rate, 24);
+    if verbose {
         println!(
-            "  d={:<2} {:>6}/{:<6}  {:>5.1}%  {bar}",
-            cell.depth, cell.matched, cell.total, rate
+            "compact / c+fde / dwarf / fp validator: {} / {} / {} / {}",
+            update.compact_used,
+            update.compact_dwarf_used,
+            update.framehop_used,
+            update.fp_walk_used,
         );
     }
 
-    println!("\ndrift histogram (kperf_ts → probe_done, with pc_match rate):");
-    let mut prev = 0u64;
-    for b in &update.drift_buckets {
-        let label = if b.upper_ns == u64::MAX {
-            format!(">= {}", fmt_ns(prev))
-        } else {
-            format!("{}–{}", fmt_ns(prev), fmt_ns(b.upper_ns))
-        };
-        let rate = if b.samples == 0 {
-            0.0
-        } else {
-            b.pc_match as f64 * 100.0 / b.samples as f64
-        };
-        println!(
-            "  {label:<22} {:>6} samples   pc_match {:>3.0}%",
-            b.samples, rate
-        );
-        prev = b.upper_ns;
+    if verbose {
+        println!("\nfp common_run histogram:");
+        print_run_hist(&update.common_suffix_hist, paired_total);
+        println!("\ncompact common_run histogram:");
+        print_run_hist(&update.compact_suffix_hist, paired_total);
+        println!("\ncompact+fde common_run histogram:");
+        print_run_hist(&update.compact_dwarf_suffix_hist, paired_total);
+        println!("\ndwarf common_run histogram:");
+        print_run_hist(&update.dwarf_suffix_hist, paired_total);
+
+        println!("\nmatch rate by frame depth (0 = leaf, fp validator):");
+        for cell in &update.depth_match {
+            let rate = if cell.total == 0 {
+                0.0
+            } else {
+                cell.matched as f64 * 100.0 / cell.total as f64
+            };
+            let bar = bar_str(rate, 24);
+            println!(
+                "  d={:<2} {:>6}/{:<6}  {:>5.1}%  {bar}",
+                cell.depth, cell.matched, cell.total, rate
+            );
+        }
+
+        println!("\ndrift histogram (kperf_ts → probe_done, with pc_match rate):");
+        let mut prev = 0u64;
+        for b in &update.drift_buckets {
+            let label = if b.upper_ns == u64::MAX {
+                format!(">= {}", fmt_ns(prev))
+            } else {
+                format!("{}–{}", fmt_ns(prev), fmt_ns(b.upper_ns))
+            };
+            let rate = if b.samples == 0 {
+                0.0
+            } else {
+                b.pc_match as f64 * 100.0 / b.samples as f64
+            };
+            println!(
+                "  {label:<22} {:>6} samples   pc_match {:>3.0}%",
+                b.samples, rate
+            );
+            prev = b.upper_ns;
+        }
     }
 
     let t = &update.timing;
-    if t.samples > 0 {
+    if verbose && t.samples > 0 {
         println!("\nprobe timing breakdown (avg / max, causal path):");
         println!(
             "  kdebug pre-read    {:>9} / {:>9}  (kperf_ts → KDREADTR start)",
@@ -911,72 +921,136 @@ fn print_probe_diff(update: &ProbeDiffUpdate, recent_limit: u32) {
 
     if !update.threads.is_empty() {
         println!("\nthreads by kperf sample count:");
-        println!(
-            "  {:>10}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>11}  {:>9}  {:>9}  {:>9}  {:>9}  name",
-            "tid",
-            "kperf",
-            "probe",
-            "paired",
-            "k-only",
-            "p-only",
-            "pc_match",
-            "fp-suff",
-            "c-run",
-            "c+fde",
-            "dw-run",
-        );
+        if verbose {
+            println!(
+                "  {:>10}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>11}  {:>9}  {:>9}  {:>9}  {:>9}  name",
+                "tid",
+                "kperf",
+                "probe",
+                "paired",
+                "k-only",
+                "p-only",
+                "pc_match",
+                "fp-suff",
+                "c-run",
+                "c+fde",
+                "dw-run",
+            );
+        } else {
+            println!(
+                "  {:>10}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>11}  {:>9}  {:>9}  name",
+                "tid",
+                "kperf",
+                "probe",
+                "paired",
+                "k-only",
+                "p-only",
+                "pc_match",
+                "fp-run",
+                "enriched",
+            );
+        }
         for t in &update.threads {
             let name = t.thread_name.as_deref().unwrap_or("(unnamed)");
             let denom = t.paired.max(1) as f64;
-            println!(
-                "  {:>10}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>5} {:>3.0}%  {:>9.2}  {:>9.2}  {:>9.2}  {:>9.2}  {name}",
-                t.tid,
-                t.kperf_samples,
-                t.probe_results,
-                t.paired,
-                t.kperf_only,
-                t.probe_only,
-                t.pc_match,
-                t.pc_match as f64 * 100.0 / denom,
-                t.avg_common_suffix,
-                t.avg_compact_common_suffix,
-                t.avg_compact_dwarf_common_suffix,
-                t.avg_dwarf_common_suffix,
-            );
+            if verbose {
+                println!(
+                    "  {:>10}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>5} {:>3.0}%  {:>9.2}  {:>9.2}  {:>9.2}  {:>9.2}  {name}",
+                    t.tid,
+                    t.kperf_samples,
+                    t.probe_results,
+                    t.paired,
+                    t.kperf_only,
+                    t.probe_only,
+                    t.pc_match,
+                    t.pc_match as f64 * 100.0 / denom,
+                    t.avg_common_suffix,
+                    t.avg_compact_common_suffix,
+                    t.avg_compact_dwarf_common_suffix,
+                    t.avg_dwarf_common_suffix,
+                );
+            } else {
+                println!(
+                    "  {:>10}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>5} {:>3.0}%  {:>9.2}  {:>9}  {name}",
+                    t.tid,
+                    t.kperf_samples,
+                    t.probe_results,
+                    t.paired,
+                    t.kperf_only,
+                    t.probe_only,
+                    t.pc_match,
+                    t.pc_match as f64 * 100.0 / denom,
+                    t.avg_common_suffix,
+                    t.stitchable,
+                );
+            }
         }
     }
 
     if recent_limit == 0 {
         return;
     }
-    println!(
-        "\nmost recent {} paired entries (oldest → newest):",
-        recent_limit.min(update.recent.len() as u32)
-    );
     let take = recent_limit as usize;
-    let entries: Vec<&ProbeDiffEntry> = update
-        .recent
-        .iter()
-        .rev()
-        .take(take)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    for entry in entries {
+    let entries: Vec<&ProbeDiffEntry> = if verbose {
+        update
+            .recent
+            .iter()
+            .rev()
+            .take(take)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
+    } else {
+        update
+            .recent
+            .iter()
+            .filter(|entry| stitched_has_new_frames(entry))
+            .rev()
+            .take(take)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
+    };
+    if verbose {
         println!(
-            "\n  tid={} t={}ms drift={:+}ns fp_run={} compact_run={} compact+fde_run={} dwarf_run={} pc_match={} stitchable={} dwarf={}",
-            entry.tid,
-            entry.timestamp_ns / 1_000_000,
-            entry.drift_ns,
-            entry.common_suffix,
-            entry.compact_common_suffix,
-            entry.compact_dwarf_common_suffix,
-            entry.dwarf_common_suffix,
-            entry.pc_match,
-            entry.stitchable,
-            entry.used_framehop,
+            "\nmost recent {} paired entries (oldest → newest):",
+            entries.len()
         );
+    } else {
+        println!(
+            "\nricher stitched entries from recent window: {} shown (use -n to scan more, --verbose for comparator stacks)",
+            entries.len()
+        );
+    }
+    if entries.is_empty() && !verbose {
+        println!("  (no richer stitched entries in the retained recent window)");
+        return;
+    }
+    for entry in entries {
+        print_probe_diff_entry(entry, verbose);
+    }
+}
+
+fn print_probe_diff_entry(entry: &ProbeDiffEntry, verbose: bool) {
+    println!(
+        "\n  tid={} t={}ms drift={:+}ns fp_run={} compact_run={} compact+fde_run={} dwarf_run={} pc_match={} stitchable={} dwarf={} kperf_frames={} stitched_frames={} new_frames={}",
+        entry.tid,
+        entry.timestamp_ns / 1_000_000,
+        entry.drift_ns,
+        entry.common_suffix,
+        entry.compact_common_suffix,
+        entry.compact_dwarf_common_suffix,
+        entry.dwarf_common_suffix,
+        entry.pc_match,
+        entry.stitchable,
+        entry.used_framehop,
+        entry.kperf_stack.len(),
+        entry.stitched_stack.len(),
+        new_frame_count(&entry.kperf_stack, &entry.stitched_stack),
+    );
+    if verbose {
         println!(
             "    ticks: kperf={} staxd_read={} staxd_drained={} staxd_queued={} staxd_send={} client_recv={} enqueue={} worker={} lookup_done={} state_done={} resume_done={} walk_done={}",
             entry.timing.kperf_ts_ticks,
@@ -1013,9 +1087,6 @@ fn print_probe_diff(update: &ProbeDiffUpdate, recent_limit: u32) {
             entry.queue.worker_batch_len,
         );
         print_stack("kperf_stack", &entry.kperf_stack);
-        if !entry.kperf_kernel_stack.is_empty() {
-            print_stack("kperf_kernel_stack", &entry.kperf_kernel_stack);
-        }
         print_stack("fp_stack", &entry.probe_stack);
         if !entry.compact_stack.is_empty() {
             print_stack("compact_stack", &entry.compact_stack);
@@ -1026,9 +1097,16 @@ fn print_probe_diff(update: &ProbeDiffUpdate, recent_limit: u32) {
         if !entry.dwarf_stack.is_empty() {
             print_stack("dwarf_stack", &entry.dwarf_stack);
         }
-        if !entry.stitched_stack.is_empty() {
-            print_stack("stitched_stack (would-ship)", &entry.stitched_stack);
-        }
+    }
+    if !entry.kperf_kernel_stack.is_empty() {
+        print_stack_highlight_all("kperf_kernel_stack (new)", &entry.kperf_kernel_stack);
+    }
+    if !entry.stitched_stack.is_empty() {
+        print_stack_highlight_new(
+            "stitched_stack (would-ship, new frames highlighted)",
+            &entry.stitched_stack,
+            &entry.kperf_stack,
+        );
     }
 }
 
@@ -1048,6 +1126,74 @@ fn print_stack(label: &str, frames: &[stax_live_proto::ResolvedFrame]) {
     for f in frames {
         println!("      {:#018x}  {}", f.address, f.display);
     }
+}
+
+fn print_stack_highlight_all(label: &str, frames: &[stax_live_proto::ResolvedFrame]) {
+    println!("    {label}:");
+    let color = colors_enabled();
+    for f in frames {
+        print_frame(f, color);
+    }
+}
+
+fn print_stack_highlight_new(
+    label: &str,
+    frames: &[stax_live_proto::ResolvedFrame],
+    baseline: &[stax_live_proto::ResolvedFrame],
+) {
+    println!("    {label}:");
+    let color = colors_enabled();
+    let mut baseline_counts = frame_counts(baseline);
+    for f in frames {
+        let is_new = consume_baseline_or_is_new(&mut baseline_counts, f.address);
+        print_frame(f, color && is_new);
+    }
+}
+
+fn print_frame(f: &stax_live_proto::ResolvedFrame, highlight: bool) {
+    if highlight {
+        println!("      \x1b[1;32m{:#018x}  {}\x1b[0m", f.address, f.display);
+    } else {
+        println!("      {:#018x}  {}", f.address, f.display);
+    }
+}
+
+fn stitched_has_new_frames(entry: &ProbeDiffEntry) -> bool {
+    entry.stitched_stack.len() > entry.kperf_stack.len()
+        && new_frame_count(&entry.kperf_stack, &entry.stitched_stack) > 0
+}
+
+fn new_frame_count(
+    baseline: &[stax_live_proto::ResolvedFrame],
+    enriched: &[stax_live_proto::ResolvedFrame],
+) -> usize {
+    let mut baseline_counts = frame_counts(baseline);
+    enriched
+        .iter()
+        .filter(|frame| consume_baseline_or_is_new(&mut baseline_counts, frame.address))
+        .count()
+}
+
+fn frame_counts(frames: &[stax_live_proto::ResolvedFrame]) -> HashMap<u64, usize> {
+    let mut counts = HashMap::new();
+    for frame in frames {
+        *counts.entry(frame.address).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn consume_baseline_or_is_new(counts: &mut HashMap<u64, usize>, address: u64) -> bool {
+    match counts.get_mut(&address) {
+        Some(count) if *count > 0 => {
+            *count -= 1;
+            false
+        }
+        _ => true,
+    }
+}
+
+fn colors_enabled() -> bool {
+    env::var_os("NO_COLOR").is_none()
 }
 fn bar_str(pct: f64, width: usize) -> String {
     let pct = pct.clamp(0.0, 100.0);
