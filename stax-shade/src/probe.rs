@@ -19,10 +19,10 @@ use mach2::traps::mach_task_self;
 use mach2::vm::mach_vm_deallocate;
 use mach2::vm::mach_vm_read_overwrite;
 use mach2::vm_types::{mach_vm_address_t, mach_vm_size_t, natural_t};
-use nwind::arch::Registers;
 use nwind::{
-    CapturedImageMapping, CapturedStackUnwinder, CapturedUnwindError, DwarfRegs, UnwindFailure,
-    UnwindMode, UserFrame,
+    CapturedImageMapping, CapturedStack, CapturedStackUnwinder, CapturedThreadState,
+    CapturedUnwindError, CapturedUnwindOptions, UnwindFailure, UnwindMode,
+    captured_frame_pointer_walk, strip_code_pointer, strip_data_pointer,
 };
 use stax_mac_capture::sample_sink::CpuIntervalEvent;
 use stax_mac_capture::{
@@ -31,7 +31,6 @@ use stax_mac_capture::{
 };
 use staxd_client::KperfProbeTriggerTiming;
 
-const MAX_FP_FRAMES: usize = 64;
 const STACK_SNAPSHOT_BYTES: usize = 512 * 1024;
 const STACK_SNAPSHOT_CHUNK: usize = 16 * 1024;
 const PROBE_UNWIND_QUEUE_CAPACITY: usize = 1024;
@@ -882,10 +881,10 @@ impl RaceProbe {
 
         Ok(ProbeCapture {
             timing,
-            pc: strip_code_ptr(state.pc),
-            lr: strip_code_ptr(state.lr),
-            fp: strip_data_ptr(state.fp),
-            sp: strip_data_ptr(state.sp),
+            pc: strip_code_pointer(state.pc),
+            lr: strip_code_pointer(state.lr),
+            fp: strip_data_pointer(state.fp),
+            sp: strip_data_pointer(state.sp),
             stack,
         })
     }
@@ -940,29 +939,6 @@ struct ProbeSnapshotWithKey {
     compact_dwarf_walked: Vec<u64>,
     dwarf_walked: Vec<u64>,
     used_dwarf: bool,
-}
-
-struct DwarfUnwindOutcome {
-    walked: Vec<u64>,
-    bridge_steps: usize,
-}
-
-struct DwarfUnwindFailure {
-    error: CapturedUnwindError,
-    bridge_attempted: bool,
-    bridge_steps: usize,
-}
-
-#[derive(Clone, Copy)]
-struct DwarfSeedRegs {
-    pc: u64,
-    lr: u64,
-    fp: u64,
-    sp: u64,
-}
-
-struct FpBridgeStep {
-    seed: DwarfSeedRegs,
 }
 
 enum ProbeImageUpdate {
@@ -1049,60 +1025,73 @@ fn run_unwind_worker(
     while let Ok(capture) = capture_rx.recv() {
         drain_image_updates(&mut unwinder, &image_rx);
         let mut timing = capture.timing;
-        let fp_walked = fp_walk_capture(&capture);
+        let fp_walked = captured_frame_pointer_walk(
+            capture.thread_state(),
+            capture.stack(),
+            CapturedUnwindOptions::DEFAULT_MAX_FRAMES,
+        );
         if !fp_walked.is_empty() {
             fp_successes = fp_successes.saturating_add(1);
         }
-        let compact_walked = match metadata_unwind_capture(
-            &mut unwinder,
-            &capture,
+        let compact_walked = match unwinder.unwind_callers(
+            capture.thread_state(),
+            capture.stack(),
             &mut compact_frames,
-            UnwindMode::CompactOnly,
+            CapturedUnwindOptions::metadata(UnwindMode::CompactOnly),
         ) {
-            Ok(walked) => walked,
-            Err(error) => {
+            Ok(outcome) => outcome.callers,
+            Err(failure) => {
                 if !first_compact_failure_logged {
                     first_compact_failure_logged = true;
                     tracing::debug!(
                         tid = capture.tid,
                         kperf_ts = capture.timing.kperf_ts,
-                        error = ?error,
+                        error = ?failure.error,
+                        bridge_attempted = failure.bridge_attempted,
+                        bridge_steps = failure.bridge_steps,
                         "race-kperf compact-only unwind produced no caller frames"
                     );
                 }
                 Vec::new()
             }
         };
-        let compact_dwarf_walked = match metadata_unwind_capture(
-            &mut unwinder,
-            &capture,
+        let compact_dwarf_walked = match unwinder.unwind_callers(
+            capture.thread_state(),
+            capture.stack(),
             &mut compact_dwarf_frames,
-            UnwindMode::CompactWithDwarfRefs,
+            CapturedUnwindOptions::metadata(UnwindMode::CompactWithDwarfRefs),
         ) {
-            Ok(walked) => walked,
-            Err(error) => {
+            Ok(outcome) => outcome.callers,
+            Err(failure) => {
                 if !first_compact_dwarf_failure_logged {
                     first_compact_dwarf_failure_logged = true;
                     tracing::debug!(
                         tid = capture.tid,
                         kperf_ts = capture.timing.kperf_ts,
-                        error = ?error,
+                        error = ?failure.error,
+                        bridge_attempted = failure.bridge_attempted,
+                        bridge_steps = failure.bridge_steps,
                         "race-kperf compact+fde unwind produced no caller frames"
                     );
                 }
                 Vec::new()
             }
         };
-        let dwarf_walked = match dwarf_unwind_capture(&mut unwinder, &capture, &mut dwarf_frames) {
+        let dwarf_walked = match unwinder.unwind_callers(
+            capture.thread_state(),
+            capture.stack(),
+            &mut dwarf_frames,
+            CapturedUnwindOptions::dwarf_with_fp_bridge(),
+        ) {
             Ok(outcome) => {
                 dwarf_successes = dwarf_successes.saturating_add(1);
-                if outcome.bridge_steps != 0 {
+                if outcome.bridge_attempted {
                     dwarf_bridge_attempts = dwarf_bridge_attempts.saturating_add(1);
                     dwarf_bridge_successes = dwarf_bridge_successes.saturating_add(1);
                     dwarf_bridge_steps =
                         dwarf_bridge_steps.saturating_add(outcome.bridge_steps as u64);
                 }
-                outcome.walked
+                outcome.callers
             }
             Err(failure) => {
                 dwarf_failures = dwarf_failures.saturating_add(1);
@@ -1280,291 +1269,14 @@ fn drain_image_updates(
     }
 }
 
-fn fp_walk_capture(capture: &ProbeCaptureWithKey) -> Vec<u64> {
-    let mut walked = Vec::with_capacity(MAX_FP_FRAMES);
-    let mut fp = strip_data_ptr(capture.fp);
-    for _ in 0..MAX_FP_FRAMES {
-        let Some(next_fp) = read_stack_u64(&capture.stack, fp) else {
-            break;
-        };
-        let Some(saved_lr) = read_stack_u64(&capture.stack, fp.saturating_add(8)) else {
-            break;
-        };
-        let saved_lr = strip_code_ptr(saved_lr);
-        if saved_lr != 0 {
-            walked.push(saved_lr);
-        }
-        let next_fp = strip_data_ptr(next_fp);
-        if next_fp <= fp {
-            break;
-        }
-        fp = next_fp;
-    }
-    walked
-}
-
-fn read_stack_u64(stack: &StackSnapshot, address: u64) -> Option<u64> {
-    let offset = address.checked_sub(stack.base)? as usize;
-    let end = offset.checked_add(8)?;
-    let bytes = stack.bytes.get(offset..end)?;
-    Some(u64::from_le_bytes(bytes.try_into().ok()?))
-}
-
-fn dwarf_unwind_capture(
-    unwinder: &mut CapturedStackUnwinder,
-    capture: &ProbeCaptureWithKey,
-    frames: &mut Vec<UserFrame>,
-) -> Result<DwarfUnwindOutcome, DwarfUnwindFailure> {
-    match dwarf_unwind_from_seed(
-        unwinder,
-        DwarfSeedRegs::from_capture(capture),
-        capture.stack.base,
-        &capture.stack,
-        frames,
-    ) {
-        Ok(walked) => {
-            return Ok(DwarfUnwindOutcome {
-                walked,
-                bridge_steps: 0,
-            });
-        }
-        Err(error) if !should_bridge_dwarf_failure(&error) => {
-            return Err(DwarfUnwindFailure {
-                error,
-                bridge_attempted: false,
-                bridge_steps: 0,
-            });
-        }
-        Err(error) => {
-            let mut last_error = error;
-            let mut bridge_steps = 0usize;
-            let mut bridge_prefix = Vec::with_capacity(MAX_FP_FRAMES);
-            let mut fp = strip_data_ptr(capture.fp);
-            let mut sp = strip_data_ptr(capture.sp);
-
-            while bridge_steps < MAX_FP_FRAMES {
-                let Some(step) = fp_bridge_step(&capture.stack, fp, sp) else {
-                    return Err(DwarfUnwindFailure {
-                        error: last_error,
-                        bridge_attempted: true,
-                        bridge_steps,
-                    });
-                };
-
-                bridge_steps += 1;
-                bridge_prefix.push(step.seed.pc);
-
-                match dwarf_unwind_from_seed(
-                    unwinder,
-                    step.seed,
-                    capture.stack.base,
-                    &capture.stack,
-                    frames,
-                ) {
-                    Ok(mut walked) => {
-                        bridge_prefix.append(&mut walked);
-                        bridge_prefix.dedup();
-                        return Ok(DwarfUnwindOutcome {
-                            walked: bridge_prefix,
-                            bridge_steps,
-                        });
-                    }
-                    Err(error) if should_bridge_dwarf_failure(&error) => {
-                        last_error = error;
-                        fp = step.seed.fp;
-                        sp = step.seed.sp;
-                    }
-                    Err(error) => {
-                        return Err(DwarfUnwindFailure {
-                            error,
-                            bridge_attempted: true,
-                            bridge_steps,
-                        });
-                    }
-                }
-            }
-
-            Err(DwarfUnwindFailure {
-                error: last_error,
-                bridge_attempted: true,
-                bridge_steps,
-            })
-        }
-    }
-}
-
-fn metadata_unwind_capture(
-    unwinder: &mut CapturedStackUnwinder,
-    capture: &ProbeCaptureWithKey,
-    frames: &mut Vec<UserFrame>,
-    mode: UnwindMode,
-) -> Result<Vec<u64>, CapturedUnwindError> {
-    match unwind_from_seed(
-        unwinder,
-        DwarfSeedRegs::from_capture(capture),
-        capture.stack.base,
-        &capture.stack,
-        frames,
-        mode,
-    ) {
-        Ok(walked) => Ok(walked),
-        Err(error) if !should_bridge_metadata_failure(&error) => Err(error),
-        Err(error) => {
-            let mut last_error = error;
-            let mut bridge_steps = 0usize;
-            let mut bridge_prefix = Vec::with_capacity(MAX_FP_FRAMES);
-            let mut fp = strip_data_ptr(capture.fp);
-            let mut sp = strip_data_ptr(capture.sp);
-
-            while bridge_steps < MAX_FP_FRAMES {
-                let Some(step) = fp_bridge_step(&capture.stack, fp, sp) else {
-                    return Err(last_error);
-                };
-
-                bridge_steps += 1;
-                bridge_prefix.push(step.seed.pc);
-
-                match unwind_from_seed(
-                    unwinder,
-                    step.seed,
-                    capture.stack.base,
-                    &capture.stack,
-                    frames,
-                    mode,
-                ) {
-                    Ok(mut walked) => {
-                        bridge_prefix.append(&mut walked);
-                        bridge_prefix.dedup();
-                        return Ok(bridge_prefix);
-                    }
-                    Err(error) if should_bridge_metadata_failure(&error) => {
-                        last_error = error;
-                        fp = step.seed.fp;
-                        sp = step.seed.sp;
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-
-            Err(last_error)
-        }
-    }
-}
-
-fn dwarf_unwind_from_seed(
-    unwinder: &mut CapturedStackUnwinder,
-    seed: DwarfSeedRegs,
-    stack_base: u64,
-    stack: &StackSnapshot,
-    frames: &mut Vec<UserFrame>,
-) -> Result<Vec<u64>, CapturedUnwindError> {
-    unwind_from_seed(
-        unwinder,
-        seed,
-        stack_base,
-        stack,
-        frames,
-        UnwindMode::Default,
-    )
-}
-
-fn unwind_from_seed(
-    unwinder: &mut CapturedStackUnwinder,
-    seed: DwarfSeedRegs,
-    stack_base: u64,
-    stack: &StackSnapshot,
-    frames: &mut Vec<UserFrame>,
-    mode: UnwindMode,
-) -> Result<Vec<u64>, CapturedUnwindError> {
-    let mut regs = dwarf_regs_from_seed(seed);
-    unwinder.unwind_into_with_mode_at(&mut regs, stack_base, &stack.bytes, frames, mode)?;
-    let mut walked = Vec::with_capacity(frames.len().saturating_sub(1).min(MAX_FP_FRAMES));
-    for frame in frames.iter().skip(1).take(MAX_FP_FRAMES) {
-        let pc = strip_code_ptr(frame.address);
-        if pc != 0 && walked.last().copied() != Some(pc) {
-            walked.push(pc);
-        }
-    }
-    if walked.is_empty() {
-        return Err(CapturedUnwindError::OnlyLeafFrame { reason: None });
-    }
-    Ok(walked)
-}
-
-fn should_bridge_dwarf_failure(error: &CapturedUnwindError) -> bool {
-    matches!(
-        error,
-        CapturedUnwindError::OnlyLeafFrame {
-            reason: Some(UnwindFailure::NoUnwindInfo | UnwindFailure::NoBinary)
-        }
-    )
-}
-
-fn should_bridge_metadata_failure(error: &CapturedUnwindError) -> bool {
-    matches!(error, CapturedUnwindError::OnlyLeafFrame { .. })
-}
-
-fn fp_bridge_step(stack: &StackSnapshot, fp: u64, sp: u64) -> Option<FpBridgeStep> {
-    let fp = strip_data_ptr(fp);
-    if fp == 0 || fp < strip_data_ptr(sp) {
-        return None;
+impl ProbeCaptureWithKey {
+    fn thread_state(&self) -> CapturedThreadState {
+        CapturedThreadState::new(self.pc, self.lr, self.fp, self.sp)
     }
 
-    let next_fp = strip_data_ptr(read_stack_u64(stack, fp)?);
-    let pc = strip_code_ptr(read_stack_u64(stack, fp.checked_add(8)?)?);
-    if next_fp == 0 || next_fp <= fp || pc == 0 {
-        return None;
+    fn stack(&self) -> CapturedStack<'_> {
+        CapturedStack::new(self.stack.base, &self.stack.bytes)
     }
-
-    let caller_sp = fp.checked_add(16)?;
-    let lr = read_stack_u64(stack, next_fp.checked_add(8)?)
-        .map(strip_code_ptr)
-        .unwrap_or(0);
-
-    Some(FpBridgeStep {
-        seed: DwarfSeedRegs {
-            pc,
-            lr,
-            fp: next_fp,
-            sp: caller_sp,
-        },
-    })
-}
-
-impl DwarfSeedRegs {
-    fn from_capture(capture: &ProbeCaptureWithKey) -> Self {
-        Self {
-            pc: capture.pc,
-            lr: capture.lr,
-            fp: capture.fp,
-            sp: capture.sp,
-        }
-    }
-}
-
-fn dwarf_regs_from_seed(seed: DwarfSeedRegs) -> DwarfRegs {
-    let mut regs = DwarfRegs::new();
-    append_native_dwarf_regs(&mut regs, seed);
-    regs
-}
-
-#[cfg(target_arch = "aarch64")]
-fn append_native_dwarf_regs(regs: &mut DwarfRegs, seed: DwarfSeedRegs) {
-    use nwind::arch::aarch64::dwarf;
-
-    regs.append(dwarf::PC, seed.pc);
-    regs.append(dwarf::X30, seed.lr);
-    regs.append(dwarf::X29, seed.fp);
-    regs.append(dwarf::X31, seed.sp);
-}
-
-#[cfg(target_arch = "x86_64")]
-fn append_native_dwarf_regs(regs: &mut DwarfRegs, seed: DwarfSeedRegs) {
-    use nwind::arch::amd64::dwarf;
-
-    regs.append(dwarf::RETURN_ADDRESS, seed.pc);
-    regs.append(dwarf::RBP, seed.fp);
-    regs.append(dwarf::RSP, seed.sp);
 }
 
 enum ProbeWorkerEvent {
@@ -1673,12 +1385,12 @@ impl InProcessHelperClient {
             tid,
             timing,
             queue: ProbeQueueStats::default(),
-            pc: strip_code_ptr(read_u64(&header, 48)),
-            lr: strip_code_ptr(read_u64(&header, 56)),
-            fp: strip_data_ptr(read_u64(&header, 64)),
-            sp: strip_data_ptr(read_u64(&header, 72)),
+            pc: strip_code_pointer(read_u64(&header, 48)),
+            lr: strip_code_pointer(read_u64(&header, 56)),
+            fp: strip_data_pointer(read_u64(&header, 64)),
+            sp: strip_data_pointer(read_u64(&header, 72)),
             stack: StackSnapshot {
-                base: strip_data_ptr(read_u64(&header, 72)),
+                base: strip_data_pointer(read_u64(&header, 72)),
                 bytes: stack_bytes,
             },
         }))
@@ -1852,7 +1564,7 @@ fn deallocate_port(port: mach_port_t) {
 }
 
 fn copy_stack_window(task: mach_port_t, sp: u64) -> StackSnapshot {
-    let base = strip_data_ptr(sp);
+    let base = strip_data_pointer(sp);
     let mut bytes = vec![0u8; STACK_SNAPSHOT_BYTES];
     let mut copied = 0usize;
     while copied < STACK_SNAPSHOT_BYTES {
@@ -1969,38 +1681,4 @@ fn read_thread_state(thread: thread_act_t) -> Result<ThreadState, ProbeError> {
         fp: state.rbp,
         sp: state.rsp,
     })
-}
-
-#[cfg(target_arch = "aarch64")]
-fn strip_code_ptr(mut ptr: u64) -> u64 {
-    unsafe {
-        core::arch::asm!(
-            "xpaci {ptr}",
-            ptr = inout(reg) ptr,
-            options(nomem, nostack, preserves_flags)
-        );
-    }
-    ptr
-}
-
-#[cfg(target_arch = "aarch64")]
-fn strip_data_ptr(mut ptr: u64) -> u64 {
-    unsafe {
-        core::arch::asm!(
-            "xpacd {ptr}",
-            ptr = inout(reg) ptr,
-            options(nomem, nostack, preserves_flags)
-        );
-    }
-    ptr
-}
-
-#[cfg(not(target_arch = "aarch64"))]
-fn strip_code_ptr(ptr: u64) -> u64 {
-    ptr
-}
-
-#[cfg(not(target_arch = "aarch64"))]
-fn strip_data_ptr(ptr: u64) -> u64 {
-    ptr
 }

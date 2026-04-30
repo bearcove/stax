@@ -86,8 +86,10 @@ pub use crate::address_space::{
 pub use crate::arch::{UnwindFailure, UnwindMode};
 pub use crate::binary::{BinaryData, BinaryDataReader, LoadHeader, SymbolTable};
 pub use crate::captured::{
-    CapturedImageMapping, CapturedLoadFailure, CapturedReload, CapturedStackUnwinder,
-    CapturedUnwindError,
+    captured_frame_pointer_walk, strip_code_pointer, strip_data_pointer, CapturedBridgePolicy,
+    CapturedImageMapping, CapturedLoadFailure, CapturedReload, CapturedStack,
+    CapturedStackUnwinder, CapturedThreadState, CapturedUnwindError, CapturedUnwindFailure,
+    CapturedUnwindOptions, CapturedUnwindOutcome,
 };
 pub use crate::dwarf_regs::DwarfRegs;
 pub use crate::range_map::RangeMap;
