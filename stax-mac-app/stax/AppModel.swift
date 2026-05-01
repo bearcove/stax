@@ -389,12 +389,12 @@ final class AppModel {
                 self.symbolCount = update.entries.count
                 self.onCPUTime = TimeInterval(update.totalOnCpuNs) / 1_000_000_000
                 let oc = update.totalOffCpu
-                self.offCPUTime =
-                    TimeInterval(
-                        oc.idleNs + oc.lockNs + oc.semaphoreNs + oc.ipcNs
-                            + oc.ioReadNs + oc.ioWriteNs + oc.readinessNs + oc.sleepNs
-                            + oc.connectNs + oc.otherNs
-                    ) / 1_000_000_000
+                let offCpuTotal: UInt64 =
+                    oc.idleNs + oc.lockNs + oc.semaphoreNs + oc.ipcNs
+                    + oc.ioReadNs + oc.ioWriteNs
+                let offCpuRest: UInt64 =
+                    oc.readinessNs + oc.sleepNs + oc.connectNs + oc.otherNs
+                self.offCPUTime = TimeInterval(offCpuTotal + offCpuRest) / 1_000_000_000
             } catch {
                 NSLog("stax: top poll failed: %@", "\(error)")
             }
