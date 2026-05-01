@@ -4,4 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-nwind = { version = "0.1", path = "../nwind", default-features = false }
+framehop = "0.16"
+object = { version = "0.39.1", default-features = false, features = [
+  "std",
+  "read_core",
+  "elf",
+  "macho",
+  "compression",
+] }

@@ -5,16 +5,6 @@ IFS=$'\n\t'
 
 export RUST_BACKTRACE=1
 
-cd nwind
-cargo test --features local-unwinding --verbose
-cargo test --features local-unwinding --release --verbose
-cargo build --verbose
-cargo test --verbose
-cargo check --no-default-features --verbose
-cargo check --no-default-features --features "log" --verbose
-cargo check --no-default-features --features "log debug-logs" --verbose
-cd ..
-
 cd perf_event_open
 cargo test --verbose
 cd ..

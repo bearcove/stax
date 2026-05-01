@@ -14,6 +14,7 @@ eyre = "0.6"
 async-trait = "0.1"
 futures = { version = "0.3", default-features = false, features = ["executor"] }
 stax-live-proto = { path = "stax-live-proto" }
+stax-unwind = { path = "stax-unwind" }
 stax-vox-observe = { path = "stax-vox-observe" }
 vox = { path = "/Users/amos/bearcove/vox/rust/vox" }
 
@@ -23,27 +24,13 @@ staxd-client = { version = "0.1", path = "staxd-client" }
 tokio = { version = "1", features = ["rt", "macros", "time"] }
 mach2 = "0.4"
 
-[dependencies.nwind]
-version = "0.1"
-path = "nwind"
-features = ["log"]
-default-features = false
-
 [profile.release]
 debug = 1
-
-[features]
-default = ["addr2line"]
-addr2line = ["nwind/addr2line"]
-debug-logs = ["nwind/debug-logs"]
 
 [workspace]
 members = [
   ".",
   "cli",
-  "nwind",
-  "proc-maps",
-  "thread-local-reentrant",
   "stax-mac-capture",
   "stax-mac-kperf-sys",
   "stax-mac-kperf-parse",

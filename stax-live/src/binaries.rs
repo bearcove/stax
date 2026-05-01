@@ -1,10 +1,13 @@
 //! Live binary registry: tracks which images the target has loaded and
 //! lazily fetches their on-disk bytes when the user asks for an
 //! annotation. Symbol tables come from the sampler (Mach-O `nlist_64`s
-//! pulled by `stax-mac-capture`); normal binary image parsing is delegated
-//! to nwind so annotation and unwinding share the same segment metadata.
+//! pulled by `stax-mac-capture`); on-disk image parsing is handled
+//! locally so disassembly and DWARF lookups share the same segment
+//! metadata.
 
 use std::sync::Arc;
+
+use object::{Object, ObjectSegment};
 
 /// One symbol from a binary's symtab, owned form (the borrowed
 /// `LiveSymbol` only lives for the duration of `on_binary_loaded`).
@@ -32,18 +35,26 @@ pub struct LoadedBinary {
     pub text_bytes: Option<Vec<u8>>,
 }
 
-/// Cached on-disk image backed by nwind's binary parser. `bytes` is kept
-/// for addr2line/source lookup, while `binary` is the authoritative source
-/// for load-header-to-file-offset translation.
+#[derive(Clone, Copy)]
+struct LoadHeader {
+    address: u64,
+    memory_size: u64,
+    file_size: u64,
+    file_offset: u64,
+}
+
+/// Cached on-disk image. `bytes` is kept for DWARF/source lookup, while
+/// `load_headers` is the authoritative source for segment-to-file-offset
+/// translation during disassembly fetches.
 pub struct CodeImage {
     pub bytes: Arc<Vec<u8>>,
-    pub binary: Arc<nwind::BinaryData>,
+    load_headers: Vec<LoadHeader>,
 }
 
 impl CodeImage {
     pub fn fetch(&self, start_svma: u64, len: usize) -> Option<&[u8]> {
         let end = start_svma.checked_add(len as u64)?;
-        for header in self.binary.load_headers() {
+        for header in &self.load_headers {
             let header_end = header.address.checked_add(header.memory_size)?;
             if header.address <= start_svma && end <= header_end {
                 let in_segment = start_svma - header.address;
@@ -448,7 +459,7 @@ impl BinaryRegistry {
 
         // Disassembly bytes have four fallbacks, in order of
         // preference:
-        //   1. nwind-backed on-disk `CodeImage` -- gives us DWARF + source;
+        //   1. on-disk `CodeImage` -- gives us DWARF + source;
         //   2. `mach_vm_read` against the target -- only when we
         //      have a task port (samply backend / `--pid` path);
         //   3. inline `text_bytes` from the load event -- JIT'd
@@ -601,7 +612,19 @@ fn load_image(path: &str) -> Option<Arc<CodeImage>> {
     if path.starts_with('[') || path.is_empty() {
         return None;
     }
-    let binary = nwind::BinaryData::load_from_fs(path).ok().map(Arc::new)?;
-    let bytes = Arc::new(binary.as_bytes().to_vec());
-    Some(Arc::new(CodeImage { bytes, binary }))
+    let bytes = Arc::new(std::fs::read(path).ok()?);
+    let file = object::File::parse(bytes.as_slice()).ok()?;
+    let load_headers = file
+        .segments()
+        .filter_map(|segment| {
+            let (file_offset, file_size) = segment.file_range();
+            Some(LoadHeader {
+                address: segment.address(),
+                memory_size: segment.size(),
+                file_size,
+                file_offset,
+            })
+        })
+        .collect();
+    Some(Arc::new(CodeImage { bytes, load_headers }))
 }

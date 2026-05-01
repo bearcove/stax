@@ -22,6 +22,4 @@ version = "1"
 features = ["rt-multi-thread", "signal", "sync"]
 
 [features]
-default = ["addr2line"]
-addr2line = ["stax-core/addr2line"]
-debug-logs = ["stax-core/debug-logs"]
+default = []
