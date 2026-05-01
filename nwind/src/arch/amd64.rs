@@ -30,7 +30,7 @@ pub mod dwarf {
     pub const SS: u16 = 52;
 }
 
-static REGS: &'static [u16] = &[
+static REGS: &[u16] = &[
     dwarf::RAX,
     dwarf::RDX,
     dwarf::RCX,

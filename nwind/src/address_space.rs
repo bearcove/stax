@@ -41,7 +41,6 @@ use crate::types::{BinaryId, Endianness, Inode, UserFrame};
 
 #[cfg(not(feature = "addr2line"))]
 mod addr2line {
-    use gimli;
     use std::borrow::Cow;
     use std::fmt;
     use std::marker::PhantomData;
@@ -447,7 +446,7 @@ impl<A: Architecture> Binary<A> {
             // file paths in the line program are typically relative to the
             // CU's compilation directory, so the consumer needs both halves
             // to find the source on disk.
-            let comp_dir: Option<String> = lookup_comp_dir(&*ctx_guard, relative_address);
+            let comp_dir: Option<String> = lookup_comp_dir(&ctx_guard, relative_address);
             frame.comp_dir = comp_dir.clone();
             if let Ok(mut raw_frames) = ctx_guard.find_frames(relative_address).skip_all_loads() {
                 if let Ok(Some(raw_frame)) = raw_frames.next() {
@@ -702,6 +701,9 @@ where
 
 pub trait BufferReader {
     fn len(&self) -> usize;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
     fn get_u32_at_offset(&self, endianness: Endianness, offset: u64) -> Option<u32>;
     fn get_u64_at_offset(&self, endianness: Endianness, offset: u64) -> Option<u64>;
 }
@@ -2271,7 +2273,7 @@ fn test_match_mapping_5() {
     ][..];
 
     let mapping = match_mapping(
-        &load_headers,
+        load_headers,
         &Region {
             start: 139654335762432,
             end: 139654335766528,
@@ -2324,7 +2326,7 @@ fn test_match_mapping_6() {
     ][..];
 
     let mapping = match_mapping(
-        &load_headers,
+        load_headers,
         &Region {
             start: 140464087232512,
             end: 140464087240704,
@@ -2377,7 +2379,7 @@ fn test_match_mapping_7() {
     ][..];
 
     let mapping = match_mapping(
-        &load_headers,
+        load_headers,
         &Region {
             start: 0x564ff40e1000,
             end: 0x564ff40ec000,

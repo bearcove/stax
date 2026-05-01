@@ -26,7 +26,7 @@ pub mod dwarf {
     pub const R15: u16 = 15;
 }
 
-static REGS: &'static [u16] = &[
+static REGS: &[u16] = &[
     dwarf::R0,
     dwarf::R1,
     dwarf::R2,
@@ -137,7 +137,7 @@ impl Architecture for Arch {
         initial_address: &mut Option<u32>,
         ra_address: &mut Option<u32>,
     ) -> Result<UnwindStatus, UnwindFailure> {
-        let address = regs.get(dwarf::R15).unwrap() as u32;
+        let address = regs.get(dwarf::R15).unwrap();
         if let Some(result) = unwind_from_cache(memory, &mut state.unwind_cache, regs, address) {
             match result {
                 Ok(link_register_addr) => {
@@ -227,7 +227,7 @@ impl Architecture for Arch {
         match result {
             Ok(link_register_addr) => {
                 *ra_address = link_register_addr;
-                return Ok(UnwindStatus::InProgress);
+                Ok(UnwindStatus::InProgress)
             }
             Err(EhError::EndOfStack) => {
                 debug!("Previous frame not found: EndOfStack");

@@ -45,7 +45,7 @@ pub mod dwarf {
     pub const PC: u16 = 32;
 }
 
-static REGS: &'static [u16] = &[
+static REGS: &[u16] = &[
     dwarf::X0,
     dwarf::X1,
     dwarf::X2,

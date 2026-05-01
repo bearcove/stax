@@ -231,7 +231,7 @@ impl Staxd for StaxdServer {
             config.target_pid, config.frequency_hz, config.buf_records
         );
 
-        let result = session::run(config, records).await;
+        let result = session::run(config, records, cancel).await;
 
         // Always release the slot. The session driver tore down kperf+
         // kdebug on its own when it returned; here we just release the
