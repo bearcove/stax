@@ -471,10 +471,9 @@ fn current_terminal_size_or_default() -> TerminalSize {
 
 fn require_server_socket() -> Result<String, Box<dyn Error>> {
     let socket = stax_server_socket().ok_or_else(|| {
-        format!(
-            "stax-server isn't running. \
+        "stax-server isn't running. \
              Start it with `stax-server` (or set STAX_SERVER_SOCKET if you've moved the socket)."
-        )
+            .to_string()
     })?;
     Ok(format!("local://{}", socket.display()))
 }
@@ -1392,7 +1391,7 @@ fn print_flame(update: &FlamegraphUpdate, max_depth: usize, threshold_pct: f64) 
         update.total_on_cpu_ns as f64 / 1e9,
         off_cpu_total_ns(&update.total_off_cpu) as f64 / 1e9,
     );
-    if let Some(tid) = update.root.children.first().map(|_| None::<u32>).flatten() {
+    if let Some(tid) = update.root.children.first().and(None::<u32>) {
         // placeholder — root has no tid annotation; left as a hook
         // for future per-thread renders.
         let _ = tid;
@@ -1572,18 +1571,6 @@ fn print_diagnostics(snapshot: &DiagnosticsSnapshot) {
         print_run_one_line(active);
     } else {
         println!("active run: none");
-    }
-}
-
-fn format_duration_ns(ns: u64) -> String {
-    if ns >= 1_000_000_000 {
-        format!("{:.2}s", ns as f64 / 1_000_000_000.0)
-    } else if ns >= 1_000_000 {
-        format!("{:.2}ms", ns as f64 / 1_000_000.0)
-    } else if ns >= 1_000 {
-        format!("{:.2}µs", ns as f64 / 1_000.0)
-    } else {
-        format!("{ns}ns")
     }
 }
 

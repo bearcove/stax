@@ -321,11 +321,7 @@ impl<I: Iterator<Item = u8>> Iterator for Decoder<I> {
             return None;
         }
 
-        let opcode = if let Some(opcode) = self.bytecode.next() {
-            opcode
-        } else {
-            return None;
-        };
+        let opcode = self.bytecode.next()?;
 
         self.index += 1;
 
@@ -334,7 +330,7 @@ impl<I: Iterator<Item = u8>> Iterator for Decoder<I> {
             Instruction::VspAdd(offset as i32)
         } else if opcode & EXTAB_OP_SUB_VSP_MASK == EXTAB_OP_SUB_VSP {
             let offset = (((opcode & EXTAB_OP_SUB_VSP_ARG_MASK) as u32) << 2) + 4;
-            Instruction::VspAdd(offset as i32 * -1)
+            Instruction::VspAdd(-(offset as i32))
         } else if opcode & EXTAB_OP_POP_REGS_SERIAL_MASK == EXTAB_OP_POP_REGS_SERIAL {
             // This pops R4 and $extra_regs after R4, plus R14 if flagged.
             let extra_regs = opcode & EXTAB_OP_POP_REGS_SERIAL_ARG_COUNT_MASK;
@@ -466,7 +462,7 @@ fn decode_to_vec(bytecode: &[u8]) -> (Vec<Instruction>, usize, Option<DecodeErro
     let mut output = Vec::new();
     let mut iter = Decoder::new(bytecode.iter().cloned());
     let mut error = None;
-    while let Some(instruction) = iter.next() {
+    for instruction in iter.by_ref() {
         match instruction {
             Ok(instruction) => output.push(instruction),
             Err(err) => error = Some(err),
