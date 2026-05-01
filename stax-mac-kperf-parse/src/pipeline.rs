@@ -476,12 +476,9 @@ fn scan_thread_names<S: SampleSink>(pid: u32, sink: &mut S, cache: &mut ThreadNa
 }
 
 /// Resolve names for the kernel `thread_id`s the parser has
-/// actually observed in the kperf stream. `PROC_PIDLISTTHREADS`
-/// returns Mach thread-handles, which are *not* the same as
-/// kperf's tids — feeding those handles back into thread-name
-/// lookup silently no-ops every entry. Iterating the observed-
-/// tid set with the matching `thread_name_by_id` flavour is the
-/// fix.
+/// actually observed in the kperf stream. Uses
+/// `PROC_PIDTHREADID64INFO` (flavor 15) which accepts the same
+/// kernel thread IDs that kperf records carry in `arg5`.
 fn scan_thread_names_for_observed<S: SampleSink>(
     pid: u32,
     sink: &mut S,

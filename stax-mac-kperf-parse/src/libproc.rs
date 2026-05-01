@@ -237,7 +237,7 @@ const PROC_PIDTHREADINFO: c_int = 5;
 /// PERF sample) instead of a Mach thread_handle. PROC_PIDTHREADINFO
 /// silently ESRCH'd every lookup because the recorder fed it
 /// kperf's thread_id, which the kernel parses as a thread_handle.
-const PROC_PIDTHREADID64INFO: c_int = 14;
+const PROC_PIDTHREADID64INFO: c_int = 15;
 
 /// List the system-wide thread ids belonging to `pid`. The TIDs come
 /// out of the kernel as 64-bit values; downstream code in stax
