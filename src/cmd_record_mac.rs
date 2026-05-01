@@ -7,11 +7,11 @@ use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use nwind::UserFrame;
 use stax_mac_capture::{
     BinaryLoadedEvent, BinaryUnloadedEvent, JitdumpEvent, SampleEvent, SampleSink, ThreadNameEvent,
     WakeupEvent,
 };
+use stax_unwind::UserFrame;
 
 use crate::args::{self, TargetProcess};
 use crate::live_sink::{

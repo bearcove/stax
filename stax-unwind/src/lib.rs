@@ -1,13 +1,16 @@
+use std::borrow::Cow;
 use std::convert::TryInto;
+use std::ops::Range;
 use std::sync::Arc;
 
-use nwind::proc_maps::Region;
-
-use nwind::arch::{self, Architecture, Registers};
-use nwind::{
-    AddressSpace, BinaryData, DwarfRegs, IAddressSpace, LoadHint, Primitive, UnwindFailure,
-    UnwindMode, UserFrame,
+use framehop::{
+    CacheNative, ExplicitModuleSectionInfo, MayAllocateDuringUnwind, Module, UnwindRegsNative,
+    Unwinder, UnwinderNative,
 };
+use object::{Object, ObjectSection, ObjectSegment};
+
+type SectionBytes = Arc<[u8]>;
+type NativeModule = Module<SectionBytes>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CapturedImageMapping {
@@ -37,25 +40,6 @@ impl CapturedImageMapping {
             path: path.into(),
         }
     }
-
-    fn to_region(&self) -> Region {
-        Region {
-            start: self.start,
-            end: self.end,
-            is_read: self.is_read,
-            is_write: self.is_write,
-            is_executable: self.is_executable,
-            is_shared: false,
-            file_offset: self.file_offset,
-            major: 0,
-            minor: 0,
-            // AddressSpace::reload intentionally skips inode 0 mappings.
-            // major/minor 0 still keys by path, so this is only an
-            // "eligible for reload" marker for synthetic captured maps.
-            inode: 1,
-            name: self.path.clone(),
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,6 +53,35 @@ pub struct CapturedReload {
     pub mapped_regions: usize,
     pub loaded_binaries: usize,
     pub load_failures: Vec<CapturedLoadFailure>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnwindFailure {
+    MissingInstructionPointer,
+    NullInstructionPointer,
+    NoBinary,
+    NoUnwindInfo,
+    MissingCfa,
+    MissingCfaRegister,
+    CfaExpressionFailed,
+    RegisterMemoryReadFailed,
+    RegisterExpressionFailed,
+    UnsupportedRegisterRule,
+    MissingReturnAddress,
+    FramePointerUnavailable,
+    FramePointerOutsideStack,
+    FramePointerReadFailed,
+    ArmUnwindInfoMissing,
+    ArmUnwindFailed,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UnwindMode {
+    #[default]
+    Default,
+    DwarfOnly,
+    CompactOnly,
+    CompactWithDwarfRefs,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,6 +133,12 @@ impl<'a> CapturedStack<'a> {
         let bytes = self.bytes.get(offset..end)?;
         Some(u64::from_le_bytes(bytes.try_into().ok()?))
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UserFrame {
+    pub address: u64,
+    pub initial_address: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -195,21 +214,65 @@ pub struct CapturedUnwindFailure {
     pub bridge_steps: usize,
 }
 
-pub struct CapturedStackUnwinder<A: Architecture = arch::native::Arch> {
-    address_space: AddressSpace<A>,
+#[derive(Clone, Copy, Debug)]
+struct ModuleSupport {
+    start: u64,
+    end: u64,
+    has_unwind_info: bool,
+}
+
+struct FramehopLane {
+    unwinder: UnwinderNative<SectionBytes, MayAllocateDuringUnwind>,
+    cache: CacheNative<MayAllocateDuringUnwind>,
+    modules: Vec<ModuleSupport>,
+}
+
+impl Default for FramehopLane {
+    fn default() -> Self {
+        Self {
+            unwinder: UnwinderNative::new(),
+            cache: CacheNative::new(),
+            modules: Vec::new(),
+        }
+    }
+}
+
+impl FramehopLane {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn add_module(&mut self, module: NativeModule, support: ModuleSupport) {
+        self.unwinder.add_module(module);
+        self.modules.push(support);
+    }
+
+    fn hint_for(&self, address: u64) -> Option<UnwindFailure> {
+        let module = self
+            .modules
+            .iter()
+            .find(|module| module.start <= address && address < module.end)?;
+        if module.has_unwind_info {
+            None
+        } else {
+            Some(UnwindFailure::NoUnwindInfo)
+        }
+    }
+}
+
+pub struct CapturedStackUnwinder {
+    compact_lane: FramehopLane,
+    rich_lane: FramehopLane,
     mappings: Vec<CapturedImageMapping>,
     dirty: bool,
     last_reload: CapturedReload,
 }
 
-impl<A> CapturedStackUnwinder<A>
-where
-    A: Architecture,
-    A::RegTy: Primitive,
-{
+impl CapturedStackUnwinder {
     pub fn new() -> Self {
         Self {
-            address_space: AddressSpace::new(),
+            compact_lane: FramehopLane::new(),
+            rich_lane: FramehopLane::new(),
             mappings: Vec::new(),
             dirty: false,
             last_reload: CapturedReload::default(),
@@ -245,36 +308,49 @@ where
             return &self.last_reload;
         }
 
-        let regions: Vec<_> = self
+        let mut compact_lane = FramehopLane::new();
+        let mut rich_lane = FramehopLane::new();
+        let mut mapped_regions = 0usize;
+        let mut loaded_binaries = 0usize;
+        let mut load_failures = Vec::new();
+
+        for mapping in self
             .mappings
             .iter()
             .filter(|mapping| mapping.start < mapping.end && !mapping.path.is_empty())
-            .map(CapturedImageMapping::to_region)
-            .collect();
-        let mut loaded_binaries = 0;
-        let mut load_failures = Vec::new();
-        let reloaded =
-            self.address_space.reload(
-                regions,
-                &mut |region, handle| match BinaryData::load_from_fs(&region.name) {
-                    Ok(binary) => {
-                        loaded_binaries += 1;
-                        handle.set_binary(Arc::new(binary));
-                        handle.should_load_symbols(false);
-                        handle.should_load_frame_descriptions(true);
-                        handle.should_use_eh_frame_hdr(true);
-                        handle.should_load_eh_frame(LoadHint::WhenNecessary);
-                        handle.should_load_debug_frame(true);
-                    }
-                    Err(error) => load_failures.push(CapturedLoadFailure {
-                        path: region.name.clone(),
-                        error: error.to_string(),
-                    }),
-                },
-            );
+        {
+            mapped_regions += 1;
 
+            let bytes = match std::fs::read(&mapping.path) {
+                Ok(bytes) => {
+                    loaded_binaries += 1;
+                    Arc::new(bytes)
+                }
+                Err(error) => {
+                    load_failures.push(CapturedLoadFailure {
+                        path: mapping.path.clone(),
+                        error: error.to_string(),
+                    });
+                    continue;
+                }
+            };
+
+            match build_modules(mapping, bytes) {
+                Ok(loaded) => {
+                    compact_lane.add_module(loaded.compact_module, loaded.compact_support);
+                    rich_lane.add_module(loaded.rich_module, loaded.rich_support);
+                }
+                Err(error) => load_failures.push(CapturedLoadFailure {
+                    path: mapping.path.clone(),
+                    error,
+                }),
+            }
+        }
+
+        self.compact_lane = compact_lane;
+        self.rich_lane = rich_lane;
         self.last_reload = CapturedReload {
-            mapped_regions: reloaded.regions_mapped.len(),
+            mapped_regions,
             loaded_binaries,
             load_failures,
         };
@@ -282,85 +358,6 @@ where
         &self.last_reload
     }
 
-    pub fn unwind_into(
-        &mut self,
-        regs: &mut DwarfRegs,
-        stack: &[u8],
-        output: &mut Vec<UserFrame>,
-    ) -> Result<(), CapturedUnwindError> {
-        self.unwind_into_with_mode(regs, stack, output, UnwindMode::Default)
-    }
-
-    pub fn unwind_into_at(
-        &mut self,
-        regs: &mut DwarfRegs,
-        stack_base: u64,
-        stack: &[u8],
-        output: &mut Vec<UserFrame>,
-    ) -> Result<(), CapturedUnwindError> {
-        self.unwind_into_with_mode_at(regs, stack_base, stack, output, UnwindMode::Default)
-    }
-
-    pub fn unwind_into_with_mode(
-        &mut self,
-        regs: &mut DwarfRegs,
-        stack: &[u8],
-        output: &mut Vec<UserFrame>,
-        mode: UnwindMode,
-    ) -> Result<(), CapturedUnwindError> {
-        let stack_base = match regs.get(A::STACK_POINTER_REG) {
-            Some(address) => address,
-            None => {
-                output.clear();
-                return Err(CapturedUnwindError::MissingStackPointer);
-            }
-        };
-        self.unwind_into_with_mode_at(regs, stack_base, stack, output, mode)
-    }
-
-    pub fn unwind_into_with_mode_at(
-        &mut self,
-        regs: &mut DwarfRegs,
-        stack_base: u64,
-        stack: &[u8],
-        output: &mut Vec<UserFrame>,
-        mode: UnwindMode,
-    ) -> Result<(), CapturedUnwindError> {
-        if self.mappings.is_empty() {
-            output.clear();
-            return Err(CapturedUnwindError::NoMappings);
-        }
-        if stack.is_empty() {
-            output.clear();
-            return Err(CapturedUnwindError::EmptyStack);
-        }
-        if !regs.contains(A::STACK_POINTER_REG) {
-            output.clear();
-            return Err(CapturedUnwindError::MissingStackPointer);
-        }
-        if !regs.contains(A::INSTRUCTION_POINTER_REG) {
-            output.clear();
-            return Err(CapturedUnwindError::MissingInstructionPointer);
-        }
-
-        let reload = self.reload_if_dirty();
-        if reload.mapped_regions == 0 {
-            output.clear();
-            return Err(CapturedUnwindError::NoMappedRegions);
-        }
-
-        self.address_space
-            .unwind_with_mode_and_stack_base(regs, stack_base, &stack, output, mode);
-        if output.len() <= 1 {
-            return Err(CapturedUnwindError::OnlyLeafFrame {
-                reason: self.address_space.last_unwind_failure(),
-            });
-        }
-        Ok(())
-    }
-}
-
-impl CapturedStackUnwinder<arch::native::Arch> {
     pub fn unwind_callers(
         &mut self,
         state: CapturedThreadState,
@@ -445,8 +442,76 @@ impl CapturedStackUnwinder<arch::native::Arch> {
         mode: UnwindMode,
         max_frames: usize,
     ) -> Result<Vec<u64>, CapturedUnwindError> {
-        let mut regs = dwarf_regs_from_state(state);
-        self.unwind_into_with_mode_at(&mut regs, stack.base, stack.bytes, scratch, mode)?;
+        if self.mappings.is_empty() {
+            scratch.clear();
+            return Err(CapturedUnwindError::NoMappings);
+        }
+        if stack.bytes.is_empty() {
+            scratch.clear();
+            return Err(CapturedUnwindError::EmptyStack);
+        }
+        if state.sp == 0 {
+            scratch.clear();
+            return Err(CapturedUnwindError::MissingStackPointer);
+        }
+        if state.pc == 0 {
+            scratch.clear();
+            return Err(CapturedUnwindError::MissingInstructionPointer);
+        }
+
+        let reload = self.reload_if_dirty();
+        if reload.mapped_regions == 0 {
+            scratch.clear();
+            return Err(CapturedUnwindError::NoMappedRegions);
+        }
+
+        let lane = match mode {
+            UnwindMode::CompactOnly => &mut self.compact_lane,
+            UnwindMode::CompactWithDwarfRefs | UnwindMode::Default | UnwindMode::DwarfOnly => {
+                &mut self.rich_lane
+            }
+        };
+
+        let lane_hint = lane.hint_for(state.pc).or_else(|| {
+            if self
+                .mappings
+                .iter()
+                .any(|mapping| mapping.start <= state.pc && state.pc < mapping.end)
+            {
+                None
+            } else {
+                Some(UnwindFailure::NoBinary)
+            }
+        });
+
+        scratch.clear();
+        let mut read_stack = |address| stack.read_u64(strip_data_pointer(address)).ok_or(());
+        let regs = native_unwind_regs(state);
+        let mut iter = lane
+            .unwinder
+            .iter_frames(state.pc, regs, &mut lane.cache, &mut read_stack);
+        let mut terminal_reason = None;
+
+        loop {
+            match iter.next() {
+                Ok(Some(frame)) => scratch.push(UserFrame {
+                    address: strip_code_pointer(frame.address()),
+                    initial_address: None,
+                }),
+                Ok(None) => break,
+                Err(error) => {
+                    terminal_reason = Some(map_framehop_error(error, lane_hint));
+                    break;
+                }
+            }
+        }
+
+        if scratch.len() <= 1 {
+            return Err(CapturedUnwindError::OnlyLeafFrame {
+                reason: terminal_reason.or(lane_hint),
+            });
+        }
+
         let mut callers = Vec::with_capacity(scratch.len().saturating_sub(1).min(max_frames));
         for frame in scratch.iter().skip(1).take(max_frames) {
             let pc = strip_code_pointer(frame.address);
@@ -461,14 +526,180 @@ impl CapturedStackUnwinder<arch::native::Arch> {
     }
 }
 
-impl<A> Default for CapturedStackUnwinder<A>
-where
-    A: Architecture,
-    A::RegTy: Primitive,
-{
+impl Default for CapturedStackUnwinder {
     fn default() -> Self {
         Self::new()
     }
+}
+
+struct LoadedModule {
+    compact_module: NativeModule,
+    rich_module: NativeModule,
+    compact_support: ModuleSupport,
+    rich_support: ModuleSupport,
+}
+
+fn build_modules(mapping: &CapturedImageMapping, bytes: Arc<Vec<u8>>) -> Result<LoadedModule, String> {
+    let file = object::File::parse(bytes.as_slice()).map_err(|error| error.to_string())?;
+    let text_svma = section_range(&file, ".text");
+    let text = section_data(&file, ".text");
+    let stubs_svma = section_range(&file, ".stubs");
+    let stub_helper_svma = section_range(&file, ".stub_helper");
+    let got_svma = section_range(&file, ".got");
+    let unwind_info = section_data(&file, "__unwind_info");
+    let eh_frame_svma = section_range(&file, ".eh_frame");
+    let eh_frame = section_data(&file, ".eh_frame");
+    let eh_frame_hdr_svma = section_range(&file, ".eh_frame_hdr");
+    let eh_frame_hdr = section_data(&file, ".eh_frame_hdr");
+    let debug_frame = section_data(&file, ".debug_frame");
+    let text_segment_svma = segment_range(&file, "__TEXT");
+    let text_segment = segment_data(&file, "__TEXT");
+
+    let base_svma = base_svma_for(&file, text_segment_svma.as_ref(), text_svma.as_ref());
+    let text_start_svma = text_svma
+        .as_ref()
+        .map(|range| range.start)
+        .unwrap_or(base_svma);
+    let base_avma = mapping
+        .start
+        .saturating_sub(text_start_svma.saturating_sub(base_svma));
+    let avma_range = mapping.start..mapping.end;
+
+    let compact_has_unwind = unwind_info.is_some();
+    let rich_has_unwind =
+        compact_has_unwind || eh_frame.is_some() || eh_frame_hdr.is_some() || debug_frame.is_some();
+
+    let compact_module = Module::new(
+        mapping.path.clone(),
+        avma_range.clone(),
+        base_avma,
+        ExplicitModuleSectionInfo {
+            base_svma,
+            text_svma: text_svma.clone(),
+            text: text.clone(),
+            stubs_svma: stubs_svma.clone(),
+            stub_helper_svma: stub_helper_svma.clone(),
+            got_svma: got_svma.clone(),
+            unwind_info: unwind_info.clone(),
+            text_segment_svma: text_segment_svma.clone(),
+            text_segment: text_segment.clone(),
+            ..Default::default()
+        },
+    );
+    let rich_module = Module::new(
+        mapping.path.clone(),
+        avma_range.clone(),
+        base_avma,
+        ExplicitModuleSectionInfo {
+            base_svma,
+            text_svma,
+            text,
+            stubs_svma,
+            stub_helper_svma,
+            got_svma,
+            unwind_info,
+            eh_frame_svma,
+            eh_frame,
+            eh_frame_hdr_svma,
+            eh_frame_hdr,
+            debug_frame,
+            text_segment_svma,
+            text_segment,
+            ..Default::default()
+        },
+    );
+
+    Ok(LoadedModule {
+        compact_module,
+        rich_module,
+        compact_support: ModuleSupport {
+            start: avma_range.start,
+            end: avma_range.end,
+            has_unwind_info: compact_has_unwind,
+        },
+        rich_support: ModuleSupport {
+            start: avma_range.start,
+            end: avma_range.end,
+            has_unwind_info: rich_has_unwind,
+        },
+    })
+}
+
+fn section_range(file: &object::File<'_>, name: &str) -> Option<Range<u64>> {
+    let section = file.section_by_name(name)?;
+    let start = section.address();
+    let end = start.checked_add(section.size())?;
+    Some(start..end)
+}
+
+fn section_data(file: &object::File<'_>, name: &str) -> Option<SectionBytes> {
+    let section = file.section_by_name(name)?;
+    let data = section.uncompressed_data().ok()?;
+    Some(cow_into_arc(data))
+}
+
+fn segment_range(file: &object::File<'_>, name: &str) -> Option<Range<u64>> {
+    let segment = file
+        .segments()
+        .find(|segment| segment.name().ok().flatten() == Some(name))?;
+    let start = segment.address();
+    let end = start.checked_add(segment.size())?;
+    Some(start..end)
+}
+
+fn segment_data(file: &object::File<'_>, name: &str) -> Option<SectionBytes> {
+    let segment = file
+        .segments()
+        .find(|segment| segment.name().ok().flatten() == Some(name))?;
+    let data = segment.data().ok()?;
+    Some(Arc::<[u8]>::from(data))
+}
+
+fn cow_into_arc(data: Cow<'_, [u8]>) -> SectionBytes {
+    match data {
+        Cow::Borrowed(bytes) => Arc::<[u8]>::from(bytes),
+        Cow::Owned(bytes) => Arc::<[u8]>::from(bytes),
+    }
+}
+
+fn base_svma_for(
+    file: &object::File<'_>,
+    text_segment_svma: Option<&Range<u64>>,
+    text_svma: Option<&Range<u64>>,
+) -> u64 {
+    match file.format() {
+        object::BinaryFormat::MachO => text_segment_svma
+            .map(|range| range.start)
+            .or_else(|| text_svma.map(|range| range.start))
+            .unwrap_or(0),
+        object::BinaryFormat::Pe => file.relative_address_base(),
+        _ => 0,
+    }
+}
+
+fn map_framehop_error(error: framehop::Error, hint: Option<UnwindFailure>) -> UnwindFailure {
+    if let Some(hint) = hint {
+        return hint;
+    }
+    match error {
+        framehop::Error::CouldNotReadStack(_) => UnwindFailure::RegisterMemoryReadFailed,
+        framehop::Error::FramepointerUnwindingMovedBackwards => {
+            UnwindFailure::FramePointerOutsideStack
+        }
+        framehop::Error::DidNotAdvance => UnwindFailure::MissingReturnAddress,
+        framehop::Error::IntegerOverflow => UnwindFailure::UnsupportedRegisterRule,
+        framehop::Error::ReturnAddressIsNull => UnwindFailure::MissingReturnAddress,
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+fn native_unwind_regs(state: CapturedThreadState) -> UnwindRegsNative {
+    UnwindRegsNative::new(state.lr, state.sp, state.fp)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn native_unwind_regs(state: CapturedThreadState) -> UnwindRegsNative {
+    UnwindRegsNative::new(state.pc, state.sp, state.fp)
 }
 
 pub fn captured_frame_pointer_walk(
@@ -520,31 +751,6 @@ fn fp_bridge_step(stack: CapturedStack<'_>, fp: u64, sp: u64) -> Option<Captured
         fp: next_fp,
         sp: caller_sp,
     })
-}
-
-fn dwarf_regs_from_state(state: CapturedThreadState) -> DwarfRegs {
-    let mut regs = DwarfRegs::new();
-    append_native_dwarf_regs(&mut regs, state);
-    regs
-}
-
-#[cfg(target_arch = "aarch64")]
-fn append_native_dwarf_regs(regs: &mut DwarfRegs, state: CapturedThreadState) {
-    use nwind::arch::aarch64::dwarf;
-
-    regs.append(dwarf::PC, strip_code_pointer(state.pc));
-    regs.append(dwarf::X30, strip_code_pointer(state.lr));
-    regs.append(dwarf::X29, strip_data_pointer(state.fp));
-    regs.append(dwarf::X31, strip_data_pointer(state.sp));
-}
-
-#[cfg(target_arch = "x86_64")]
-fn append_native_dwarf_regs(regs: &mut DwarfRegs, state: CapturedThreadState) {
-    use nwind::arch::amd64::dwarf;
-
-    regs.append(dwarf::RETURN_ADDRESS, strip_code_pointer(state.pc));
-    regs.append(dwarf::RBP, strip_data_pointer(state.fp));
-    regs.append(dwarf::RSP, strip_data_pointer(state.sp));
 }
 
 #[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
@@ -621,7 +827,7 @@ mod tests {
         );
     }
 
-    fn write_u64(buf: &mut [u8], offset: usize, value: u64) {
-        buf[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    fn write_u64(stack: &mut [u8], offset: usize, value: u64) {
+        stack[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
     }
 }

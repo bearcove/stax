@@ -30,5 +30,4 @@ stax-target-images = { path = "../stax-target-images" }
 stax-vox-observe = { path = "../stax-vox-observe" }
 staxd-client = { path = "../staxd-client" }
 stax-unwind = { path = "../stax-unwind" }
-nwind = { path = "../nwind", default-features = false, features = ["log"] }
 vox = { path = "/Users/amos/bearcove/vox/rust/vox" }

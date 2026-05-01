@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use nwind::UserFrame;
+use stax_unwind::UserFrame;
 
 #[cfg(target_os = "macos")]
 pub use stax_mac_capture::MachOByteSource;
