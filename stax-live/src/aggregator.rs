@@ -563,6 +563,12 @@ impl Aggregator {
             };
             let enriched_stacks = build_enriched_stack_map(stats);
 
+            // Two-pointer state: both streams are time-ordered.
+            // `sample_cursor` advances monotonically across intervals
+            // so each PET sample is visited at most once per thread.
+            let mut sample_cursor: usize = 0;
+            let samples = &stats.pet_samples;
+
             for interval in &stats.intervals {
                 let start = interval.start_ns;
                 let end = if interval.end_ns == 0 {
@@ -580,30 +586,36 @@ impl Aggregator {
 
                 match &interval.kind {
                     IntervalKind::OnCpu => {
-                        // Find PET samples for this thread whose
-                        // timestamp falls inside [start, end). pet_samples
-                        // are appended in order so this is monotone.
-                        let samples: Vec<&PetSample> = stats
-                            .pet_samples
-                            .iter()
-                            .filter(|s| s.timestamp_ns >= start && s.timestamp_ns < end)
-                            .filter(|s| {
-                                predicate(EventCtx::PetSample {
-                                    tid,
-                                    sample: s,
-                                    binaries,
-                                })
-                            })
-                            .collect();
-                        if samples.is_empty() {
+                        // Advance cursor past samples that end before
+                        // this interval starts.
+                        while sample_cursor < samples.len()
+                            && samples[sample_cursor].timestamp_ns < start
+                        {
+                            sample_cursor += 1;
+                        }
+                        // Collect samples that fall inside [start, end).
+                        let mut matching: Vec<&PetSample> = Vec::new();
+                        let mut idx = sample_cursor;
+                        while idx < samples.len() && samples[idx].timestamp_ns < end {
+                            let s = &samples[idx];
+                            if predicate(EventCtx::PetSample {
+                                tid,
+                                sample: s,
+                                binaries,
+                            }) {
+                                matching.push(s);
+                            }
+                            idx += 1;
+                        }
+                        if matching.is_empty() {
                             continue;
                         }
-                        let credit_ns = duration / samples.len() as u64;
+                        let credit_ns = duration / matching.len() as u64;
                         if credit_ns == 0 {
                             continue;
                         }
                         total_on_cpu_ns = total_on_cpu_ns.saturating_add(duration);
-                        for s in samples {
+                        for s in matching {
                             let stack = enriched_stacks
                                 .get(&s.timestamp_ns)
                                 .map(Vec::as_slice)
