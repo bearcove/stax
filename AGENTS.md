@@ -366,7 +366,7 @@ directly. All three live in `stax-live-proto`:
 Connect with:
 
 - `local://$XDG_RUNTIME_DIR/stax-server.sock` or `/tmp/stax-server-$UID.sock`,
-  for trusted local agents and the stax macOS app
+  for trusted local agents
 - `ws://127.0.0.1:8080`, for browser clients (TS bindings live in
   `frontend/src/generated/`)
 
