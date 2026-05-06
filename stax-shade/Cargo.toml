@@ -26,8 +26,6 @@ stax-shade-proto = { path = "../stax-shade-proto" }
 stax-core = { path = "..", default-features = false }
 stax-mac-capture = { path = "../stax-mac-capture" }
 stax-live-proto = { path = "../stax-live-proto" }
-stax-target-images = { path = "../stax-target-images" }
 stax-vox-observe = { path = "../stax-vox-observe" }
 staxd-client = { path = "../staxd-client" }
-stax-unwind = { path = "../stax-unwind" }
 vox = { path = "/Users/amos/bearcove/vox/rust/vox" }

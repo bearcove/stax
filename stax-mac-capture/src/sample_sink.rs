@@ -54,69 +54,6 @@ pub trait SampleSink {
     /// archive-only sinks ignore it.
     #[allow(unused_variables)]
     fn on_macho_byte_source(&mut self, source: std::sync::Arc<dyn MachOByteSource>) {}
-
-    /// One race-against-return probe result. The recorder produces
-    /// these in the staxd-driven path: the attachment helper suspends
-    /// a thread near a kperf observation, captures its user stack, and
-    /// ships the unwound result alongside the kperf records. Triggered
-    /// probes use `timing.kperf_ts` as the exact kperf timestamp;
-    /// correlation probes use it as the probe's own capture key and
-    /// are paired by nearest timestamp. Default no-op so archive-only
-    /// sinks ignore.
-    #[allow(unused_variables)]
-    fn on_probe_result(&mut self, ev: ProbeResultEvent<'_>) {}
-}
-
-/// Race/correlation probe output. For triggered probes,
-/// `ProbeTiming::kperf_ts` matches the corresponding `SampleEvent`.
-/// For correlation probes, it is the independent probe request time.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ProbeTiming {
-    pub kperf_ts: u64,
-    /// mach_absolute_time immediately before staxd called KERN_KDREADTR.
-    pub staxd_read_started: u64,
-    /// mach_absolute_time immediately after staxd's KERN_KDREADTR returned.
-    pub staxd_drained: u64,
-    /// mach_absolute_time immediately before staxd put the batch on its
-    /// local send queue. Equal to `staxd_drained` for in-process captures.
-    pub staxd_queued_for_send: u64,
-    /// mach_absolute_time immediately before staxd handed the batch to vox.
-    pub staxd_send_started: u64,
-    /// mach_absolute_time immediately after the client received the batch.
-    pub client_received: u64,
-    /// mach_absolute_time when the client enqueued this race probe.
-    pub enqueued: u64,
-    /// mach_absolute_time when a probe worker started this request.
-    pub worker_started: u64,
-    /// mach_absolute_time after thread-port lookup/cache refresh.
-    pub thread_lookup_done: u64,
-    /// mach_absolute_time after thread_get_state completed.
-    pub state_done: u64,
-    /// mach_absolute_time after thread_resume returned.
-    pub resume_done: u64,
-    /// mach_absolute_time after the remote FP walk completed.
-    pub walk_done: u64,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ProbeQueueStats {
-    pub coalesced_requests: u64,
-    pub worker_batch_len: u32,
-}
-
-pub struct ProbeResultEvent<'a> {
-    pub tid: u32,
-    pub timing: ProbeTiming,
-    pub queue: ProbeQueueStats,
-    pub mach_pc: u64,
-    pub mach_lr: u64,
-    pub mach_fp: u64,
-    pub mach_sp: u64,
-    pub mach_walked: &'a [u64],
-    pub compact_walked: &'a [u64],
-    pub compact_dwarf_walked: &'a [u64],
-    pub dwarf_walked: &'a [u64],
-    pub used_framehop: bool,
 }
 
 /// One PET stack-walk hit: a snapshot of where a thread was at one

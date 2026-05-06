@@ -90,13 +90,12 @@ impl LiveSink for IngestSink {
     }
 
     async fn on_sample(&self, ev: &SampleEvent) {
-        let user_backtrace = ev.user_backtrace.iter().map(|f| f.address).collect();
         self.enqueue_event(IngestEvent::Sample(WireSampleEvent {
             timestamp_ns: ev.timestamp,
             pid: ev.pid,
             tid: ev.tid,
             kernel_backtrace: ev.kernel_backtrace.to_vec(),
-            user_backtrace,
+            user_backtrace: ev.user_backtrace.to_vec(),
             cycles: ev.cycles,
             instructions: ev.instructions,
             l1d_misses: ev.l1d_misses,
@@ -158,23 +157,6 @@ impl LiveSink for IngestSink {
         }));
     }
 
-    async fn on_probe_result<'a>(&self, ev: &crate::live_sink::ProbeResultEvent<'a>) {
-        self.enqueue_event(IngestEvent::ProbeResult(stax_live_proto::WireProbeResult {
-            tid: ev.tid,
-            timing: ev.timing.into(),
-            queue: ev.queue.into(),
-            mach_pc: ev.mach_pc,
-            mach_lr: ev.mach_lr,
-            mach_fp: ev.mach_fp,
-            mach_sp: ev.mach_sp,
-            mach_walked: ev.mach_walked.to_vec(),
-            compact_walked: ev.compact_walked.to_vec(),
-            compact_dwarf_walked: ev.compact_dwarf_walked.to_vec(),
-            dwarf_walked: ev.dwarf_walked.to_vec(),
-            used_framehop: ev.used_framehop,
-        }));
-    }
-
     async fn on_cpu_interval(&self, ev: &CpuIntervalEvent) {
         match &ev.kind {
             CpuIntervalKind::OnCpu => {
@@ -193,7 +175,7 @@ impl LiveSink for IngestSink {
                     tid: ev.tid,
                     start_ns: ev.start_ns,
                     end_ns: ev.end_ns,
-                    stack: stack.iter().map(|f| f.address).collect(),
+                    stack: stack.to_vec(),
                     waker_tid: *waker_tid,
                     waker_user_stack: waker_user_stack.map(|s| s.to_vec()),
                 }));
@@ -207,34 +189,6 @@ impl LiveSink for IngestSink {
         // Arc<dyn Trait>; the server will open it itself by path
         // (follow-up). For now, drop silently.
         let _ = _source;
-    }
-}
-
-impl From<crate::live_sink::ProbeTiming> for stax_live_proto::ProbeTiming {
-    fn from(t: crate::live_sink::ProbeTiming) -> Self {
-        Self {
-            kperf_ts: t.kperf_ts,
-            staxd_read_started: t.staxd_read_started,
-            staxd_drained: t.staxd_drained,
-            staxd_queued_for_send: t.staxd_queued_for_send,
-            staxd_send_started: t.staxd_send_started,
-            client_received: t.client_received,
-            enqueued: t.enqueued,
-            worker_started: t.worker_started,
-            thread_lookup_done: t.thread_lookup_done,
-            state_done: t.state_done,
-            resume_done: t.resume_done,
-            walk_done: t.walk_done,
-        }
-    }
-}
-
-impl From<crate::live_sink::ProbeQueueStats> for stax_live_proto::ProbeQueueStats {
-    fn from(q: crate::live_sink::ProbeQueueStats) -> Self {
-        Self {
-            coalesced_requests: q.coalesced_requests,
-            worker_batch_len: q.worker_batch_len,
-        }
     }
 }
 
@@ -552,7 +506,6 @@ async fn forward_events(
 fn ingest_event_kind(event: &IngestEvent) -> &'static str {
     match event {
         IngestEvent::Sample(_) => "sample",
-        IngestEvent::ProbeResult(_) => "probe_result",
         IngestEvent::OnCpuInterval(_) => "on_cpu",
         IngestEvent::OffCpuInterval(_) => "off_cpu",
         IngestEvent::BinaryLoaded(_) => "binary_loaded",
@@ -576,7 +529,6 @@ enum ReliableIngestMsg {
 #[derive(Default)]
 struct ForwardCounts {
     samples: u64,
-    probe_results: u64,
     on_cpu: u64,
     off_cpu: u64,
     binaries_loaded: u64,
@@ -589,7 +541,6 @@ struct ForwardCounts {
 impl ForwardCounts {
     fn merge(&mut self, other: &Self) {
         self.samples += other.samples;
-        self.probe_results += other.probe_results;
         self.on_cpu += other.on_cpu;
         self.off_cpu += other.off_cpu;
         self.binaries_loaded += other.binaries_loaded;
@@ -602,7 +553,6 @@ impl ForwardCounts {
     fn record(&mut self, event: &IngestEvent) {
         match event {
             IngestEvent::Sample(_) => self.samples += 1,
-            IngestEvent::ProbeResult(_) => self.probe_results += 1,
             IngestEvent::OnCpuInterval(_) => self.on_cpu += 1,
             IngestEvent::OffCpuInterval(_) => self.off_cpu += 1,
             IngestEvent::BinaryLoaded(_) => self.binaries_loaded += 1,
@@ -615,9 +565,8 @@ impl ForwardCounts {
 
     fn summary(&self) -> String {
         format!(
-            "samples={} probes={} on_cpu={} off_cpu={} bin_load={} bin_unload={} target={} threads={} wakeups={}",
+            "samples={} on_cpu={} off_cpu={} bin_load={} bin_unload={} target={} threads={} wakeups={}",
             self.samples,
-            self.probe_results,
             self.on_cpu,
             self.off_cpu,
             self.binaries_loaded,

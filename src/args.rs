@@ -61,11 +61,6 @@ pub enum Command {
 
     /// Per-thread on/off-CPU breakdown for the active run.
     Threads(ThreadsArgs),
-
-    /// One snapshot of the kperf-vs-probe diff: pairs each PET
-    /// sample with the matching correlated probe result and prints
-    /// focused richer stitched-stack examples.
-    ProbeDiff(ProbeDiffArgs),
 }
 
 #[derive(Facet, Debug)]
@@ -116,23 +111,6 @@ pub struct ThreadsArgs {
 }
 
 #[derive(Facet, Debug)]
-pub struct ProbeDiffArgs {
-    /// Restrict to a single thread. Default: all threads.
-    #[facet(args::named, default)]
-    pub tid: Option<u32>,
-
-    /// How many "recent paired entries" to print at the end.
-    /// 0 prints just the histograms.
-    #[facet(args::named, args::short = 'n', default = 8)]
-    pub recent: u32,
-
-    /// Include comparator stacks/histograms used while debugging
-    /// unwind policy.
-    #[facet(args::named, default)]
-    pub verbose: bool,
-}
-
-#[derive(Facet, Debug)]
 pub struct FlameArgs {
     /// Maximum tree depth to print. The flamegraph the server
     /// returns is unbounded; this just controls how deep the CLI
@@ -177,17 +155,6 @@ pub struct RecordArgs {
     /// (Ctrl-C to stop).
     #[facet(args::named, args::short = 'l', default)]
     pub time_limit: Option<u64>,
-
-    /// Evaluation mode: independently sample shade-side user stacks
-    /// at `--correlate-frequency` (or PET frequency by default),
-    /// then correlate with nearest kperf samples by `(tid, timestamp)`.
-    #[facet(args::named, default)]
-    pub correlate_kperf: bool,
-
-    /// Total process-wide shade-side probe frequency for
-    /// `--correlate-kperf`. Defaults to `--frequency`.
-    #[facet(args::named, default)]
-    pub correlate_frequency: Option<u32>,
 
     /// Profile an existing process by PID instead of launching one.
     #[facet(args::named, args::short = 'p', default)]

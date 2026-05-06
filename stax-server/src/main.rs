@@ -453,8 +453,6 @@ impl ServerState {
         run_id: RunId,
         target: ShadeTarget,
         frequency_hz: u32,
-        correlate_frequency_hz: u32,
-        correlate_kperf: bool,
         daemon_socket: String,
         time_limit_secs: Option<u64>,
     ) -> Result<(), String> {
@@ -511,13 +509,6 @@ impl ServerState {
             .arg(daemon_socket)
             .arg("--frequency")
             .arg(frequency_hz.to_string());
-        if correlate_kperf {
-            cmd.arg("--correlate-frequency")
-                .arg(correlate_frequency_hz.to_string());
-        }
-        if correlate_kperf {
-            cmd.arg("--correlate-kperf");
-        }
         if let Some(limit) = time_limit_secs {
             cmd.arg("--time-limit").arg(limit.to_string());
         }
@@ -741,10 +732,9 @@ impl ServerState {
         self.attach_local_shared_cache();
 
         tracing::info!(
-            "stax-server: run {} started (frequency_hz={} correlate_frequency_hz={})",
+            "stax-server: run {} started (frequency_hz={})",
             id.0,
             config.frequency_hz,
-            config.correlate_frequency_hz
         );
         tracing::info!(
             run_id = id.0,
@@ -970,7 +960,6 @@ impl ServerState {
 #[derive(Default)]
 struct IngestDrainCounts {
     samples: u64,
-    probe_results: u64,
     on_cpu: u64,
     off_cpu: u64,
     binaries_loaded: u64,
@@ -984,7 +973,6 @@ impl IngestDrainCounts {
     fn record(&mut self, event: &IngestEvent) {
         match event {
             IngestEvent::Sample(_) => self.samples += 1,
-            IngestEvent::ProbeResult(_) => self.probe_results += 1,
             IngestEvent::OnCpuInterval(_) => self.on_cpu += 1,
             IngestEvent::OffCpuInterval(_) => self.off_cpu += 1,
             IngestEvent::BinaryLoaded(_) => self.binaries_loaded += 1,
@@ -997,9 +985,8 @@ impl IngestDrainCounts {
 
     fn summary(&self) -> String {
         format!(
-            "samples={} probes={} on_cpu={} off_cpu={} bin_load={} bin_unload={} target={} threads={} wakeups={}",
+            "samples={} on_cpu={} off_cpu={} bin_load={} bin_unload={} target={} threads={} wakeups={}",
             self.samples,
-            self.probe_results,
             self.on_cpu,
             self.off_cpu,
             self.binaries_loaded,
@@ -1014,7 +1001,6 @@ impl IngestDrainCounts {
 fn ingest_event_kind(event: &IngestEvent) -> &'static str {
     match event {
         IngestEvent::Sample(_) => "sample",
-        IngestEvent::ProbeResult(_) => "probe_result",
         IngestEvent::OnCpuInterval(_) => "on_cpu",
         IngestEvent::OffCpuInterval(_) => "off_cpu",
         IngestEvent::BinaryLoaded(_) => "binary_loaded",
@@ -1175,15 +1161,11 @@ impl RunControl for ServerState {
         time_limit_secs: Option<u64>,
     ) -> Result<RunId, RunControlError> {
         let frequency_hz = config.frequency_hz;
-        let correlate_frequency_hz = config.correlate_frequency_hz;
-        let correlate_kperf = config.correlate_kperf;
         let (run_id, _) = self.begin_run(config)?;
         if let Err(e) = self.spawn_shade(
             run_id,
             ShadeTarget::Attach(pid),
             frequency_hz,
-            correlate_frequency_hz,
-            correlate_kperf,
             daemon_socket,
             time_limit_secs,
         ) {
@@ -1205,8 +1187,6 @@ impl RunControl for ServerState {
             });
         }
         let frequency_hz = request.config.frequency_hz;
-        let correlate_frequency_hz = request.config.correlate_frequency_hz;
-        let correlate_kperf = request.config.correlate_kperf;
         let daemon_socket = request.daemon_socket.clone();
         let time_limit_secs = request.time_limit_secs;
         let (run_id, _) = self.begin_run(request.config.clone())?;
@@ -1221,8 +1201,6 @@ impl RunControl for ServerState {
             run_id,
             ShadeTarget::Launch(request),
             frequency_hz,
-            correlate_frequency_hz,
-            correlate_kperf,
             daemon_socket,
             time_limit_secs,
         ) {
@@ -1602,25 +1580,6 @@ impl ServerState {
                 if let Err(e) = self.apply_target_attached(run_id, pid, task_port) {
                     tracing::warn!("channel TargetAttached ignored: {e}");
                 }
-            }
-            IngestEvent::ProbeResult(p) => {
-                self.aggregator
-                    .write()
-                    .record_probe_result(stax_live::ProbeResultRecord {
-                        tid: p.tid,
-                        timing: p.timing.into(),
-                        queue: p.queue.into(),
-                        mach_pc: p.mach_pc,
-                        mach_lr: p.mach_lr,
-                        mach_fp: p.mach_fp,
-                        mach_sp: p.mach_sp,
-                        mach_walked: p.mach_walked.into_boxed_slice(),
-                        compact_walked: p.compact_walked.into_boxed_slice(),
-                        compact_dwarf_walked: p.compact_dwarf_walked.into_boxed_slice(),
-                        dwarf_walked: p.dwarf_walked.into_boxed_slice(),
-                        used_framehop: p.used_framehop,
-                    });
-                self.bump_revision();
             }
         }
     }

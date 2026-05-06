@@ -24,13 +24,10 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use stax_live_proto::{OffCpuReason, STITCH_MIN_SUFFIX};
+use stax_live_proto::OffCpuReason;
 
 use crate::binaries::BinaryRegistry;
 use crate::classify::classify_offcpu;
-use crate::probe_match::{
-    PROBE_PAIR_WINDOW_NS, abs_tick_delta_ns, logical_probe_stack, longest_common_run,
-};
 
 #[derive(Clone, Copy, Default)]
 pub struct PmcAccum {
@@ -151,59 +148,6 @@ pub struct PetSample {
     pub pmc: PmuSample,
 }
 
-/// Correlation probe output. `kperf_ts` is the independent probe
-/// request timestamp and pairs by nearest PET timestamp at query time.
-pub struct ProbeResultRecord {
-    pub tid: u32,
-    pub timing: ProbeTiming,
-    pub queue: ProbeQueueStats,
-    pub mach_pc: u64,
-    pub mach_lr: u64,
-    pub mach_fp: u64,
-    pub mach_sp: u64,
-    /// Frame-pointer walked return addresses from the suspended
-    /// thread, leaf-most first; PAC-stripped; does not include the
-    /// leaf PC. This is compared against kperf for validation.
-    pub mach_walked: Box<[u64]>,
-    /// Compact-unwind-only return addresses from the same captured stack.
-    pub compact_walked: Box<[u64]>,
-    /// Compact-unwind return addresses, following compact DWARF FDE
-    /// references.
-    pub compact_dwarf_walked: Box<[u64]>,
-    /// DWARF-unwound return addresses from the same captured stack.
-    /// This is the candidate stitch stack when FP validation passes.
-    pub dwarf_walked: Box<[u64]>,
-    /// `true` if `dwarf_walked` is available for this capture.
-    pub used_framehop: bool,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ProbeTiming {
-    /// Mach-tick pairing key. For triggered probes this is the
-    /// matching kperf sample timestamp; for correlation probes this
-    /// is the independent probe request timestamp.
-    pub kperf_ts: u64,
-    pub staxd_read_started: u64,
-    pub staxd_drained: u64,
-    pub staxd_queued_for_send: u64,
-    pub staxd_send_started: u64,
-    pub client_received: u64,
-    pub enqueued: u64,
-    pub worker_started: u64,
-    pub thread_lookup_done: u64,
-    /// Mach-tick timestamp at which `thread_get_state` completed.
-    /// Drift = kperf_ts → state_done.
-    pub state_done: u64,
-    pub resume_done: u64,
-    pub walk_done: u64,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ProbeQueueStats {
-    pub coalesced_requests: u64,
-    pub worker_batch_len: u32,
-}
-
 /// One on-CPU or off-CPU interval, as reported by SCHED-record
 /// transitions. For off-CPU, the stack the thread was on at the
 /// moment it parked is included so the aggregator can attribute the
@@ -255,11 +199,6 @@ pub struct ThreadStats {
     pub(crate) pet_samples: std::collections::VecDeque<PetSample>,
     pub(crate) intervals: std::collections::VecDeque<RawInterval>,
     pub(crate) wakeups: std::collections::VecDeque<RawWakeup>,
-    /// Probe results indexed by `kperf_ts` so a UI / query can
-    /// look up "for sample at time T on tid X, what did the
-    /// suspended-thread walk show?". Bounded with the same per-
-    /// thread cap as the other queues.
-    pub(crate) probe_results: std::collections::VecDeque<ProbeResultRecord>,
 }
 
 #[derive(Clone, Copy)]
@@ -342,18 +281,6 @@ pub struct Aggregator {
 }
 
 impl Aggregator {
-    /// Record a race-against-return probe result. Pairs with the
-    /// kperf `PetSample` that has the same `(tid, kperf_ts)` —
-    /// queries can correlate at read time.
-    pub fn record_probe_result(&mut self, result: ProbeResultRecord) {
-        self.note_timestamp(result.timing.kperf_ts);
-        let stats = self.threads.entry(result.tid).or_default();
-        if stats.probe_results.len() >= MAX_EVENTS_PER_THREAD {
-            stats.probe_results.pop_front();
-        }
-        stats.probe_results.push_back(result);
-    }
-
     pub fn record_pet_sample(
         &mut self,
         tid: u32,
@@ -561,7 +488,6 @@ impl Aggregator {
                 Some(s) => s,
                 None => continue,
             };
-            let enriched_stacks = build_enriched_stack_map(stats);
 
             // Two-pointer state: both streams are time-ordered.
             // `sample_cursor` advances monotonically across intervals
@@ -616,14 +542,10 @@ impl Aggregator {
                         }
                         total_on_cpu_ns = total_on_cpu_ns.saturating_add(duration);
                         for s in matching {
-                            let stack = enriched_stacks
-                                .get(&s.timestamp_ns)
-                                .map(Vec::as_slice)
-                                .unwrap_or(&s.stack);
                             credit_on_cpu_to_tree(
                                 &mut flame_root,
                                 &mut by_address,
-                                stack,
+                                &s.stack,
                                 credit_ns,
                                 &s.pmc,
                             );
@@ -686,77 +608,6 @@ pub enum EventCtx<'a> {
         interval: &'a RawInterval,
         binaries: &'a BinaryRegistry,
     },
-}
-
-fn build_enriched_stack_map(stats: &ThreadStats) -> HashMap<u64, Vec<u64>> {
-    if stats.pet_samples.is_empty() || stats.probe_results.is_empty() {
-        return HashMap::new();
-    }
-
-    let mut out = HashMap::new();
-    let mut pets: Vec<_> = stats.pet_samples.iter().collect();
-    pets.sort_by_key(|pet| pet.timestamp_ns);
-    let mut probes: Vec<_> = stats.probe_results.iter().collect();
-    probes.sort_by_key(|probe| probe.timing.kperf_ts);
-
-    let mut pet_idx = 0usize;
-    for probe in probes {
-        while let Some(pet) = pets.get(pet_idx) {
-            if pet.timestamp_ns < probe.timing.kperf_ts
-                && abs_tick_delta_ns(pet.timestamp_ns, probe.timing.kperf_ts) > PROBE_PAIR_WINDOW_NS
-            {
-                pet_idx += 1;
-            } else {
-                break;
-            }
-        }
-
-        let mut best_idx = None;
-        let mut best_delta_ns = u64::MAX;
-        let mut scan_idx = pet_idx;
-        while let Some(pet) = pets.get(scan_idx) {
-            let delta_ns = abs_tick_delta_ns(pet.timestamp_ns, probe.timing.kperf_ts);
-            if pet.timestamp_ns > probe.timing.kperf_ts && delta_ns > PROBE_PAIR_WINDOW_NS {
-                break;
-            }
-            if delta_ns <= PROBE_PAIR_WINDOW_NS && delta_ns < best_delta_ns {
-                best_idx = Some(scan_idx);
-                best_delta_ns = delta_ns;
-            }
-            scan_idx += 1;
-        }
-
-        let Some(best_idx) = best_idx else {
-            continue;
-        };
-        let pet = pets[best_idx];
-        pet_idx = best_idx + 1;
-
-        if let Some(stack) = validated_enriched_user_stack(pet, probe) {
-            out.insert(pet.timestamp_ns, stack);
-        }
-    }
-
-    out
-}
-
-fn validated_enriched_user_stack(pet: &PetSample, probe: &ProbeResultRecord) -> Option<Vec<u64>> {
-    if pet.stack.is_empty() || probe.dwarf_walked.is_empty() {
-        return None;
-    }
-
-    let dwarf_stack = logical_probe_stack(probe.mach_pc, 0, &probe.dwarf_walked);
-    if dwarf_stack.len() < pet.stack.len() {
-        return None;
-    }
-
-    let kperf_walk = &pet.stack[1..];
-    let dwarf_walk = &dwarf_stack[1..];
-    if (longest_common_run(kperf_walk, dwarf_walk) as u32) < STITCH_MIN_SUFFIX {
-        return None;
-    }
-
-    Some(dwarf_stack)
 }
 
 /// Walk a leaf-first stack and credit `credit_ns` of on-CPU time to

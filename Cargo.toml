@@ -14,7 +14,6 @@ eyre = "0.6"
 async-trait = "0.1"
 futures = { version = "0.3", default-features = false, features = ["executor"] }
 stax-live-proto = { path = "stax-live-proto" }
-stax-unwind = { path = "stax-unwind" }
 stax-vox-observe = { path = "stax-vox-observe" }
 vox = { path = "/Users/amos/bearcove/vox/rust/vox" }
 
@@ -39,7 +38,6 @@ members = [
   "stax-live",
   "stax-live-proto",
   "stax-vox-observe",
-  "stax-unwind",
   "stax-server",
   "stax-shade",
   "stax-shade-proto",

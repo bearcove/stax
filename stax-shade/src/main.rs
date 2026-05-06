@@ -49,13 +49,12 @@
 //! ## What this binary does *today*
 //!
 //! Parses args, opens the Mach task port, registers with
-//! stax-server when requested, then idles until SIGINT/SIGTERM.
-//! The old uncorrelated periodic walker is gone; correlated
-//! probe/framehop work belongs here next, not in staxd.
+//! stax-server, drives the staxd recording session for the
+//! attached/launched target, and pumps PTY traffic. Stack walking
+//! lives in kperf (in `staxd`); the shade no longer does its own
+//! suspend-and-walk pass.
 
 #![cfg(target_os = "macos")]
-
-mod probe;
 
 use std::os::fd::RawFd;
 use std::process::ExitCode;
@@ -98,16 +97,6 @@ struct Cli {
     /// Stop sampling after this many seconds. Unlimited by default.
     #[facet(args::named, default)]
     time_limit: Option<u64>,
-
-    /// Evaluation mode: independently sample target threads at the
-    /// correlation frequency, then correlate with nearest kperf samples.
-    #[facet(args::named, default)]
-    correlate_kperf: bool,
-
-    /// Total process-wide shade-side probe frequency for
-    /// `--correlate-kperf`. Defaults to `--frequency`.
-    #[facet(args::named, default)]
-    correlate_frequency: Option<u32>,
 
     /// Working directory to use when launching a target.
     #[facet(args::named, default)]
@@ -257,9 +246,7 @@ async fn run_recording(
         launched_pid,
         has_pre_resume = pre_resume.is_some(),
         has_terminal = terminal.is_some(),
-        correlate_kperf = cli.correlate_kperf,
         frequency_hz = cli.frequency,
-        correlate_frequency_hz = cli.correlate_frequency.unwrap_or(cli.frequency),
         daemon_socket = %cli.daemon_socket,
         "shade recording lifecycle starting"
     );
@@ -294,20 +281,6 @@ async fn run_recording(
 
     let sink = LiveOnlySink::new(Some(Box::new(ingest_sink)));
     sink.notify_target_attached(pid);
-    let probe_mode = if cli.correlate_kperf {
-        Some(probe::RaceProbeMode::Correlated {
-            frequency_hz: cli.correlate_frequency.unwrap_or(cli.frequency),
-        })
-    } else {
-        None
-    };
-    let sink = if let Some(mode) = probe_mode {
-        tracing::info!(?mode, "kperf probe evaluation enabled");
-        probe::RaceKperfSink::enabled(pid, task, sink, mode)
-    } else {
-        probe::RaceKperfSink::disabled(sink)
-    };
-    let race_probe_trigger = sink.trigger();
 
     let opts = staxd_client::RemoteOptions {
         daemon_socket: cli.daemon_socket,
@@ -418,11 +391,7 @@ async fn run_recording(
                 }
             }
         },
-        move |tid, timing| {
-            if let Some(trigger) = race_probe_trigger.as_ref() {
-                trigger.enqueue(tid, timing);
-            }
-        },
+        |_, _| {},
     )
     .await;
     match &result {

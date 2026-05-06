@@ -11,7 +11,6 @@ use stax_mac_capture::{
     BinaryLoadedEvent, BinaryUnloadedEvent, JitdumpEvent, SampleEvent, SampleSink, ThreadNameEvent,
     WakeupEvent,
 };
-use stax_unwind::UserFrame;
 
 use crate::args::{self, TargetProcess};
 use crate::live_sink::{
@@ -204,21 +203,13 @@ impl SampleSink for LiveOnlySink {
         let Some(sink) = self.live_sink.as_ref() else {
             return;
         };
-        let user_backtrace: Vec<UserFrame> = ev
-            .backtrace
-            .iter()
-            .map(|&address| UserFrame {
-                address,
-                initial_address: None,
-            })
-            .collect();
         block_sink(sink.on_sample(&LiveSampleEvent {
             timestamp: ev.timestamp_ns,
             pid: ev.pid,
             tid: ev.tid,
             cpu: u32::MAX,
             kernel_backtrace: ev.kernel_backtrace,
-            user_backtrace: &user_backtrace,
+            user_backtrace: ev.backtrace,
             cycles: ev.cycles,
             instructions: ev.instructions,
             l1d_misses: ev.l1d_misses,
@@ -245,20 +236,13 @@ impl SampleSink for LiveOnlySink {
                 waker_tid,
                 waker_user_stack,
             } => {
-                let stack: Vec<UserFrame> = stack
-                    .iter()
-                    .map(|&address| UserFrame {
-                        address,
-                        initial_address: None,
-                    })
-                    .collect();
                 block_sink(sink.on_cpu_interval(&crate::live_sink::CpuIntervalEvent {
                     pid: ev.pid,
                     tid: ev.tid,
                     start_ns: ev.start_ns,
                     end_ns: ev.end_ns,
                     kind: crate::live_sink::CpuIntervalKind::OffCpu {
-                        stack: &stack,
+                        stack,
                         waker_tid,
                         waker_user_stack,
                     },
@@ -329,60 +313,12 @@ impl SampleSink for LiveOnlySink {
         }));
     }
 
-    fn on_probe_result(&mut self, ev: stax_mac_capture::ProbeResultEvent<'_>) {
-        let Some(sink) = self.live_sink.as_ref() else {
-            return;
-        };
-        block_sink(sink.on_probe_result(&crate::live_sink::ProbeResultEvent {
-            tid: ev.tid,
-            timing: ev.timing.into(),
-            queue: ev.queue.into(),
-            mach_pc: ev.mach_pc,
-            mach_lr: ev.mach_lr,
-            mach_fp: ev.mach_fp,
-            mach_sp: ev.mach_sp,
-            mach_walked: ev.mach_walked,
-            compact_walked: ev.compact_walked,
-            compact_dwarf_walked: ev.compact_dwarf_walked,
-            dwarf_walked: ev.dwarf_walked,
-            used_framehop: ev.used_framehop,
-        }));
-    }
-
     fn on_macho_byte_source(
         &mut self,
         source: std::sync::Arc<dyn stax_mac_capture::MachOByteSource>,
     ) {
         if let Some(sink) = self.live_sink.as_ref() {
             block_sink(sink.on_macho_byte_source(source));
-        }
-    }
-}
-
-impl From<stax_mac_capture::ProbeTiming> for crate::live_sink::ProbeTiming {
-    fn from(t: stax_mac_capture::ProbeTiming) -> Self {
-        Self {
-            kperf_ts: t.kperf_ts,
-            staxd_read_started: t.staxd_read_started,
-            staxd_drained: t.staxd_drained,
-            staxd_queued_for_send: t.staxd_queued_for_send,
-            staxd_send_started: t.staxd_send_started,
-            client_received: t.client_received,
-            enqueued: t.enqueued,
-            worker_started: t.worker_started,
-            thread_lookup_done: t.thread_lookup_done,
-            state_done: t.state_done,
-            resume_done: t.resume_done,
-            walk_done: t.walk_done,
-        }
-    }
-}
-
-impl From<stax_mac_capture::ProbeQueueStats> for crate::live_sink::ProbeQueueStats {
-    fn from(q: stax_mac_capture::ProbeQueueStats) -> Self {
-        Self {
-            coalesced_requests: q.coalesced_requests,
-            worker_batch_len: q.worker_batch_len,
         }
     }
 }

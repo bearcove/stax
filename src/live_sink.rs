@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-use stax_unwind::UserFrame;
-
 #[cfg(target_os = "macos")]
 pub use stax_mac_capture::MachOByteSource;
 
@@ -14,7 +12,7 @@ pub struct SampleEvent<'a> {
     pub tid: u32,
     pub cpu: u32,
     pub kernel_backtrace: &'a [u64],
-    pub user_backtrace: &'a [UserFrame],
+    pub user_backtrace: &'a [u64],
     /// CPU cycles consumed by the thread since the previous on-CPU
     /// sample (Apple Silicon fixed PMU counter 0). 0 on Linux.
     pub cycles: u64,
@@ -30,9 +28,7 @@ pub struct SampleEvent<'a> {
 }
 
 /// One closed CPU interval. See `stax_mac_capture::CpuIntervalEvent`
-/// for the semantics; this is the live-sink mirror with a
-/// `UserFrame`-typed stack instead of raw `u64`s so it composes with
-/// the rest of the `live_sink` event types.
+/// for the semantics; this is the live-sink mirror.
 pub struct CpuIntervalEvent<'a> {
     pub pid: u32,
     pub tid: u32,
@@ -45,7 +41,7 @@ pub enum CpuIntervalKind<'a> {
     OnCpu,
     OffCpu {
         /// Cached user-space stack at moment of blocking, leaf-first.
-        stack: &'a [UserFrame],
+        stack: &'a [u64],
         waker_tid: Option<u32>,
         waker_user_stack: Option<&'a [u64]>,
     },
@@ -127,50 +123,6 @@ pub struct WakeupEvent<'a> {
     pub waker_kernel_stack: &'a [u64],
 }
 
-/// Race-against-return probe output. Correlates with the matching
-/// `SampleEvent` by `(tid, kperf_ts == SampleEvent::timestamp)`.
-/// `mach_walked` is the suspended thread's FP stack used to validate
-/// correlation against kperf. `compact_walked` and
-/// `compact_dwarf_walked` are metadata-unwound comparator stacks.
-/// `dwarf_walked` is the candidate stitched stack from the same
-/// capture. All are leaf-most first, PAC-stripped, and omit the leaf PC.
-pub struct ProbeResultEvent<'a> {
-    pub tid: u32,
-    pub timing: ProbeTiming,
-    pub queue: ProbeQueueStats,
-    pub mach_pc: u64,
-    pub mach_lr: u64,
-    pub mach_fp: u64,
-    pub mach_sp: u64,
-    pub mach_walked: &'a [u64],
-    pub compact_walked: &'a [u64],
-    pub compact_dwarf_walked: &'a [u64],
-    pub dwarf_walked: &'a [u64],
-    pub used_framehop: bool,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ProbeTiming {
-    pub kperf_ts: u64,
-    pub staxd_read_started: u64,
-    pub staxd_drained: u64,
-    pub staxd_queued_for_send: u64,
-    pub staxd_send_started: u64,
-    pub client_received: u64,
-    pub enqueued: u64,
-    pub worker_started: u64,
-    pub thread_lookup_done: u64,
-    pub state_done: u64,
-    pub resume_done: u64,
-    pub walk_done: u64,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ProbeQueueStats {
-    pub coalesced_requests: u64,
-    pub worker_batch_len: u32,
-}
-
 /// Recording-side observer. Methods are async so consumers can do
 /// real I/O — buffer drains, vox sends, parallel image walks —
 /// without blocking the recorder's runtime.
@@ -225,13 +177,6 @@ pub trait LiveSink: Send + Sync {
     /// scheduling events.
     #[allow(unused_variables)]
     async fn on_cpu_interval(&self, event: &CpuIntervalEvent) {}
-
-    /// One race-against-return probe result, paired with a
-    /// `SampleEvent` by `(tid, timestamp == kperf_ts)`. Default
-    /// no-op so backends without the probe (Linux, anything not
-    /// driven by staxd) compile fine.
-    #[allow(unused_variables)]
-    async fn on_probe_result<'a>(&self, event: &ProbeResultEvent<'a>) {}
 
     /// Recorder hands the live side a typed byte source it can use
     /// to satisfy disassembly requests for addresses inside the

@@ -1041,20 +1041,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
-name = "framehop"
-version = "0.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f54fe4785e899d4d6f43793b151c63c5647240fc630b005509d2614a939f693"
-dependencies = [
- "arrayvec",
- "cfg-if",
- "fallible-iterator 0.3.0",
- "gimli 0.33.0",
- "macho-unwind-info",
- "pe-unwind-info",
-]
-
-[[package]]
 name = "funty"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1507,17 +1493,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "macho-unwind-info"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb4bdc8b0ce69932332cf76d24af69c3a155242af95c226b2ab6c2e371ed1149"
-dependencies = [
- "thiserror 2.0.18",
- "zerocopy",
- "zerocopy-derive",
-]
-
-[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1823,19 +1798,6 @@ dependencies = [
  "pdb",
  "range-collections",
  "thiserror 1.0.69",
-]
-
-[[package]]
-name = "pe-unwind-info"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97f6fccfd2d9d2df765ca23ff85fe5cc437fb0e6d3e164e4d3cbe09d14780c93"
-dependencies = [
- "arrayvec",
- "bitflags 2.11.1",
- "thiserror 2.0.18",
- "zerocopy",
- "zerocopy-derive",
 ]
 
 [[package]]
@@ -2287,7 +2249,6 @@ dependencies = [
  "mach2",
  "stax-live-proto",
  "stax-mac-capture",
- "stax-unwind",
  "stax-vox-observe",
  "staxd-client",
  "tokio",
@@ -2408,8 +2369,6 @@ dependencies = [
  "stax-live-proto",
  "stax-mac-capture",
  "stax-shade-proto",
- "stax-target-images",
- "stax-unwind",
  "stax-vox-observe",
  "staxd-client",
  "tokio",
@@ -2436,14 +2395,6 @@ dependencies = [
  "mach2",
  "thiserror 2.0.18",
  "tracing",
-]
-
-[[package]]
-name = "stax-unwind"
-version = "0.1.0"
-dependencies = [
- "framehop",
- "object",
 ]
 
 [[package]]
@@ -3019,7 +2970,9 @@ dependencies = [
 name = "vox-jit-abi"
 version = "0.4.0"
 dependencies = [
+ "arc-swap",
  "facet-core",
+ "museair",
  "vox-jit-cal",
 ]
 
@@ -3057,6 +3010,7 @@ dependencies = [
  "facet",
  "facet-core",
  "facet-reflect",
+ "vox-jit-abi",
  "vox-jit-cal",
  "vox-schema",
 ]
