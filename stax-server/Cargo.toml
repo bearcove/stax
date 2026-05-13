@@ -9,7 +9,6 @@ description = "Unprivileged long-running daemon: hosts the run registry, the liv
 [dependencies]
 stax-live-proto = { path = "../stax-live-proto" }
 stax-live = { path = "../stax-live" }
-stax-shade-proto = { path = "../stax-shade-proto" }
 stax-vox-observe = { version = "0.1", path = "../stax-vox-observe" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 log = "0.4"
@@ -17,6 +16,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter"] }
 tracing-oslog = "0.3"
 parking_lot = "0.12"
+async-trait = "0.1"
 
 eyre = "0.6"
 libc = "0.2"
@@ -26,6 +26,8 @@ vox = { version = "0.5", features = ["transport-websocket"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 stax-mac-shared-cache = { version = "0.1", path = "../stax-mac-shared-cache" }
 stax-mac-capture = { version = "0.1", path = "../stax-mac-capture" }
+stax-core = { path = "..", default-features = false }
+staxd-client = { path = "../staxd-client" }
 
 [[bin]]
 name = "stax-server"

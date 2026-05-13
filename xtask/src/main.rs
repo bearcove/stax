@@ -22,7 +22,6 @@ mod codegen;
 const BIN_NAME: &str = "stax";
 const DAEMON_BIN: &str = "staxd";
 const SERVER_BIN: &str = "stax-server";
-const SHADE_BIN: &str = "stax-shade";
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = env::args().collect();
@@ -77,7 +76,7 @@ fn install() -> Result<(), Box<dyn Error>> {
     #[cfg(target_os = "macos")]
     let codesign_identity = resolve_codesign_identity()?;
 
-    for bin in [BIN_NAME, DAEMON_BIN, SERVER_BIN, SHADE_BIN] {
+    for bin in [BIN_NAME, DAEMON_BIN, SERVER_BIN] {
         let src = workspace_root.join("target").join("release").join(bin);
         if !src.exists() {
             return Err(format!(
@@ -91,21 +90,7 @@ fn install() -> Result<(), Box<dyn Error>> {
         fs::copy(&src, &dst)?;
 
         #[cfg(target_os = "macos")]
-        {
-            // Re-sign every copied binary at the destination. Binaries
-            // that carry team-bound entitlements, such as app groups,
-            // must be signed by a real team identity; an ad-hoc
-            // signature embeds the XML but leaves TeamIdentifier unset.
-            if bin == SHADE_BIN {
-                let entitlements = workspace_root
-                    .join(SHADE_BIN)
-                    .join("entitlements")
-                    .join("eu.bearcove.stax-shade.debugger.plist");
-                codesign_binary(&dst, Some(&entitlements), &codesign_identity)?;
-            } else {
-                codesign_binary(&dst, None, &codesign_identity)?;
-            }
-        }
+        codesign_binary(&dst, None, &codesign_identity)?;
     }
 
     #[cfg(target_os = "macos")]

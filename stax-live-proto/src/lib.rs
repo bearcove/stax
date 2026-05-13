@@ -827,108 +827,6 @@ pub enum WaitOutcome {
     NoActiveRun,
 }
 
-/// One symbol entry from a Mach-O `LC_SYMTAB`. Same shape as the
-/// recorder's internal `MachOSymbol`, lifted onto the wire so we can
-/// ferry the symbol table from recorder to server. Addresses are
-/// SVMAs.
-#[derive(Clone, Debug, Facet)]
-pub struct WireMachOSymbol {
-    pub start_svma: u64,
-    pub end_svma: u64,
-    pub name: Vec<u8>,
-}
-
-#[derive(Clone, Debug, Facet)]
-pub struct WireBinaryLoaded {
-    pub path: String,
-    pub base_avma: u64,
-    pub vmsize: u64,
-    pub text_svma: u64,
-    pub arch: Option<String>,
-    pub is_executable: bool,
-    pub symbols: Vec<WireMachOSymbol>,
-    /// `__TEXT` bytes embedded inline (today: JIT'd code via the
-    /// jitdump tailer). `None` for on-disk images.
-    pub text_bytes: Option<Vec<u8>>,
-}
-
-#[derive(Clone, Debug, Facet)]
-pub struct WireBinaryUnloaded {
-    pub path: String,
-    pub base_avma: u64,
-}
-
-#[derive(Clone, Debug, Facet)]
-pub struct WireSampleEvent {
-    pub timestamp_ns: u64,
-    pub pid: u32,
-    pub tid: u32,
-    pub kernel_backtrace: Vec<u64>,
-    pub user_backtrace: Vec<u64>,
-    pub cycles: u64,
-    pub instructions: u64,
-    pub l1d_misses: u64,
-    pub branch_mispreds: u64,
-}
-
-#[derive(Clone, Debug, Facet)]
-pub struct WireOnCpuInterval {
-    pub tid: u32,
-    pub start_ns: u64,
-    pub end_ns: u64,
-}
-
-#[derive(Clone, Debug, Facet)]
-pub struct WireOffCpuInterval {
-    pub tid: u32,
-    pub start_ns: u64,
-    pub end_ns: u64,
-    pub stack: Vec<u64>,
-    pub waker_tid: Option<u32>,
-    pub waker_user_stack: Option<Vec<u64>>,
-}
-
-#[derive(Clone, Debug, Facet)]
-pub struct WireWakeup {
-    pub timestamp_ns: u64,
-    pub waker_tid: u32,
-    pub wakee_tid: u32,
-    pub waker_user_stack: Vec<u64>,
-    pub waker_kernel_stack: Vec<u64>,
-}
-
-/// One ingest event the recorder ships to the server. Mirrors the
-/// in-process `LiveSink` trait minus `on_macho_byte_source` (which
-/// holds an mmap-backed `Arc<dyn Trait>` that doesn't cross a
-/// process boundary directly; the server will open the shared cache
-/// itself by path in a follow-up).
-#[derive(Clone, Debug, Facet)]
-#[repr(u8)]
-pub enum IngestEvent {
-    /// Recorder acquired its handle on the target. Fires once at
-    /// the start of recording.
-    TargetAttached {
-        pid: u32,
-        task_port: u64,
-    },
-    Sample(WireSampleEvent),
-    OnCpuInterval(WireOnCpuInterval),
-    OffCpuInterval(WireOffCpuInterval),
-    BinaryLoaded(WireBinaryLoaded),
-    BinaryUnloaded(WireBinaryUnloaded),
-    ThreadName {
-        pid: u32,
-        tid: u32,
-        name: String,
-    },
-    Wakeup(WireWakeup),
-}
-
-#[derive(Clone, Debug, Facet)]
-pub struct IngestBatch {
-    pub events: Vec<IngestEvent>,
-}
-
 #[derive(Clone, Debug, Facet)]
 pub struct RunConfig {
     /// Free-form label (typically the launch command's basename).
@@ -984,28 +882,6 @@ pub enum TerminalOutput {
     },
 }
 
-/// Errors the recorder ingest plane can surface to a client. Variant
-/// names map to the place in the server where the error originated,
-/// so a UI can render distinct messages for each case.
-#[derive(Clone, Debug, Facet)]
-#[repr(u8)]
-pub enum RunIngestError {
-    /// Another run is currently active. Callers should
-    /// `RunControl::wait_active` or `stop_active` before retrying.
-    AlreadyActive,
-    /// The given `RunId` doesn't match any known run.
-    UnknownRun { run_id: RunId },
-    /// Catch-all for errors that haven't been promoted to a typed
-    /// variant yet.
-    Internal { message: String },
-}
-
-impl From<String> for RunIngestError {
-    fn from(message: String) -> Self {
-        Self::Internal { message }
-    }
-}
-
 /// Errors the server-side run-control plane can surface to a client.
 #[derive(Clone, Debug, Facet)]
 #[repr(u8)]
@@ -1014,7 +890,8 @@ pub enum RunControlError {
     NoActiveRun,
     /// A run is already active; only one run at a time is supported.
     AlreadyActive,
-    /// Spawning the recording shade failed.
+    /// Spawning the in-process recorder failed (posix_spawn of the
+    /// `--launch` target, staxd handshake, etc.).
     SpawnFailed { detail: String },
     /// Catch-all for errors not yet promoted to a typed variant.
     Internal { message: String },
@@ -1024,93 +901,6 @@ impl From<String> for RunControlError {
     fn from(message: String) -> Self {
         Self::Internal { message }
     }
-}
-
-/// Errors the terminal broker can surface to a client.
-#[derive(Clone, Debug, Facet)]
-#[repr(u8)]
-pub enum TerminalBrokerError {
-    /// The given `RunId` doesn't match any known run.
-    UnknownRun { run_id: RunId },
-    /// The terminal channels were already attached for this run.
-    AlreadyAttached { run_id: RunId },
-    /// Catch-all for errors not yet promoted to a typed variant.
-    Internal { message: String },
-}
-
-impl From<String> for TerminalBrokerError {
-    fn from(message: String) -> Self {
-        Self::Internal { message }
-    }
-}
-
-/// Recorder → server ingest plane. Open one batch channel per run;
-/// close the channel to signal end-of-recording.
-#[vox::service]
-pub trait RunIngest {
-    /// Open a new run. Returns the assigned `RunId` and consumes the
-    /// `events` channel; the server treats channel-close as
-    /// end-of-recording. Errors if another run is currently active
-    /// — callers should `RunControl::wait_active` or `stop_active`
-    /// before retrying.
-    async fn start_run(
-        &self,
-        config: RunConfig,
-        events: vox::Rx<IngestBatch>,
-    ) -> Result<RunId, RunIngestError>;
-
-    /// Attach an ingest channel to a run that was already created by
-    /// `RunControl::start_attach` / `start_launch`. This is the
-    /// server-orchestrated path: the server owns lifecycle and shade
-    /// owns recording + ingest.
-    async fn attach_run(
-        &self,
-        run_id: RunId,
-        events: vox::Rx<IngestBatch>,
-    ) -> Result<(), RunIngestError>;
-
-    /// Reliable, request/response target attachment notification.
-    /// Channel sends are not a durability boundary; this method
-    /// returns only after stax-server has applied the target state.
-    async fn publish_target_attached(
-        &self,
-        run_id: RunId,
-        pid: u32,
-        task_port: u64,
-    ) -> Result<(), RunIngestError>;
-
-    /// Reliable, request/response image-load ingest. Binaries define
-    /// the address space used by all later symbolication, so they
-    /// must not ride on the lossy/high-volume event channel.
-    async fn publish_binaries_loaded(
-        &self,
-        run_id: RunId,
-        binaries: Vec<WireBinaryLoaded>,
-    ) -> Result<(), RunIngestError>;
-
-    /// Reliable, request/response image-unload ingest. The current
-    /// server retains mappings for historical samples, but keep the
-    /// lifecycle event on the reliable plane so future timestamped
-    /// image lifetimes don't inherit channel-loss semantics.
-    async fn publish_binaries_unloaded(
-        &self,
-        run_id: RunId,
-        binaries: Vec<WireBinaryUnloaded>,
-    ) -> Result<(), RunIngestError>;
-}
-
-/// Shade-facing terminal broker. The CLI/native UI provides its
-/// terminal channels to `RunControl::start_launch`; the server holds
-/// them until the spawned shade connects here with the PTY-side
-/// channels. The server only relays bytes/events.
-#[vox::service]
-pub trait TerminalBroker {
-    async fn attach_terminal(
-        &self,
-        run_id: RunId,
-        input_to_shade: vox::Tx<TerminalInput>,
-        output_from_shade: vox::Rx<TerminalOutput>,
-    ) -> Result<(), TerminalBrokerError>;
 }
 
 /// Agent-facing control plane. One service instance per server; runs
@@ -1133,7 +923,7 @@ pub trait RunControl {
     /// telemetry counters, phases, histograms, and recent events.
     async fn diagnostics(&self) -> DiagnosticsSnapshot;
 
-    /// Start a recording by attaching stax-shade to an existing pid.
+    /// Start a recording by attaching to an existing pid.
     async fn start_attach(
         &self,
         pid: u32,
@@ -1142,10 +932,11 @@ pub trait RunControl {
         time_limit_secs: Option<u64>,
     ) -> Result<RunId, RunControlError>;
 
-    /// Start a recording by launching a new process under stax-shade.
-    /// `terminal_input` and `terminal_output` are the frontend side
-    /// of the target PTY stream. The CLI merely bridges these to its
-    /// local terminal; native/web UIs can render the same stream.
+    /// Start a recording by launching a new process under the
+    /// server's in-process recorder. `terminal_input` and
+    /// `terminal_output` are the frontend side of the target PTY
+    /// stream. The CLI merely bridges these to its local terminal;
+    /// native/web UIs can render the same stream.
     async fn start_launch(
         &self,
         request: LaunchRequest,
@@ -1170,7 +961,5 @@ pub fn all_services() -> Vec<&'static vox::session::ServiceDescriptor> {
     vec![
         profiler_service_descriptor(),
         run_control_service_descriptor(),
-        run_ingest_service_descriptor(),
-        terminal_broker_service_descriptor(),
     ]
 }

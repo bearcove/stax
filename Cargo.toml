@@ -48,8 +48,6 @@ members = [
   "stax-live-proto",
   "stax-vox-observe",
   "stax-server",
-  "stax-shade",
-  "stax-shade-proto",
   "stax-target-images",
   "stax-demangle",
   "staxd-proto",

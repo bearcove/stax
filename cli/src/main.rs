@@ -114,7 +114,7 @@ fn stax_server_socket() -> Option<PathBuf> {
 fn run_dump() -> Result<(), Box<dyn Error>> {
     let self_pid = std::process::id();
     let mut targets = Vec::new();
-    for name in ["staxd", "stax-server", "stax-shade", "stax"] {
+    for name in ["staxd", "stax-server", "stax"] {
         for pid in pids_by_exact_process_name(name)? {
             if pid != self_pid {
                 targets.push(DumpTarget {

@@ -2527,51 +2527,22 @@ dependencies = [
 name = "stax-server"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "eyre",
  "libc",
  "log",
  "parking_lot",
+ "stax-core",
  "stax-live",
  "stax-live-proto",
  "stax-mac-capture",
  "stax-mac-shared-cache",
- "stax-shade-proto",
- "stax-vox-observe",
- "tokio",
- "tracing",
- "tracing-oslog",
- "tracing-subscriber",
- "vox",
-]
-
-[[package]]
-name = "stax-shade"
-version = "0.1.0"
-dependencies = [
- "eyre",
- "facet",
- "figue",
- "libc",
- "log",
- "mach2",
- "stax-core",
- "stax-live-proto",
- "stax-mac-capture",
- "stax-shade-proto",
  "stax-vox-observe",
  "staxd-client",
  "tokio",
  "tracing",
  "tracing-oslog",
  "tracing-subscriber",
- "vox",
-]
-
-[[package]]
-name = "stax-shade-proto"
-version = "0.1.0"
-dependencies = [
- "facet",
  "vox",
 ]
 
