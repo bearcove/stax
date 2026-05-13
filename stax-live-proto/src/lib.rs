@@ -836,52 +836,6 @@ pub struct RunConfig {
     pub frequency_hz: u32,
 }
 
-#[derive(Clone, Debug, Facet)]
-pub struct LaunchEnvVar {
-    pub key: String,
-    pub value: String,
-}
-
-#[derive(Clone, Copy, Debug, Facet)]
-pub struct TerminalSize {
-    pub rows: u16,
-    pub cols: u16,
-}
-
-#[derive(Clone, Debug, Facet)]
-pub struct LaunchRequest {
-    pub command: Vec<String>,
-    pub cwd: String,
-    pub env: Vec<LaunchEnvVar>,
-    pub config: RunConfig,
-    pub daemon_socket: String,
-    pub time_limit_secs: Option<u64>,
-    pub terminal_size: Option<TerminalSize>,
-}
-
-#[derive(Clone, Debug, Facet)]
-#[repr(u8)]
-pub enum TerminalInput {
-    Bytes { data: Vec<u8> },
-    Resize { size: TerminalSize },
-    Close,
-}
-
-#[derive(Clone, Debug, Facet)]
-#[repr(u8)]
-pub enum TerminalOutput {
-    Bytes {
-        data: Vec<u8>,
-    },
-    ExitStatus {
-        code: Option<i32>,
-        signal: Option<i32>,
-    },
-    Error {
-        message: String,
-    },
-}
-
 /// Errors the server-side run-control plane can surface to a client.
 #[derive(Clone, Debug, Facet)]
 #[repr(u8)]
@@ -923,25 +877,15 @@ pub trait RunControl {
     /// telemetry counters, phases, histograms, and recent events.
     async fn diagnostics(&self) -> DiagnosticsSnapshot;
 
-    /// Start a recording by attaching to an existing pid.
+    /// Start a recording by attaching to an existing pid. For
+    /// `stax record -- <argv>`, the CLI `posix_spawn`s the target
+    /// suspended and hands the PID to this call before resuming it.
     async fn start_attach(
         &self,
         pid: u32,
         config: RunConfig,
         daemon_socket: String,
         time_limit_secs: Option<u64>,
-    ) -> Result<RunId, RunControlError>;
-
-    /// Start a recording by launching a new process under the
-    /// server's in-process recorder. `terminal_input` and
-    /// `terminal_output` are the frontend side of the target PTY
-    /// stream. The CLI merely bridges these to its local terminal;
-    /// native/web UIs can render the same stream.
-    async fn start_launch(
-        &self,
-        request: LaunchRequest,
-        terminal_input: vox::Rx<TerminalInput>,
-        terminal_output: vox::Tx<TerminalOutput>,
     ) -> Result<RunId, RunControlError>;
 
     /// Block until `condition` fires, the active run stops, or

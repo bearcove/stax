@@ -23,9 +23,9 @@ use parking_lot::{Mutex, RwLock};
 use stax_live::source::SourceResolver;
 use stax_live::{Aggregator, BinaryRegistry, LiveServer};
 use stax_live_proto::{
-    DiagnosticsSnapshot, LaunchRequest, ProfilerDispatcher, RunConfig, RunControl,
-    RunControlDispatcher, RunControlError, RunId, RunState, RunSummary, ServerStatus, StopReason,
-    TerminalInput, TerminalOutput, WaitCondition, WaitOutcome,
+    DiagnosticsSnapshot, ProfilerDispatcher, RunConfig, RunControl, RunControlDispatcher,
+    RunControlError, RunId, RunState, RunSummary, ServerStatus, StopReason, WaitCondition,
+    WaitOutcome,
 };
 use vox::VoxListener;
 
@@ -470,32 +470,6 @@ impl RunControl for ServerState {
                 daemon_socket,
                 time_limit,
             );
-            Ok(run_id)
-        }
-    }
-
-    async fn start_launch(
-        &self,
-        request: LaunchRequest,
-        terminal_input: vox::Rx<TerminalInput>,
-        terminal_output: vox::Tx<TerminalOutput>,
-    ) -> Result<RunId, RunControlError> {
-        if request.command.is_empty() {
-            return Err(RunControlError::Internal {
-                message: "launch command is empty".to_owned(),
-            });
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (request, terminal_input, terminal_output);
-            return Err(RunControlError::SpawnFailed {
-                detail: "stax-server recording is macOS-only".to_owned(),
-            });
-        }
-        #[cfg(target_os = "macos")]
-        {
-            let run_id = self.begin_run(request.config.clone())?;
-            recorder::spawn_launch(self.clone(), run_id, request, terminal_input, terminal_output);
             Ok(run_id)
         }
     }
