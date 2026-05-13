@@ -72,10 +72,6 @@ pub struct PipelineConfig {
     pub frequency_hz: u32,
     pub pmc_idx_l1d: Option<usize>,
     pub pmc_idx_brmiss: Option<usize>,
-    /// Optional Mach task port for fast dyld image-change detection
-    /// in `ImageScanner`. When `Some`, periodic rescans skip the
-    /// full `proc_pidinfo` walk unless the dyld image count changed.
-    pub task: Option<u32>,
 }
 
 /// All of the per-session client-side state, factored out so the
@@ -121,7 +117,7 @@ impl Pipeline {
         if let Some(sc) = shared_cache.clone() {
             sink.on_macho_byte_source(sc);
         }
-        let mut images = ImageScanner::new(shared_cache, config.task);
+        let mut images = ImageScanner::new(shared_cache);
         let mut thread_names = ThreadNameCache::new();
 
         let t0 = Instant::now();

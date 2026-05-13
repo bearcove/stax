@@ -287,7 +287,6 @@ async fn run_recording(
         pid,
         frequency_hz: cli.frequency,
         duration: cli.time_limit.map(Duration::from_secs),
-        task: Some(task),
         ..Default::default()
     };
     let drive_pid = opts.pid;
