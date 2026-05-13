@@ -61,6 +61,7 @@ use crate::parser::Parser;
 const IMAGE_RESCAN_PERIOD: Duration = Duration::from_millis(250);
 const THREAD_NAME_RESCAN_PERIOD: Duration = Duration::from_millis(50);
 const JITDUMP_PROBE_PERIOD: Duration = Duration::from_millis(500);
+const SAMPLE_COUNTERS_LOG_PERIOD: Duration = Duration::from_secs(2);
 
 /// Inputs the caller has resolved before constructing the pipeline:
 /// the pid being recorded, the sample frequency (only used for stats
@@ -101,6 +102,21 @@ pub struct Pipeline {
     pmu_total_cycles: u64,
     pmu_total_insns: u64,
     pmu_samples: u64,
+    /// Total PET samples the parser produced (one per
+    /// PERF_GEN_EVENT bracket). Includes the ones we drop because
+    /// their user stack came back empty.
+    samples_seen: u64,
+    /// Subset of `samples_seen` whose user stack was empty. High
+    /// values here mean the kernel couldn't walk user-space for
+    /// most ticks — typical for hardened-runtime targets without
+    /// `get-task-allow`, or for threads that were entirely
+    /// in-kernel at sample time.
+    samples_empty_user: u64,
+    /// Subset of `samples_seen` we forwarded to the sink. Equal to
+    /// `samples_seen - samples_empty_user`.
+    samples_emitted: u64,
+    /// Wall-clock cadence for the periodic counters log.
+    next_counters_log: Instant,
 }
 
 impl Pipeline {
@@ -161,6 +177,10 @@ impl Pipeline {
             pmu_total_cycles: 0,
             pmu_total_insns: 0,
             pmu_samples: 0,
+            samples_seen: 0,
+            samples_empty_user: 0,
+            samples_emitted: 0,
+            next_counters_log: now + SAMPLE_COUNTERS_LOG_PERIOD,
         }
     }
 
@@ -182,6 +202,24 @@ impl Pipeline {
                 &self.seen_tids,
             );
             self.next_thread = now + THREAD_NAME_RESCAN_PERIOD;
+        }
+        if now >= self.next_counters_log {
+            let seen = self.samples_seen;
+            let empty = self.samples_empty_user;
+            let emitted = self.samples_emitted;
+            let pct = if seen > 0 {
+                (empty as f64 / seen as f64) * 100.0
+            } else {
+                0.0
+            };
+            log::info!(
+                "pipeline samples: seen={seen} emitted={emitted} \
+                 empty_user={empty} ({pct:.1}% dropped) \
+                 tids={} kdebug_records={}",
+                self.seen_tids.len(),
+                self.total_drained,
+            );
+            self.next_counters_log = now + SAMPLE_COUNTERS_LOG_PERIOD;
         }
         if !self.jitdump_emitted && now >= self.next_jitdump {
             if self.jitdump_path.exists() {
@@ -269,7 +307,11 @@ impl Pipeline {
             let pmu_total_cycles = &mut self.pmu_total_cycles;
             let pmu_total_insns = &mut self.pmu_total_insns;
             let seen_tids = &mut self.seen_tids;
+            let samples_seen = &mut self.samples_seen;
+            let samples_empty_user = &mut self.samples_empty_user;
+            let samples_emitted = &mut self.samples_emitted;
             self.parser.feed(rec, |sample| {
+                *samples_seen += 1;
                 seen_tids.insert(sample.tid);
                 if let Some(est) = slide_est.as_mut() {
                     // The deepest kernel frame is the most stable
@@ -294,8 +336,10 @@ impl Pipeline {
                 // samples that just inflate the in-kernel residue.
                 // Drop them at the source.
                 if sample.user_backtrace.is_empty() {
+                    *samples_empty_user += 1;
                     return;
                 }
+                *samples_emitted += 1;
                 let cycles = sample.pmc.first().copied().unwrap_or(0);
                 let instructions = sample.pmc.get(1).copied().unwrap_or(0);
                 let l1d_misses = pmc_idx_l1d
@@ -388,8 +432,23 @@ impl Pipeline {
             pmu_total_cycles,
             pmu_total_insns,
             pmu_samples,
+            samples_seen,
+            samples_empty_user,
+            samples_emitted,
+            next_counters_log: _,
         } = self;
         let _ = config;
+
+        let empty_pct = if samples_seen > 0 {
+            (samples_empty_user as f64 / samples_seen as f64) * 100.0
+        } else {
+            0.0
+        };
+        log::info!(
+            "pipeline final samples: seen={samples_seen} \
+             emitted={samples_emitted} empty_user={samples_empty_user} \
+             ({empty_pct:.1}% dropped)"
+        );
 
         if let (Some(image), Some(est)) = (kernel_image, slide_est) {
             match est.finalize() {
