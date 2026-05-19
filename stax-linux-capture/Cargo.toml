@@ -1,0 +1,20 @@
+[package]
+name = "stax-linux-capture"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Linux sampling backend for stax: opens perf_event_open against a target pid, drains the mmap ring buffer, parses PERF_RECORD_{SAMPLE,MMAP2,COMM} + /proc/kallsyms, reads ELF symbol tables, and drives the OS-neutral `SampleSink` — the perf_event_open counterpart of the macOS kperf path."
+
+[lib]
+name = "stax_linux_capture"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+stax-mac-capture = { version = "0.1", path = "../stax-mac-capture" }
+libc = "0.2"
+perf-event-open-sys = "4"
+object = { version = "0.39", default-features = false, features = ["std", "read_core", "elf", "unaligned"] }
+tracing = "0.1"
+eyre = "0.6"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

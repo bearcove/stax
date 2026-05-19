@@ -21,7 +21,7 @@ parking_lot = "0.12"
 eyre = "0.6"
 libc = "0.2"
 
-vox = { path = "/Users/amos/bearcove/vox/rust/vox", features = ["transport-websocket"] }
+vox = { version = "0.5", features = ["transport-websocket"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 stax-mac-shared-cache = { version = "0.1", path = "../stax-mac-shared-cache" }

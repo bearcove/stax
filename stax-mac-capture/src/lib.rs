@@ -5,7 +5,10 @@
 //! `SampleSink` trait (plus `MachOSymbol`, `ThreadNameCache`) remains.
 //! The daemon backend (`staxd-client`) is the sole sampling path.
 
-#![cfg(target_os = "macos")]
+// Pure trait + event types — no OS APIs. Despite the crate name it
+// compiles and is consumed on every target (the Linux capture backend
+// drives the same `SampleSink`). Renaming the crate to `stax-capture`
+// is a deferred cleanup (it would ripple imports across the workspace).
 
 pub mod proc_maps;
 pub mod recorder;

@@ -28,4 +28,4 @@ stax-mac-capture = { path = "../stax-mac-capture" }
 stax-live-proto = { path = "../stax-live-proto" }
 stax-vox-observe = { path = "../stax-vox-observe" }
 staxd-client = { path = "../staxd-client" }
-vox = { path = "/Users/amos/bearcove/vox/rust/vox" }
+vox = "0.5"

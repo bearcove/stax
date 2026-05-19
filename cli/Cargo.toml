@@ -15,7 +15,7 @@ stax-live-proto = { path = "../stax-live-proto" }
 stax-vox-observe = { path = "../stax-vox-observe" }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter"] }
 tracing-oslog = "0.3"
-vox = { path = "/Users/amos/bearcove/vox/rust/vox" }
+vox = "0.5"
 
 [dependencies.tokio]
 version = "1"

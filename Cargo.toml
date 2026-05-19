@@ -15,13 +15,21 @@ async-trait = "0.1"
 futures = { version = "0.3", default-features = false, features = ["executor"] }
 stax-live-proto = { path = "stax-live-proto" }
 stax-vox-observe = { path = "stax-vox-observe" }
-vox = { path = "/Users/amos/bearcove/vox/rust/vox" }
+vox = "0.5"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 stax-mac-capture = { version = "0.1", path = "stax-mac-capture" }
 staxd-client = { version = "0.1", path = "staxd-client" }
 tokio = { version = "1", features = ["rt", "macros", "time"] }
 mach2 = "0.4"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Same role as `stax-mac-capture` on macOS: the OS-neutral `SampleSink`
+# trait crate. (Gratuitously named "mac"; it is pure types — left as a
+# follow-up rename to avoid rippling imports across the workspace.)
+stax-mac-capture = { version = "0.1", path = "stax-mac-capture" }
+stax-linux-capture = { version = "0.1", path = "stax-linux-capture" }
+tokio = { version = "1", features = ["rt", "macros", "time"] }
 
 [profile.release]
 debug = 1
@@ -31,6 +39,7 @@ members = [
   ".",
   "cli",
   "stax-mac-capture",
+  "stax-linux-capture",
   "stax-mac-kperf-sys",
   "stax-mac-kperf-parse",
   "stax-mac-shared-cache",
