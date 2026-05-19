@@ -566,9 +566,33 @@ impl BinaryRegistry {
         Some(buf)
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    fn read_target_memory(&self, address: u64, len: usize) -> Option<Vec<u8>> {
+        use std::io::{Read, Seek, SeekFrom};
+
+        let pid = self.target_pid?;
+        // `/proc/<pid>/mem` is seek+read addressable by the target's
+        // virtual address. Readable when we share its uid or hold
+        // CAP_SYS_PTRACE — true for `stax record -- prog` (we are its
+        // parent) and same-user attach. Disassembly only touches
+        // read-only text, so no ptrace-stop is needed.
+        let mut f = std::fs::File::open(format!("/proc/{pid}/mem")).ok()?;
+        f.seek(SeekFrom::Start(address)).ok()?;
+        let mut buf = vec![0u8; len];
+        // A short read means we hit an unmapped/unreadable page; keep
+        // whatever prefix we got — the disassembler tolerates a
+        // truncated window.
+        let n = f.read(&mut buf).ok()?;
+        if n == 0 {
+            tracing::debug!("/proc/{pid}/mem read({address:#x}, {len}) returned 0 bytes");
+            return None;
+        }
+        buf.truncate(n);
+        Some(buf)
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     fn read_target_memory(&self, _address: u64, _len: usize) -> Option<Vec<u8>> {
-        // TODO: pread /proc/<pid>/mem on Linux.
         None
     }
 

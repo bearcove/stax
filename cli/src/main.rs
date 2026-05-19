@@ -229,14 +229,18 @@ async fn run_record_async(args: RecordArgs) -> Result<(), Box<dyn Error>> {
             program,
             args: rest,
         } => {
-            #[cfg(not(target_os = "macos"))]
-            {
-                let _ = (program, rest, config);
-                return Err("stax record -- <argv> is macOS-only".into());
-            }
             #[cfg(target_os = "macos")]
             {
                 run_record_launch(client, args, program, rest, config).await
+            }
+            #[cfg(target_os = "linux")]
+            {
+                run_record_launch_linux(client, args, program, rest, config).await
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            {
+                let _ = (program, rest, config);
+                return Err("stax record -- <argv> is unsupported on this OS".into());
             }
         }
     }
@@ -310,6 +314,75 @@ async fn run_record_launch(
     result
 }
 
+/// Linux `stax record -- <argv>`: launch the child, then have the
+/// server attach the perf session to its pid. Simpler than the macOS
+/// path: stdio is inherited (the child shares our terminal), so there
+/// is no PTY relay / raw-mode / SIGWINCH plumbing.
+///
+/// Unlike macOS we do *not* spawn suspended: std `Command::spawn`
+/// synchronises on the child's `exec` (its CLOEXEC pipe), so a
+/// `pre_exec` `SIGSTOP` would deadlock `spawn()` itself, and Linux has
+/// no `posix_spawn` "start suspended" attribute. The cost is that the
+/// first few milliseconds before the server's per-CPU perf events are
+/// enabled go unsampled — irrelevant for a flamegraph of a workload
+/// that runs for more than an instant. A precise from-first-
+/// instruction launch (a fork + go-pipe handshake like `perf record`)
+/// is a follow-up.
+#[cfg(target_os = "linux")]
+async fn run_record_launch_linux(
+    client: RunControlClient,
+    args: RecordArgs,
+    program: String,
+    rest: Vec<String>,
+    config: stax_live_proto::RunConfig,
+) -> Result<(), Box<dyn Error>> {
+    let mut child = std::process::Command::new(&program)
+        .args(&rest)
+        .spawn()
+        .map_err(|e| format!("failed to spawn {program}: {e}"))?;
+    let target_pid = child.id();
+    eprintln!("stax: spawned {program} (pid {target_pid})");
+
+    let run_id = match client
+        .start_attach(target_pid, config, args.daemon_socket.clone(), args.time_limit)
+        .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("{e:?}").into());
+        }
+    };
+    eprintln!("stax: started run {}", run_id.0);
+
+    let child_exit_watcher = {
+        let pid = target_pid;
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_millis(100));
+            loop {
+                tick.tick().await;
+                let mut status = 0;
+                let r = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
+                if r == pid as libc::pid_t {
+                    return Some(status);
+                }
+                if r == -1 {
+                    return None;
+                }
+            }
+        })
+    };
+
+    let result = wait_on_run_with_child(&client, run_id, child_exit_watcher).await;
+    // If the run stopped first (Ctrl-C / time limit) the target may
+    // still be alive; tear it down. If it already exited, the watcher
+    // reaped it and these are harmless no-ops (ESRCH/ECHILD).
+    let _ = child.kill();
+    let _ = child.wait();
+    result
+}
+
 async fn wait_on_run(
     client: &RunControlClient,
     run_id: stax_live_proto::RunId,
@@ -342,7 +415,7 @@ async fn wait_on_run(
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 async fn wait_on_run_with_child(
     client: &RunControlClient,
     run_id: stax_live_proto::RunId,
