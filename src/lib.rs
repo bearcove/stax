@@ -5,6 +5,7 @@ mod utils;
 
 pub mod args;
 pub mod ingest_sink;
+pub mod live_only_sink;
 pub mod live_sink;
 
 #[cfg(target_os = "macos")]
