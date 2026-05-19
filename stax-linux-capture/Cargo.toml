@@ -18,3 +18,5 @@ eyre = "0.6"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+stax-demangle = { version = "0.1", path = "../stax-demangle" }
+inferno = "0.12"
