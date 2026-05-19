@@ -8,6 +8,6 @@ description = "Schema for the stax live RPC service. Lightweight crate consumed 
 
 [dependencies]
 facet = { version = "0.46", features = ["camino", "reflect"] }
-vox = { version = "0.5", default-features = false, features = [
+vox = { version = "0.6", default-features = false, features = [
   "runtime",
 ] }

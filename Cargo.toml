@@ -15,7 +15,7 @@ async-trait = "0.1"
 futures = { version = "0.3", default-features = false, features = ["executor"] }
 stax-live-proto = { path = "stax-live-proto" }
 stax-vox-observe = { path = "stax-vox-observe" }
-vox = "0.5"
+vox = "0.6"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 stax-mac-capture = { version = "0.1", path = "stax-mac-capture" }

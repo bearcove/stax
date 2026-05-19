@@ -1916,6 +1916,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "passfd"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b332c50e4d07c0011fff51ea305374408319908908bc1dbed7a0ffaaf63a8151"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "pdb"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3071,9 +3080,9 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vox"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb12e3cae8363dce2f368e20f9b21096900b45f56143f5265d8ee13e5abc999f"
+checksum = "ff68c9990b8c99617f6efff8001596e93e97b5a6f5667255d05e9a860711c15b"
 dependencies = [
  "facet",
  "facet-pretty",
@@ -3092,9 +3101,9 @@ dependencies = [
 
 [[package]]
 name = "vox-codegen"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af6ecb86bb67982cbb51c50cadb980a7d7d77c76f4511a8c6140f9624cc2df07"
+checksum = "6d17e8668f0c3c912d44a41f9fa2563eafb477bc716d2da33b962fd09a158543"
 dependencies = [
  "facet-cbor",
  "facet-core",
@@ -3104,9 +3113,9 @@ dependencies = [
 
 [[package]]
 name = "vox-core"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f477b3ead7694aee582696292f20ae443e6ef251a177f520a2c0de5d10cb1839"
+checksum = "74d188b0beadd850d9b8d95324c7b42ce6522b961c368fadf79362adcbe7260e"
 dependencies = [
  "facet",
  "facet-cbor",
@@ -3127,10 +3136,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "vox-jit"
-version = "0.5.1"
+name = "vox-fdpass"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a51d184ce9d226bdc2744e8eb0487520e68dae6fca441ac0c95a4c7b3e50c80"
+checksum = "e904dcaa78651c7fd3ca53362f4691db0ce004cda939d8947088768ece4cff59"
+dependencies = [
+ "libc",
+ "passfd",
+ "tokio",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "vox-jit"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b717ca651c0494ad4d6fbe5bdb069c252ee5ae730ec99e763d36c046bf1dfd6f"
 dependencies = [
  "arc-swap",
  "cranelift-codegen",
@@ -3150,9 +3171,9 @@ dependencies = [
 
 [[package]]
 name = "vox-jit-abi"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9df12acb9ac2e4a86839c66fe95118cf8b5ad226ddd3a085c8278343412ff333"
+checksum = "7b8781eb9c6938aaaf1a396cb320b662e7f93ba46b744463c9f3a938916e1d22"
 dependencies = [
  "arc-swap",
  "facet-core",
@@ -3162,9 +3183,9 @@ dependencies = [
 
 [[package]]
 name = "vox-jit-cal"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ff33e66f6eb98fef8e11f24cbc48edd20e0afe8ad2600a9055c3751157a22a4"
+checksum = "c4656df3c0770f2fa65b46f3a79820b223ee19ffd7f431be3ed782a7a1137228"
 dependencies = [
  "facet",
  "facet-core",
@@ -3172,9 +3193,9 @@ dependencies = [
 
 [[package]]
 name = "vox-macros-core"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f09e30083dc6e8204116d456e9baa30bf9867c73ea118e78edd1f38fd816ccc9"
+checksum = "5476edc727a58d8e95ca69027b02b0203cd8243da02c5dbffd60fe55331b155c"
 dependencies = [
  "facet-cargo-toml",
  "heck",
@@ -3185,9 +3206,9 @@ dependencies = [
 
 [[package]]
 name = "vox-macros-parse"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2512021324588016361328364ac41e84d9d9fe730c0c9cb5ff9ff93e7f67a810"
+checksum = "cf45a6e926f418eec1929dd01025d0fe2d518d3a29d5a7b1d8845dafbd730d60"
 dependencies = [
  "proc-macro2",
  "unsynn",
@@ -3195,9 +3216,9 @@ dependencies = [
 
 [[package]]
 name = "vox-postcard"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d916f3c75fac450825837ef818a7634ea7ab3e55f54f60ae7861036041b7d10"
+checksum = "bf793ee7ab6acf76e398628612d6b0741a970bcc283601cc14d7616284382264"
 dependencies = [
  "facet",
  "facet-core",
@@ -3209,9 +3230,9 @@ dependencies = [
 
 [[package]]
 name = "vox-schema"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1876017e3ef09969c76de13c9809c1b5519acc7a7f9699d263446b3b0e8d400d"
+checksum = "22f23a06cf28583278eccef44eb99aa5cad7aa563f4a874932c8b5d35f82a669"
 dependencies = [
  "blake3",
  "facet",
@@ -3222,9 +3243,9 @@ dependencies = [
 
 [[package]]
 name = "vox-service-macros"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "228d3cbcca17f2f34aad352db7010de5c65f7b3172f43706ab61f63bcf448835"
+checksum = "d54ae0d1389e314672a2147345224d047b361335ab0d342c9e452e4fcb6101f9"
 dependencies = [
  "proc-macro2",
  "vox-macros-core",
@@ -3232,22 +3253,23 @@ dependencies = [
 
 [[package]]
 name = "vox-stream"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0224d1a67bf2b5011f21da840fdb5e83d7cfcbbcaf64c7d3956119c69e0c7a6"
+checksum = "10dbf6691a61087f4e5ce34ea5e1ea5ecc3b45bf5cddf2decfbf4f93e1924286"
 dependencies = [
  "libc",
  "moire",
  "tokio",
  "vox-core",
+ "vox-fdpass",
  "vox-types",
 ]
 
 [[package]]
 name = "vox-types"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d76325a1f6d12070079ed10d9bd966606b2ec1e5a0a89915f4e6fbf2ba1d4e06"
+checksum = "eccf06a16a1a258abc9f26f2bd923045f3c21fd958496405ed8ceed80f8d84ed"
 dependencies = [
  "bitflags 2.11.1",
  "blake3",
@@ -3272,9 +3294,9 @@ dependencies = [
 
 [[package]]
 name = "vox-websocket"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "430dab12c5e98a3108493aa76ab047293c4079e37adcb6cce0c171694aee1de6"
+checksum = "931057f8a7b28c0abf294e17a33c91d8e2c80332bcd0168f0ca0ae5332f9d53d"
 dependencies = [
  "futures-channel",
  "futures-util",
