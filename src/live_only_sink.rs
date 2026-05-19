@@ -78,6 +78,13 @@ impl SampleSink for LiveOnlySink {
         }));
     }
 
+    fn on_kallsyms(&mut self, data: &[u8]) {
+        let Some(sink) = self.live_sink.as_ref() else {
+            return;
+        };
+        block_sink(sink.on_kallsyms(data));
+    }
+
     fn on_cpu_interval(&mut self, ev: stax_mac_capture::sample_sink::CpuIntervalEvent<'_>) {
         let Some(sink) = self.live_sink.as_ref() else {
             return;

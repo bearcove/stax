@@ -1,16 +1,24 @@
 use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 
+#[cfg(target_os = "macos")]
+use std::fs;
+#[cfg(target_os = "macos")]
+use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::process::Command;
+
+#[cfg(target_os = "macos")]
 use object::endian::Endianness;
+#[cfg(target_os = "macos")]
 use object::macho;
+#[cfg(target_os = "macos")]
 use object::read::macho::{
     LoadCommandVariant, MachHeader, Nlist, Section as MachSection, Segment as MachSegment,
 };
 use parking_lot::Mutex;
 
+#[cfg(target_os = "macos")]
 const BOOT_KERNEL_COLLECTION: &str =
     "/private/var/db/KernelExtensionManagement/KernelCollections/BootKernelCollection.kc";
 
@@ -24,6 +32,8 @@ enum KernelSymbolState {
     #[default]
     Uninitialized,
     Ready(Arc<KernelSymbols>),
+    // Only constructed by the macOS lazy loader; matched everywhere.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Failed,
 }
 
@@ -61,27 +71,89 @@ impl KernelSymbolResolver {
         }
 
         let symbols = {
+            // `mut` only used by the macOS lazy-load arm below.
+            #[allow(unused_mut)]
             let mut state = self.state.lock();
             match &*state {
                 KernelSymbolState::Ready(symbols) => Some(Arc::clone(symbols)),
                 KernelSymbolState::Failed => None,
-                KernelSymbolState::Uninitialized => match KernelSymbols::load_system() {
-                    Ok(symbols) => {
-                        let symbols = Arc::new(symbols);
-                        *state = KernelSymbolState::Ready(Arc::clone(&symbols));
-                        Some(symbols)
+                // macOS lazily reads the on-disk kernel collection.
+                // Linux instead gets a `/proc/kallsyms` blob pushed in
+                // via `set_from_kallsyms` (see below); until that lands
+                // a kernel address simply doesn't resolve.
+                KernelSymbolState::Uninitialized => {
+                    #[cfg(target_os = "macos")]
+                    match KernelSymbols::load_system() {
+                        Ok(symbols) => {
+                            let symbols = Arc::new(symbols);
+                            *state = KernelSymbolState::Ready(Arc::clone(&symbols));
+                            Some(symbols)
+                        }
+                        Err(error) => {
+                            tracing::debug!(%error, "failed to load kernel symbols");
+                            *state = KernelSymbolState::Failed;
+                            None
+                        }
                     }
-                    Err(error) => {
-                        tracing::debug!(%error, "failed to load kernel symbols");
-                        *state = KernelSymbolState::Failed;
-                        None
-                    }
-                },
+                    #[cfg(not(target_os = "macos"))]
+                    None
+                }
             }
         }?;
 
         symbols.lookup(address)
     }
+
+    /// Install kernel symbols from a `/proc/kallsyms`-style text blob
+    /// (Linux: the real file; macOS archive path: the synthesised
+    /// equivalent). Replaces whatever state we had — the recorder
+    /// pushes this once at session start, before any lookup.
+    pub(crate) fn set_from_kallsyms(&self, bytes: &[u8]) {
+        let functions = parse_kallsyms(bytes);
+        if functions.is_empty() {
+            return;
+        }
+        let symbols = Arc::new(KernelSymbols::from_parts(Vec::new(), functions));
+        *self.state.lock() = KernelSymbolState::Ready(symbols);
+    }
+}
+
+/// Parse `/proc/kallsyms` text into flat kernel function entries.
+/// Lines look like `ffffffff81089pp0 T futex_wait_queue` with an
+/// optional trailing `[module]`. We keep code symbols (`t`/`T`/`w`/`W`)
+/// in the kernel half; data and absolute/percpu symbols are dropped so
+/// `nearest_function_for_pc` only ever lands on real text.
+fn parse_kallsyms(bytes: &[u8]) -> Vec<KernelFunctionEntry> {
+    let text = match std::str::from_utf8(bytes) {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+    let mut functions = Vec::new();
+    for line in text.lines() {
+        let mut it = line.split_whitespace();
+        let (Some(addr), Some(kind), Some(name)) = (it.next(), it.next(), it.next()) else {
+            continue;
+        };
+        if !matches!(kind, "t" | "T" | "w" | "W") {
+            continue;
+        }
+        let Ok(address) = u64::from_str_radix(addr, 16) else {
+            continue;
+        };
+        if !is_kernel_address(address) {
+            continue; // skip percpu/absolute low addresses
+        }
+        let module = it
+            .next()
+            .map(|m| m.trim_matches(['[', ']']).to_owned())
+            .unwrap_or_else(|| "kernel".to_owned());
+        functions.push(KernelFunctionEntry {
+            module,
+            address,
+            name: Some(name.to_owned()),
+        });
+    }
+    functions
 }
 
 pub(crate) fn is_kernel_address(address: u64) -> bool {
@@ -89,6 +161,7 @@ pub(crate) fn is_kernel_address(address: u64) -> bool {
 }
 
 impl KernelSymbols {
+    #[cfg(target_os = "macos")]
     fn load_system() -> Result<Self, String> {
         let kernel_collection = ensure_boot_kernel_collection()?;
         let bytes = fs::read(&kernel_collection)
@@ -161,10 +234,15 @@ impl KernelSymbols {
     }
 }
 
+// --- macOS kernel-collection parsing (Linux gets kallsyms instead) ---
+#[cfg(target_os = "macos")]
 type KernelMachHeader = macho::MachHeader64<Endianness>;
+#[cfg(target_os = "macos")]
 type KernelSymtabCommand = macho::SymtabCommand<Endianness>;
+#[cfg(target_os = "macos")]
 type KernelLinkeditCommand = macho::LinkeditDataCommand<Endianness>;
 
+#[cfg(target_os = "macos")]
 fn parse_kernel_collection(
     data: &[u8],
 ) -> Result<(Vec<KernelImageRange>, Vec<KernelFunctionEntry>), String> {
@@ -195,6 +273,7 @@ fn parse_kernel_collection(
     Ok((ranges, functions))
 }
 
+#[cfg(target_os = "macos")]
 fn parse_fileset_entry(
     data: &[u8],
     header_offset: u64,
@@ -289,6 +368,7 @@ fn parse_fileset_entry(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn parse_text_symbols(
     data: &[u8],
     endian: Endianness,
@@ -325,6 +405,7 @@ fn parse_text_symbols(
     Ok(symbols)
 }
 
+#[cfg(target_os = "macos")]
 fn parse_function_starts(
     data: &[u8],
     header_offset: u64,
@@ -357,6 +438,7 @@ fn parse_function_starts(
         .collect())
 }
 
+#[cfg(target_os = "macos")]
 fn collect_function_starts(
     data: &[u8],
     endian: Endianness,
@@ -373,6 +455,7 @@ fn collect_function_starts(
     Ok(functions)
 }
 
+#[cfg(target_os = "macos")]
 fn functions_from_symbols(
     module: &str,
     named_symbols: &HashMap<u64, String>,
@@ -387,10 +470,12 @@ fn functions_from_symbols(
         .collect()
 }
 
+#[cfg(target_os = "macos")]
 fn format_object_error(error: object::read::Error) -> String {
     error.to_string()
 }
 
+#[cfg(target_os = "macos")]
 fn ensure_boot_kernel_collection() -> Result<PathBuf, String> {
     let path = Path::new(BOOT_KERNEL_COLLECTION);
     if path.is_file() {

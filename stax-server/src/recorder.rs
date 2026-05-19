@@ -250,6 +250,11 @@ impl LiveSink for ServerLiveSink {
         self.server.bump_revision();
     }
 
+    async fn on_kallsyms(&self, data: &[u8]) {
+        self.server.binaries().write().set_kallsyms(data);
+        self.server.bump_revision();
+    }
+
     async fn on_thread_name(&self, event: &ThreadName) {
         self.server
             .aggregator()

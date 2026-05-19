@@ -178,6 +178,13 @@ pub trait LiveSink: Send + Sync {
     #[allow(unused_variables)]
     async fn on_cpu_interval(&self, event: &CpuIntervalEvent) {}
 
+    /// A `/proc/kallsyms`-style kernel symbol blob, pushed once near
+    /// session start so kernel PCs (perf kernel frames, Linux off-CPU
+    /// wchan leaves) resolve. Default no-op for sinks that don't
+    /// symbolize the kernel.
+    #[allow(unused_variables)]
+    async fn on_kallsyms(&self, data: &[u8]) {}
+
     /// Recorder hands the live side a typed byte source it can use
     /// to satisfy disassembly requests for addresses inside the
     /// dyld shared cache. Fires once at startup (after the cache

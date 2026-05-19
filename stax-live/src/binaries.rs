@@ -142,10 +142,10 @@ pub struct BinaryRegistry {
     /// against this cache instead.
     #[cfg(target_os = "macos")]
     shared_cache: Option<Arc<stax_mac_shared_cache::SharedCache>>,
-    /// Lazy fileset-aware symbol resolver for kperf kernel PCs.
-    /// The kernel collection is only opened if a high-half kernel
-    /// address reaches `lookup_symbol`.
-    #[cfg(target_os = "macos")]
+    /// Kernel PC resolver. macOS lazily opens the on-disk kernel
+    /// collection; Linux gets a `/proc/kallsyms` blob pushed in via
+    /// `set_kallsyms`. Either way it only fires for high-half kernel
+    /// addresses (kperf/perf kernel frames, off-CPU wchan leaves).
     kernel_symbols: crate::kernel_symbols::KernelSymbolResolver,
     /// Cache of demangled symbol names. Keyed by the raw symbol-table
     /// bytes so repeated lookups of the same function (the common case
@@ -166,7 +166,6 @@ impl BinaryRegistry {
             macho_byte_source: None,
             #[cfg(target_os = "macos")]
             shared_cache: None,
-            #[cfg(target_os = "macos")]
             kernel_symbols: crate::kernel_symbols::KernelSymbolResolver::default(),
             demangle_cache: parking_lot::Mutex::new(lru::LruCache::new(
                 std::num::NonZeroUsize::new(16384).unwrap(),
@@ -294,7 +293,6 @@ impl BinaryRegistry {
     /// without the recorder ever shipping their tables over the wire.
     pub fn lookup_symbol(&self, address: u64) -> Option<ResolvedSymbol> {
         let Some(idx) = self.binary_for_address(address) else {
-            #[cfg(target_os = "macos")]
             if let Some(symbol) = self.lookup_symbol_in_kernel_collection(address) {
                 return Some(symbol);
             }
@@ -339,7 +337,6 @@ impl BinaryRegistry {
         })
     }
 
-    #[cfg(target_os = "macos")]
     fn lookup_symbol_in_kernel_collection(&self, address: u64) -> Option<ResolvedSymbol> {
         let symbol = self.kernel_symbols.lookup(address)?;
         Some(ResolvedSymbol {
@@ -348,6 +345,14 @@ impl BinaryRegistry {
             is_main: false,
             language: symbol.language,
         })
+    }
+
+    /// Install kernel symbols from a `/proc/kallsyms`-style blob (the
+    /// recorder pushes this once at session start via the sink's
+    /// `on_kallsyms`). No-op on macOS, where the kernel collection is
+    /// read on demand instead.
+    pub fn set_kallsyms(&self, bytes: &[u8]) {
+        self.kernel_symbols.set_from_kallsyms(bytes);
     }
 
     /// Look up a sampled address in the locally-mapped dyld

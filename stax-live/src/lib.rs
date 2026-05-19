@@ -25,7 +25,6 @@ mod cfg;
 mod classify;
 mod disassemble;
 mod highlight;
-#[cfg(target_os = "macos")]
 mod kernel_symbols;
 pub mod source;
 

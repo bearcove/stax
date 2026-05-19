@@ -95,6 +95,9 @@ struct Session<'s> {
     /// Threads currently off-CPU: tid -> (switch-out ns, parked stack).
     /// Closed into an off-CPU interval on the matching switch-in.
     off_start: HashMap<u32, (u64, Box<[u64]>)>,
+    /// Kernel symbol name -> address, for turning a blocked thread's
+    /// `/proc/.../wchan` into the off-CPU leaf (the block reason).
+    kallsyms: HashMap<String, u64>,
     /// Newest timestamp seen on any ring; bounds still-blocked threads
     /// at teardown.
     last_ts: u64,
@@ -254,11 +257,23 @@ impl Session<'_> {
             if misc & PERF_RECORD_MISC_SWITCH_OUT_PREEMPT != 0 {
                 return;
             }
-            let stack = self
-                .last_user_stack
-                .get(&sid_tid)
-                .cloned()
-                .unwrap_or_default();
+            // Lead the off-CPU stack with the kernel wait site (from
+            // wchan) so the aggregator classifies the reason and the
+            // off-CPU flame shows `<wait fn> -> <user call path>`.
+            // Falls back to just the parked user stack when wchan
+            // isn't resolvable.
+            let parked = self.last_user_stack.get(&sid_tid);
+            let stack: Box<[u64]> = match wchan_addr(self.opts.pid, sid_tid, &self.kallsyms) {
+                Some(waddr) => {
+                    let mut v = Vec::with_capacity(1 + parked.map_or(0, |s| s.len()));
+                    v.push(waddr);
+                    if let Some(s) = parked {
+                        v.extend_from_slice(s);
+                    }
+                    v.into_boxed_slice()
+                }
+                None => parked.cloned().unwrap_or_default(),
+            };
             self.off_start.insert(sid_tid, (time, stack));
         } else if let Some((start, stack)) = self.off_start.remove(&sid_tid) {
             if time > start {
@@ -442,6 +457,46 @@ impl Session<'_> {
     }
 }
 
+/// Parse `/proc/kallsyms` into a kernel-text name -> address map.
+/// Only `t`/`T`/`w`/`W` symbols in the kernel half are kept — that's
+/// the universe `/proc/<tid>/wchan` reports.
+fn parse_kallsyms_names(bytes: &[u8]) -> HashMap<String, u64> {
+    let mut map = HashMap::new();
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return map;
+    };
+    for line in text.lines() {
+        let mut it = line.split_whitespace();
+        let (Some(addr), Some(kind), Some(name)) = (it.next(), it.next(), it.next()) else {
+            continue;
+        };
+        if !matches!(kind, "t" | "T" | "w" | "W") {
+            continue;
+        }
+        if let Ok(a) = u64::from_str_radix(addr, 16) {
+            if a >= 0xffff_0000_0000_0000 {
+                map.entry(name.to_owned()).or_insert(a);
+            }
+        }
+    }
+    map
+}
+
+/// Resolve a thread's current kernel wait site via
+/// `/proc/<pid>/task/<tid>/wchan` (a symbol name) into a kernel
+/// address, so it can lead the off-CPU stack. World-readable and
+/// symbolic when `kptr_restrict` allows; `"0"`/empty means "not
+/// resolvably blocked" -> caller falls back to the parked user stack.
+fn wchan_addr(pid: u32, tid: u32, kallsyms: &HashMap<String, u64>) -> Option<u64> {
+    let path = format!("/proc/{pid}/task/{tid}/wchan");
+    let s = std::fs::read_to_string(path).ok()?;
+    let name = s.trim();
+    if name.is_empty() || name == "0" {
+        return None;
+    }
+    kallsyms.get(name).copied()
+}
+
 /// Drain one ring and dispatch every complete record in it. Shared by
 /// the steady-state loop and the post-stop final sweep, across both the
 /// sampling and context-switch ring sets.
@@ -469,11 +524,21 @@ pub fn run(
     let start = Instant::now();
 
     // Kernel symbols up front, same as the kperf backend, so the
-    // analysis side can resolve kernel_backtrace addresses.
-    match std::fs::read("/proc/kallsyms") {
-        Ok(k) => sink.on_kallsyms(&k),
-        Err(e) => warn!(%e, "could not read /proc/kallsyms; kernel frames stay raw"),
-    }
+    // analysis side can resolve kernel_backtrace addresses. We also
+    // keep a name->addr map so a blocked thread's `/proc/.../wchan`
+    // (a kernel symbol name) can be turned into an address and used
+    // as the off-CPU leaf — that's what makes the reason classifier
+    // (futex/pipe/poll/...) bite on Linux.
+    let kallsyms = match std::fs::read("/proc/kallsyms") {
+        Ok(k) => {
+            sink.on_kallsyms(&k);
+            parse_kallsyms_names(&k)
+        }
+        Err(e) => {
+            warn!(%e, "could not read /proc/kallsyms; kernel frames stay raw");
+            HashMap::new()
+        }
+    };
 
     let cpus = online_cpus();
     let mut rings: Vec<PerfRing> = Vec::with_capacity(cpus.len());
@@ -540,6 +605,7 @@ pub fn run(
         max_on_cpu_gap_ns: nominal_period_ns.saturating_mul(4),
         last_user_stack: HashMap::new(),
         off_start: HashMap::new(),
+        kallsyms,
         last_ts: 0,
         summary: RecordSummary::default(),
     };

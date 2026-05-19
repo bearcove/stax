@@ -50,11 +50,11 @@ console.log(
     `ready=${ms(o.readiness_ns)} sleep=${ms(o.sleep_ns)} other=${ms(o.other_ns)}`,
 );
 if (offTotal <= 0n) die("off-CPU total is 0 (context-switch ring not working)");
-// Reason buckets need the kernel block site (wchan) — that depends on
-// Linux kernel symbolization (a separate increment). Until then off-CPU
-// reads as 'Other'; report it but don't fail on it.
-if (o.other_ns >= offTotal) {
-  console.log("  (reasons pending Linux kernel symbolization — all 'Other' for now)");
+// The workload deliberately sleeps and futex/cond-waits, so the
+// kallsyms+wchan classifier must bucket most of it into real reasons,
+// not 'Other'.
+if (o.other_ns * 2n >= offTotal) {
+  die(`off-CPU mostly 'Other' (${ms(o.other_ns)}ms/${ms(offTotal)}ms) — classifier not biting`);
 }
 
 // 3. top-N — must be symbolized
@@ -67,8 +67,12 @@ console.log(
 );
 if (named.length === 0) die("no top entry is symbolized");
 
-// 4. disassembly with cost annotation + structured tokens
-const target = named[0];
+// 4. disassembly with cost annotation + structured tokens. Pick a
+// *user-space* symbol: kernel frames (high-half addrs, now surfaced as
+// off-CPU leaves) have no on-disk text to disassemble — expected.
+const KERNEL = 0xffff_0000_0000_0000n;
+const target = named.find((e) => e.address < KERNEL);
+if (!target) die("no user-space symbol in top to annotate");
 const ann = await client.annotated(target.address, params);
 const withTokens = ann.lines.filter((l) => l.tokens.length > 0);
 const withCost = ann.lines.filter((l) => l.self_on_cpu_ns > 0n);
