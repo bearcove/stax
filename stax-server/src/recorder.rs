@@ -7,18 +7,19 @@
 //! target is spawned. Per-target staxd sampling is the same path
 //! whether the CLI spawned the PID or attached to an existing one.
 
-#![cfg(target_os = "macos")]
-
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+#[cfg(target_os = "macos")]
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use stax_core::cmd_record_mac::LiveOnlySink;
+use stax_core::live_only_sink::LiveOnlySink;
+#[cfg(target_os = "macos")]
+use stax_core::live_sink::MachOByteSource;
 use stax_core::live_sink::{
     BinaryLoadedEvent as LiveBinaryLoaded, BinaryUnloadedEvent as LiveBinaryUnloaded,
     CpuIntervalEvent as LiveCpuInterval, CpuIntervalKind as LiveCpuIntervalKind, LiveSink,
-    MachOByteSource, SampleEvent as LiveSampleEvent, TargetAttached, ThreadName,
-    WakeupEvent as LiveWakeup,
+    SampleEvent as LiveSampleEvent, TargetAttached, ThreadName, WakeupEvent as LiveWakeup,
 };
 use stax_live::{IntervalKind, LiveSymbolOwned, LoadedBinary, PmuSample};
 use stax_live_proto::{RunId, StopReason};
@@ -96,73 +97,94 @@ async fn run_attach(
     time_limit: Option<Duration>,
     stop_flag: Arc<AtomicBool>,
 ) -> eyre::Result<StopReason> {
-    let opts = staxd_client::RemoteOptions {
-        daemon_socket,
-        pid,
-        frequency_hz,
-        duration: time_limit,
-        ..Default::default()
-    };
-
     let recording_start = Instant::now();
     tracing::info!(
         run_id = run_id.0,
         pid,
-        frequency_hz = opts.frequency_hz,
-        daemon_socket = %opts.daemon_socket,
+        frequency_hz,
         "recording lifecycle starting"
     );
 
-    let sink = LiveOnlySink::new(Some(Box::new(ServerLiveSink {
+    let mut sink = LiveOnlySink::new(Some(Box::new(ServerLiveSink {
         server: server.clone(),
         run_id,
     })));
     sink.notify_target_attached(pid);
 
-    let stop_flag_for_should_stop = stop_flag.clone();
-    let mut stop_reason_logged = false;
-    let should_stop = move || {
-        if stop_flag_for_should_stop.load(Ordering::Relaxed) {
-            if !stop_reason_logged {
-                stop_reason_logged = true;
-                tracing::info!("recording stop requested");
+    // macOS: stream from the privileged staxd kperf/kdebug daemon.
+    // Linux: open perf_event_open in-process (no daemon needed when
+    // perf_event_paranoid permits; the systemd-unit privileged path is
+    // a deployment follow-up).
+    #[cfg(target_os = "macos")]
+    let result: eyre::Result<()> = {
+        let opts = staxd_client::RemoteOptions {
+            daemon_socket,
+            pid,
+            frequency_hz,
+            duration: time_limit,
+            ..Default::default()
+        };
+        let stop_flag_for_should_stop = stop_flag.clone();
+        let mut stop_reason_logged = false;
+        let should_stop = move || {
+            if stop_flag_for_should_stop.load(Ordering::Relaxed) {
+                if !stop_reason_logged {
+                    stop_reason_logged = true;
+                    tracing::info!("recording stop requested");
+                }
+                return true;
             }
-            return true;
-        }
-        false
+            false
+        };
+        let on_first_batch = move || {
+            tracing::info!(run_id = run_id.0, "staxd-client first batch observed");
+        };
+        staxd_client::drive_session_with_hooks(opts, sink, should_stop, on_first_batch, |_, _| {})
+            .await
+            .map_err(|e| eyre::eyre!("staxd-client failed: {e}"))
     };
 
-    let on_first_batch = move || {
-        tracing::info!(run_id = run_id.0, "staxd-client first batch observed");
+    #[cfg(target_os = "linux")]
+    let result: eyre::Result<()> = {
+        let _ = &daemon_socket; // unused on Linux (no staxd socket)
+        let opts = stax_linux_capture::RecordOptions {
+            pid,
+            frequency_hz,
+            duration: time_limit,
+            kernel_stacks: true,
+        };
+        // Synchronous drain loop; this is already a dedicated thread
+        // whose only job is this recording, so blocking it is correct.
+        let summary = stax_linux_capture::record(&opts, &mut sink, &stop_flag)?;
+        tracing::info!(
+            run_id = run_id.0,
+            samples = summary.samples,
+            binaries = summary.binaries,
+            intervals = summary.intervals,
+            lost = summary.lost_records,
+            "perf_event_open capture finished"
+        );
+        Ok(())
     };
-
-    let result = staxd_client::drive_session_with_hooks(
-        opts,
-        sink,
-        should_stop,
-        on_first_batch,
-        |_, _| {},
-    )
-    .await;
 
     match &result {
         Ok(()) => tracing::info!(
             run_id = run_id.0,
             elapsed = ?recording_start.elapsed(),
-            "drive_session completed"
+            "recording session completed"
         ),
         Err(e) => tracing::warn!(
             run_id = run_id.0,
             elapsed = ?recording_start.elapsed(),
             error = %e,
-            "drive_session failed"
+            "recording session failed"
         ),
     }
 
     match result {
         Ok(()) => Ok(StopReason::UserStop),
         Err(e) => Ok(StopReason::RecorderError {
-            message: format!("staxd-client failed: {e}"),
+            message: format!("{e}"),
         }),
     }
 }
@@ -271,6 +293,7 @@ impl LiveSink for ServerLiveSink {
         self.server.bump_revision();
     }
 
+    #[cfg(target_os = "macos")]
     async fn on_macho_byte_source(&self, source: Arc<dyn MachOByteSource>) {
         self.server.binaries().write().set_macho_byte_source(source);
     }

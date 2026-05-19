@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use stax_mac_capture::{
-    BinaryLoadedEvent, SampleEvent, SampleSink, ThreadNameEvent,
+    BinaryLoadedEvent, CpuIntervalEvent, CpuIntervalKind, SampleEvent, SampleSink, ThreadNameEvent,
 };
 use tracing::{debug, info, warn};
 
@@ -67,6 +67,15 @@ struct Session<'s> {
     sink: &'s mut dyn SampleSink,
     images: ImageRegistry,
     thread_names: HashMap<u32, String>,
+    /// Last sample timestamp seen per tid. Each new sample closes an
+    /// on-CPU interval `[prev, now)` for that thread (see `on_sample`).
+    last_sample_ts: HashMap<u32, u64>,
+    /// Cap on a synthesized on-CPU interval. A gap longer than this
+    /// between two samples of a thread means the thread was almost
+    /// certainly off-CPU (perf doesn't sample parked threads), so we
+    /// only credit one capped slice rather than fabricating seconds of
+    /// on-CPU time. Real off-CPU accounting is Phase 2-B.
+    max_on_cpu_gap_ns: u64,
     summary: RecordSummary,
 }
 
@@ -146,6 +155,40 @@ impl Session<'_> {
             l1d_misses: 0,
             branch_mispreds: 0,
         });
+
+        // Synthesize the on-CPU interval the aggregator needs for time
+        // attribution. macOS gets ground-truth slices from MACH_SCHED;
+        // a perf frequency profiler instead lets each sample own the
+        // CPU time until the thread's next sample. We close the
+        // *previous* sample's interval `[prev, now)` now that we know
+        // when it ended, capping the duration so a long gap (thread was
+        // parked, perf doesn't sample parked threads) isn't mis-booked
+        // as on-CPU. The aggregator finds exactly the prev sample
+        // inside `[prev, prev+dur)` (end exclusive) and credits it the
+        // whole slice. Out-of-order arrivals across per-CPU rings are
+        // tolerated by only advancing on a strictly newer timestamp,
+        // keeping per-thread interval starts monotonic.
+        if time != 0 {
+            let prev = self.last_sample_ts.get(&tid).copied();
+            if let Some(prev) = prev {
+                if time > prev {
+                    let dur = (time - prev).min(self.max_on_cpu_gap_ns);
+                    if dur > 0 {
+                        self.sink.on_cpu_interval(CpuIntervalEvent {
+                            pid,
+                            tid,
+                            start_ns: prev,
+                            end_ns: prev + dur,
+                            kind: CpuIntervalKind::OnCpu,
+                        });
+                        self.summary.intervals = self.summary.intervals.saturating_add(1);
+                    }
+                }
+            }
+            if prev.is_none_or(|p| time > p) {
+                self.last_sample_ts.insert(tid, time);
+            }
+        }
     }
 
     fn on_mmap2(&mut self, misc: u16, body: &[u8]) {
@@ -332,11 +375,20 @@ pub fn run(
         })
         .collect();
 
+    let nominal_period_ns = if opts.frequency_hz == 0 {
+        1_000_000 // 1ms fallback; freq is validated upstream but be safe.
+    } else {
+        1_000_000_000 / opts.frequency_hz as u64
+    };
     let mut sess = Session {
         opts: opts.clone(),
         sink,
         images: ImageRegistry::default(),
         thread_names: HashMap::new(),
+        last_sample_ts: HashMap::new(),
+        // Allow a few missed samples (jitter, brief preemption) before
+        // declaring the thread was off-CPU for the gap.
+        max_on_cpu_gap_ns: nominal_period_ns.saturating_mul(4),
         summary: RecordSummary::default(),
     };
 
@@ -418,6 +470,7 @@ pub fn run(
     info!(
         samples = summary.samples,
         binaries = summary.binaries,
+        intervals = summary.intervals,
         lost = summary.lost_records,
         elapsed_ms = start.elapsed().as_millis() as u64,
         "linux perf capture finished"

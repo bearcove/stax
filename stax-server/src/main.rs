@@ -11,7 +11,6 @@
 //! `recorder::spawn_attach` / `recorder::spawn_launch`. The old
 //! `stax-shade` companion process has been deleted.
 
-#[cfg(target_os = "macos")]
 mod recorder;
 
 use std::path::PathBuf;
@@ -450,28 +449,18 @@ impl RunControl for ServerState {
         daemon_socket: String,
         time_limit_secs: Option<u64>,
     ) -> Result<RunId, RunControlError> {
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (pid, config, daemon_socket, time_limit_secs);
-            return Err(RunControlError::SpawnFailed {
-                detail: "stax-server recording is macOS-only".to_owned(),
-            });
-        }
-        #[cfg(target_os = "macos")]
-        {
-            let frequency_hz = config.frequency_hz;
-            let time_limit = time_limit_secs.map(Duration::from_secs);
-            let run_id = self.begin_run(config)?;
-            recorder::spawn_attach(
-                self.clone(),
-                run_id,
-                pid,
-                frequency_hz,
-                daemon_socket,
-                time_limit,
-            );
-            Ok(run_id)
-        }
+        let frequency_hz = config.frequency_hz;
+        let time_limit = time_limit_secs.map(Duration::from_secs);
+        let run_id = self.begin_run(config)?;
+        recorder::spawn_attach(
+            self.clone(),
+            run_id,
+            pid,
+            frequency_hz,
+            daemon_socket,
+            time_limit,
+        );
+        Ok(run_id)
     }
 
     async fn wait_active(&self, condition: WaitCondition, timeout_ms: Option<u64>) -> WaitOutcome {
@@ -541,11 +530,21 @@ fn init_logging() {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,stax_server=info,vox::server=debug"));
 
-    let oslog = tracing_oslog::OsLogger::new("eu.bearcove.stax-server", "default");
-
+    // macOS: fan out to os_log (Console.app / `log stream`). Linux:
+    // plain stderr — journald captures it when run under systemd.
+    #[cfg(target_os = "macos")]
     tracing_subscriber::registry()
         .with(filter)
-        .with(oslog)
+        .with(tracing_oslog::OsLogger::new(
+            "eu.bearcove.stax-server",
+            "default",
+        ))
+        .init();
+
+    #[cfg(not(target_os = "macos"))]
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
 }
 

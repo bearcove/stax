@@ -15,6 +15,6 @@ pub mod recorder;
 pub mod sample_sink;
 
 pub use sample_sink::{
-    BinaryLoadedEvent, BinaryUnloadedEvent, JitdumpEvent, MachOByteSource, SampleEvent, SampleSink,
-    ThreadNameEvent, WakeupEvent,
+    BinaryLoadedEvent, BinaryUnloadedEvent, CpuIntervalEvent, CpuIntervalKind, JitdumpEvent,
+    MachOByteSource, SampleEvent, SampleSink, ThreadNameEvent, WakeupEvent,
 };

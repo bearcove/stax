@@ -11,9 +11,13 @@
 //! `perf_event_paranoid`) is layered on in a later phase; the parsing
 //! core lives here so both paths share it.
 //!
-//! Off-CPU intervals and wakeup attribution (the `CpuIntervalEvent` /
-//! `WakeupEvent` parity, via `sched_*` tracepoints) are a deliberate
-//! follow-on — this is the on-CPU flamegraph spine.
+//! On-CPU `CpuIntervalEvent`s are synthesized from consecutive
+//! per-thread samples (the perf-frequency analog of macOS's
+//! ground-truth MACH_SCHED slices) so the aggregator's time
+//! attribution — and therefore `stax top`/flamegraph — works. Real
+//! off-CPU intervals and wakeup attribution (via `sched_*`
+//! tracepoints, with true scheduler durations) are a deliberate
+//! follow-on; this is the on-CPU flamegraph spine.
 
 #![cfg(target_os = "linux")]
 
@@ -67,6 +71,9 @@ pub struct RecordSummary {
     /// Ring-buffer records the kernel reported as lost (overruns).
     pub lost_records: u64,
     pub binaries: u64,
+    /// Synthetic on-CPU intervals emitted from consecutive samples
+    /// (the perf-frequency analog of macOS MACH_SCHED slices).
+    pub intervals: u64,
     pub session_ns: u64,
 }
 

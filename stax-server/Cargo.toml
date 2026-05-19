@@ -13,21 +13,25 @@ stax-vox-observe = { version = "0.1", path = "../stax-vox-observe" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 log = "0.4"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter"] }
-tracing-oslog = "0.3"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }
 parking_lot = "0.12"
 async-trait = "0.1"
 
 eyre = "0.6"
 libc = "0.2"
 
+stax-core = { path = "..", default-features = false }
+
 vox = { version = "0.5", features = ["transport-websocket"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 stax-mac-shared-cache = { version = "0.1", path = "../stax-mac-shared-cache" }
 stax-mac-capture = { version = "0.1", path = "../stax-mac-capture" }
-stax-core = { path = "..", default-features = false }
 staxd-client = { path = "../staxd-client" }
+tracing-oslog = "0.3"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+stax-linux-capture = { version = "0.1", path = "../stax-linux-capture" }
 
 [[bin]]
 name = "stax-server"

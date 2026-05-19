@@ -4,10 +4,11 @@ use std::path::PathBuf;
 use std::process::exit;
 
 use figue as args;
-use stax_core::{
-    args::{AnnotateArgs, Cli, Command, FlameArgs, RecordArgs, ThreadsArgs, TopArgs, WaitArgs},
-    cmd_setup_mac,
+use stax_core::args::{
+    AnnotateArgs, Cli, Command, FlameArgs, RecordArgs, ThreadsArgs, TopArgs, WaitArgs,
 };
+#[cfg(target_os = "macos")]
+use stax_core::cmd_setup_mac;
 use stax_live_proto::{
     DiagnosticsSnapshot, FlameNode, FlamegraphUpdate, LiveFilter, OffCpuBreakdown, ProfilerClient,
     RunControlClient, RunSummary, ServerStatus, StopReason, ThreadsUpdate, TopSort, ViewParams,
@@ -47,7 +48,15 @@ fn main_impl() -> Result<(), Box<dyn Error>> {
 
     match cli.command {
         Command::Record(args) => run_record(args)?,
+        #[cfg(target_os = "macos")]
         Command::Setup(args) => cmd_setup_mac::main(args)?,
+        #[cfg(not(target_os = "macos"))]
+        Command::Setup(_args) => {
+            return Err("stax setup is macOS-only (codesign/launchd); \
+                        on Linux run stax-server directly or via a \
+                        systemd unit"
+                .into());
+        }
         Command::Status => block_on_async(async { run_status().await })?,
         Command::List => block_on_async(async { run_list().await })?,
         Command::Diagnose => block_on_async(async { run_diagnose().await })?,
@@ -76,10 +85,15 @@ fn init_tracing() {
 
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,stax=info,stax_vox_observe=info"));
-    let oslog = tracing_oslog::OsLogger::new("eu.bearcove.stax", "default");
+    #[cfg(target_os = "macos")]
     let _ = tracing_subscriber::registry()
         .with(filter)
-        .with(oslog)
+        .with(tracing_oslog::OsLogger::new("eu.bearcove.stax", "default"))
+        .try_init();
+    #[cfg(not(target_os = "macos"))]
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .try_init();
 }
 
@@ -442,6 +456,7 @@ impl Drop for RawMode {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn current_terminal_size() -> Option<TerminalSize> {
     let mut size = std::mem::MaybeUninit::<libc::winsize>::uninit();
     let r = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, size.as_mut_ptr()) };
