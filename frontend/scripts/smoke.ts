@@ -38,6 +38,25 @@ console.log(
 if (flame.total_on_cpu_ns <= 0n) die("flamegraph total_on_cpu_ns == 0");
 if (kids === 0) die("flamegraph root has no children");
 
+// 2b. off-CPU breakdown — must be populated and reason-classified
+const o = flame.total_off_cpu;
+const offTotal =
+  o.idle_ns + o.lock_ns + o.semaphore_ns + o.ipc_ns + o.io_read_ns +
+  o.io_write_ns + o.readiness_ns + o.sleep_ns + o.connect_ns + o.other_ns;
+const ms = (n: bigint) => (Number(n) / 1e6).toFixed(1);
+console.log(
+  `off-CPU: total=${ms(offTotal)}ms  idle=${ms(o.idle_ns)} lock=${ms(o.lock_ns)} ` +
+    `sem=${ms(o.semaphore_ns)} ioR=${ms(o.io_read_ns)} ioW=${ms(o.io_write_ns)} ` +
+    `ready=${ms(o.readiness_ns)} sleep=${ms(o.sleep_ns)} other=${ms(o.other_ns)}`,
+);
+if (offTotal <= 0n) die("off-CPU total is 0 (context-switch ring not working)");
+// Reason buckets need the kernel block site (wchan) — that depends on
+// Linux kernel symbolization (a separate increment). Until then off-CPU
+// reads as 'Other'; report it but don't fail on it.
+if (o.other_ns >= offTotal) {
+  console.log("  (reasons pending Linux kernel symbolization — all 'Other' for now)");
+}
+
 // 3. top-N — must be symbolized
 const top = await client.top(20, bySelf, params);
 console.log(`top: ${top.length} entries`);

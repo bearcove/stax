@@ -87,25 +87,37 @@ fn sampling_attr(freq_hz: u32, kernel_stacks: bool) -> pe::bindings::perf_event_
     attr
 }
 
-/// Open + mmap one ring on `cpu`. `pid = -1` → system-wide on that CPU.
-pub fn open_cpu(cpu: u32, freq_hz: u32, kernel_stacks: bool) -> io::Result<PerfRing> {
-    let mut attr = sampling_attr(freq_hz, kernel_stacks);
-    // SAFETY: FFI; attr is a valid initialized struct, fd args follow
-    // the perf_event_open contract (pid=-1, cpu=N, no group, cloexec).
-    let fd = unsafe {
-        pe::perf_event_open(
-            &mut attr,
-            -1,
-            cpu as i32,
-            -1,
-            pe::bindings::PERF_FLAG_FD_CLOEXEC as u64,
-        )
-    };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let fd = fd as RawFd;
+/// Side-band-only attr for context-switch tracking: a `DUMMY` software
+/// event (counts nothing, emits no samples) with `context_switch` set,
+/// so the kernel writes `PERF_RECORD_SWITCH_CPU_WIDE` records into the
+/// ring on every on/off-CPU transition. `sample_id_all` makes those
+/// records carry the TID/TIME/CPU trailer we need to attribute them.
+///
+/// This is the unprivileged off-CPU path: it needs only
+/// `perf_event_paranoid` low enough (same as the sampling event) — no
+/// tracefs / `sched:sched_switch` tracepoint id (that lives in
+/// root-only `tracing/`). No `mmap`/`comm`/`task`: the sampling ring
+/// already owns image + thread bookkeeping.
+fn switch_attr() -> pe::bindings::perf_event_attr {
+    // SAFETY: POD struct; zeroing then setting `size` is the documented
+    // way to initialise a perf_event_attr.
+    let mut attr: pe::bindings::perf_event_attr = unsafe { mem::zeroed() };
+    attr.type_ = pe::bindings::PERF_TYPE_SOFTWARE;
+    attr.size = mem::size_of::<pe::bindings::perf_event_attr>() as u32;
+    attr.config = pe::bindings::PERF_COUNT_SW_DUMMY as u64;
+    attr.sample_type = (pe::bindings::PERF_SAMPLE_TID
+        | pe::bindings::PERF_SAMPLE_TIME
+        | pe::bindings::PERF_SAMPLE_CPU) as u64;
+    attr.set_disabled(1);
+    attr.set_context_switch(1);
+    // Append the sample_type trailer to the SWITCH records.
+    attr.set_sample_id_all(1);
+    attr
+}
 
+/// mmap the ring for an already-opened perf fd and wrap it in a
+/// `PerfRing`. Shared by the sampling and context-switch openers.
+fn map_ring(fd: RawFd) -> io::Result<PerfRing> {
     let ps = page_size();
     let mmap_len = (1 + DATA_PAGES) * ps;
     // SAFETY: mapping the perf ring for `fd`; len is the documented
@@ -136,6 +148,36 @@ pub fn open_cpu(cpu: u32, freq_hz: u32, kernel_stacks: bool) -> io::Result<PerfR
         data_size: DATA_PAGES * ps,
         tail: 0,
     })
+}
+
+/// Open the per-CPU `perf_event_open` fd for `attr` (system-wide:
+/// `pid = -1`, `cpu = N`, no group, cloexec) and mmap its ring.
+fn open_ring(attr: &mut pe::bindings::perf_event_attr, cpu: u32) -> io::Result<PerfRing> {
+    // SAFETY: FFI; attr is a valid initialized struct, fd args follow
+    // the perf_event_open contract (pid=-1, cpu=N, no group, cloexec).
+    let fd = unsafe {
+        pe::perf_event_open(
+            attr,
+            -1,
+            cpu as i32,
+            -1,
+            pe::bindings::PERF_FLAG_FD_CLOEXEC as u64,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    map_ring(fd as RawFd)
+}
+
+/// Open + mmap one sampling ring on `cpu`. `pid = -1` → system-wide.
+pub fn open_cpu(cpu: u32, freq_hz: u32, kernel_stacks: bool) -> io::Result<PerfRing> {
+    open_ring(&mut sampling_attr(freq_hz, kernel_stacks), cpu)
+}
+
+/// Open + mmap one context-switch (off-CPU) tracking ring on `cpu`.
+pub fn open_cpu_switch(cpu: u32) -> io::Result<PerfRing> {
+    open_ring(&mut switch_attr(), cpu)
 }
 
 impl PerfRing {

@@ -14,10 +14,16 @@
 //! On-CPU `CpuIntervalEvent`s are synthesized from consecutive
 //! per-thread samples (the perf-frequency analog of macOS's
 //! ground-truth MACH_SCHED slices) so the aggregator's time
-//! attribution — and therefore `stax top`/flamegraph — works. Real
-//! off-CPU intervals and wakeup attribution (via `sched_*`
-//! tracepoints, with true scheduler durations) are a deliberate
-//! follow-on; this is the on-CPU flamegraph spine.
+//! attribution — and therefore `stax top`/flamegraph — works.
+//!
+//! Off-CPU `CpuIntervalEvent`s come from a side-band
+//! `PERF_RECORD_SWITCH_CPU_WIDE` ring (a `DUMMY` event with
+//! `context_switch` set — no root-only tracefs `sched_switch`
+//! tracepoint needed): a voluntary switch-out opens an off-CPU span
+//! whose stack is the thread's last sampled stack (its "parked"
+//! stack, mirroring macOS), and the matching switch-in closes it with
+//! a true scheduler duration. Wakeup attribution (`waker_tid` via
+//! `sched_waking`) stays a follow-on.
 
 #![cfg(target_os = "linux")]
 
@@ -74,6 +80,8 @@ pub struct RecordSummary {
     /// Synthetic on-CPU intervals emitted from consecutive samples
     /// (the perf-frequency analog of macOS MACH_SCHED slices).
     pub intervals: u64,
+    /// Off-CPU intervals emitted from context-switch records.
+    pub off_cpu_intervals: u64,
     pub session_ns: u64,
 }
 

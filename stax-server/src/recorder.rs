@@ -161,6 +161,7 @@ async fn run_attach(
             samples = summary.samples,
             binaries = summary.binaries,
             intervals = summary.intervals,
+            off_cpu_intervals = summary.off_cpu_intervals,
             lost = summary.lost_records,
             "perf_event_open capture finished"
         );

@@ -13,6 +13,7 @@ use tracing::{debug, info, warn};
 
 use crate::sys::{
     PERF_CONTEXT_KERNEL, PERF_CONTEXT_MAX, PERF_CONTEXT_USER, PerfRing, online_cpus, open_cpu,
+    open_cpu_switch,
 };
 use crate::{RecordOptions, RecordSummary};
 
@@ -20,9 +21,19 @@ use crate::{RecordOptions, RecordSummary};
 const PERF_RECORD_MMAP: u32 = 1;
 const PERF_RECORD_LOST: u32 = 2;
 const PERF_RECORD_COMM: u32 = 3;
-const PERF_RECORD_MMAP2: u32 = 10;
 const PERF_RECORD_SAMPLE: u32 = 9;
+const PERF_RECORD_MMAP2: u32 = 10;
+/// Context-switch record emitted by a cpu-wide event with
+/// `context_switch` set (we open per-CPU/system-wide, so it's the
+/// CPU_WIDE variant, which carries the *other* side's pid/tid).
+const PERF_RECORD_SWITCH_CPU_WIDE: u32 = 15;
 const PERF_RECORD_MISC_MMAP_BUILD_ID: u16 = 1 << 14;
+/// Set on a SWITCH record when the thread is leaving the CPU (vs being
+/// scheduled in).
+const PERF_RECORD_MISC_SWITCH_OUT: u16 = 1 << 13;
+/// Set on a switch-out when it was an involuntary preemption (the
+/// thread stayed runnable) rather than a voluntary block/sleep.
+const PERF_RECORD_MISC_SWITCH_OUT_PREEMPT: u16 = 1 << 14;
 
 /// Little-endian cursor over a single record's bytes (perf records are
 /// native-endian; every Linux target stax runs on is LE).
@@ -74,8 +85,19 @@ struct Session<'s> {
     /// between two samples of a thread means the thread was almost
     /// certainly off-CPU (perf doesn't sample parked threads), so we
     /// only credit one capped slice rather than fabricating seconds of
-    /// on-CPU time. Real off-CPU accounting is Phase 2-B.
+    /// on-CPU time. The matching real off-CPU span comes from the
+    /// context-switch ring (see `on_switch`).
     max_on_cpu_gap_ns: u64,
+    /// Last user stack seen per tid (leaf-first). When a thread blocks
+    /// (voluntary switch-out) this is its "parked" stack, credited to
+    /// the off-CPU interval — same model as the macOS backend.
+    last_user_stack: HashMap<u32, Box<[u64]>>,
+    /// Threads currently off-CPU: tid -> (switch-out ns, parked stack).
+    /// Closed into an off-CPU interval on the matching switch-in.
+    off_start: HashMap<u32, (u64, Box<[u64]>)>,
+    /// Newest timestamp seen on any ring; bounds still-blocked threads
+    /// at teardown.
+    last_ts: u64,
     summary: RecordSummary,
 }
 
@@ -86,6 +108,7 @@ impl Session<'_> {
             PERF_RECORD_MMAP2 => self.on_mmap2(misc, body),
             PERF_RECORD_MMAP => self.on_mmap(body),
             PERF_RECORD_COMM => self.on_comm(body),
+            PERF_RECORD_SWITCH_CPU_WIDE => self.on_switch(misc, body),
             PERF_RECORD_LOST => {
                 let mut c = Cur::new(body);
                 let _id = c.u64();
@@ -187,6 +210,96 @@ impl Session<'_> {
             }
             if prev.is_none_or(|p| time > p) {
                 self.last_sample_ts.insert(tid, time);
+            }
+            self.last_ts = self.last_ts.max(time);
+        }
+
+        // Remember this thread's most recent *user* stack so a later
+        // voluntary switch-out can credit the off-CPU span to where the
+        // thread was when it parked (matches the macOS "cached PET
+        // stack" model). Skip in-kernel samples with no user frames so
+        // we don't clobber a good stack with an empty one.
+        if !user.is_empty() {
+            self.last_user_stack
+                .insert(tid, user.into_boxed_slice());
+        }
+    }
+
+    /// A `PERF_RECORD_SWITCH_CPU_WIDE`: the kernel telling us a thread
+    /// left or entered the CPU. A *voluntary* switch-out (not a
+    /// preemption) opens an off-CPU span with the thread's parked
+    /// stack; the matching switch-in closes it with the real scheduler
+    /// duration. The trailing `sample_id` (sample_id_all=1, sample_type
+    /// TID|TIME|CPU) identifies the task this record is *about* (the
+    /// outgoing task on switch-out, the incoming one on switch-in).
+    fn on_switch(&mut self, misc: u16, body: &[u8]) {
+        let mut c = Cur::new(body);
+        // CPU_WIDE body: next_prev_pid/tid (the *other* side) ...
+        let _next_prev_pid = c.u32();
+        let _next_prev_tid = c.u32();
+        // ... then the sample_id trailer in sample_type order.
+        let sid_pid = c.u32().unwrap_or(0);
+        let sid_tid = c.u32().unwrap_or(0);
+        let time = c.u64().unwrap_or(0);
+        if time != 0 {
+            self.last_ts = self.last_ts.max(time);
+        }
+        if sid_pid != self.opts.pid {
+            return; // system-wide ring; keep only the target.
+        }
+        if misc & PERF_RECORD_MISC_SWITCH_OUT != 0 {
+            // Preemption leaves the thread runnable — that's not the
+            // blocking off-CPU we attribute (it's CPU contention, and
+            // counting it would double-book against on-CPU).
+            if misc & PERF_RECORD_MISC_SWITCH_OUT_PREEMPT != 0 {
+                return;
+            }
+            let stack = self
+                .last_user_stack
+                .get(&sid_tid)
+                .cloned()
+                .unwrap_or_default();
+            self.off_start.insert(sid_tid, (time, stack));
+        } else if let Some((start, stack)) = self.off_start.remove(&sid_tid) {
+            if time > start {
+                self.sink.on_cpu_interval(CpuIntervalEvent {
+                    pid: self.opts.pid,
+                    tid: sid_tid,
+                    start_ns: start,
+                    end_ns: time,
+                    kind: CpuIntervalKind::OffCpu {
+                        stack: &stack,
+                        waker_tid: None,
+                        waker_user_stack: None,
+                    },
+                });
+                self.summary.off_cpu_intervals =
+                    self.summary.off_cpu_intervals.saturating_add(1);
+            }
+        }
+    }
+
+    /// At teardown, close out threads still parked: emit their open
+    /// off-CPU span ending at the last timestamp we saw, so a snapshot
+    /// taken right after stop still reflects idle worker pools etc.
+    fn flush_off_cpu(&mut self) {
+        let end = self.last_ts;
+        let pid = self.opts.pid;
+        for (tid, (start, stack)) in std::mem::take(&mut self.off_start) {
+            if end > start {
+                self.sink.on_cpu_interval(CpuIntervalEvent {
+                    pid,
+                    tid,
+                    start_ns: start,
+                    end_ns: end,
+                    kind: CpuIntervalKind::OffCpu {
+                        stack: &stack,
+                        waker_tid: None,
+                        waker_user_stack: None,
+                    },
+                });
+                self.summary.off_cpu_intervals =
+                    self.summary.off_cpu_intervals.saturating_add(1);
             }
         }
     }
@@ -329,6 +442,25 @@ impl Session<'_> {
     }
 }
 
+/// Drain one ring and dispatch every complete record in it. Shared by
+/// the steady-state loop and the post-stop final sweep, across both the
+/// sampling and context-switch ring sets.
+fn drain_dispatch(r: &mut PerfRing, scratch: &mut Vec<u8>, sess: &mut Session) {
+    scratch.clear();
+    r.drain(scratch);
+    let mut off = 0usize;
+    while off + 8 <= scratch.len() {
+        let ty = u32::from_le_bytes(scratch[off..off + 4].try_into().unwrap());
+        let misc = u16::from_le_bytes(scratch[off + 4..off + 6].try_into().unwrap());
+        let size = u16::from_le_bytes(scratch[off + 6..off + 8].try_into().unwrap()) as usize;
+        if size < 8 || off + size > scratch.len() {
+            break;
+        }
+        sess.handle(ty, misc, &scratch[off + 8..off + size]);
+        off += size;
+    }
+}
+
 pub fn run(
     opts: &RecordOptions,
     sink: &mut dyn SampleSink,
@@ -356,18 +488,35 @@ pub fn run(
             }
         }
     }
-    for r in &rings {
+    // Side-band context-switch rings for off-CPU attribution. Best
+    // effort: if these fail (older kernel without `context_switch`,
+    // stricter paranoid), we still get the on-CPU profile — just no
+    // off-CPU breakdown — rather than failing the whole recording.
+    let mut switch_rings: Vec<PerfRing> = Vec::with_capacity(cpus.len());
+    for cpu in &cpus {
+        match open_cpu_switch(*cpu) {
+            Ok(r) => switch_rings.push(r),
+            Err(e) => {
+                warn!(%e, "context-switch ring open failed; off-CPU disabled");
+                switch_rings.clear();
+                break;
+            }
+        }
+    }
+    for r in rings.iter().chain(switch_rings.iter()) {
         r.enable()?;
     }
     info!(
         pid = opts.pid,
         freq_hz = opts.frequency_hz,
         cpus = rings.len(),
+        off_cpu = !switch_rings.is_empty(),
         "linux perf capture started"
     );
 
     let mut pollfds: Vec<libc::pollfd> = rings
         .iter()
+        .chain(switch_rings.iter())
         .map(|r| libc::pollfd {
             fd: r.fd,
             events: libc::POLLIN,
@@ -389,6 +538,9 @@ pub fn run(
         // Allow a few missed samples (jitter, brief preemption) before
         // declaring the thread was off-CPU for the gap.
         max_on_cpu_gap_ns: nominal_period_ns.saturating_mul(4),
+        last_user_stack: HashMap::new(),
+        off_start: HashMap::new(),
+        last_ts: 0,
         summary: RecordSummary::default(),
     };
 
@@ -427,43 +579,20 @@ pub fn run(
         unsafe {
             libc::poll(pollfds.as_mut_ptr(), pollfds.len() as libc::nfds_t, 100);
         }
-        for r in &mut rings {
-            scratch.clear();
-            r.drain(&mut scratch);
-            let mut off = 0usize;
-            while off + 8 <= scratch.len() {
-                let ty = u32::from_le_bytes(scratch[off..off + 4].try_into().unwrap());
-                let misc = u16::from_le_bytes(scratch[off + 4..off + 6].try_into().unwrap());
-                let size =
-                    u16::from_le_bytes(scratch[off + 6..off + 8].try_into().unwrap()) as usize;
-                if size < 8 || off + size > scratch.len() {
-                    break;
-                }
-                sess.handle(ty, misc, &scratch[off + 8..off + size]);
-                off += size;
-            }
+        for r in rings.iter_mut().chain(switch_rings.iter_mut()) {
+            drain_dispatch(r, &mut scratch, &mut sess);
         }
     }
 
-    for r in &rings {
+    for r in rings.iter().chain(switch_rings.iter()) {
         r.disable();
     }
     // Final sweep so the tail of the recording isn't lost.
-    for r in &mut rings {
-        scratch.clear();
-        r.drain(&mut scratch);
-        let mut off = 0usize;
-        while off + 8 <= scratch.len() {
-            let ty = u32::from_le_bytes(scratch[off..off + 4].try_into().unwrap());
-            let misc = u16::from_le_bytes(scratch[off + 4..off + 6].try_into().unwrap());
-            let size = u16::from_le_bytes(scratch[off + 6..off + 8].try_into().unwrap()) as usize;
-            if size < 8 || off + size > scratch.len() {
-                break;
-            }
-            sess.handle(ty, misc, &scratch[off + 8..off + size]);
-            off += size;
-        }
+    for r in rings.iter_mut().chain(switch_rings.iter_mut()) {
+        drain_dispatch(r, &mut scratch, &mut sess);
     }
+    // Close out threads still parked at stop time.
+    sess.flush_off_cpu();
 
     sess.summary.session_ns = start.elapsed().as_nanos().min(u64::MAX as u128) as u64;
     let summary = sess.summary;
@@ -471,6 +600,7 @@ pub fn run(
         samples = summary.samples,
         binaries = summary.binaries,
         intervals = summary.intervals,
+        off_cpu_intervals = summary.off_cpu_intervals,
         lost = summary.lost_records,
         elapsed_ms = start.elapsed().as_millis() as u64,
         "linux perf capture finished"
