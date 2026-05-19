@@ -13,7 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use object::read::macho::MachOFile64;
+use object::read::macho::{LoadCommandVariant, MachOFile64};
 use object::{Endianness, Object, ObjectKind, ObjectSegment, ObjectSymbol};
 use stax_mac_capture::proc_maps::MachOSymbol;
 use stax_mac_capture::{BinaryLoadedEvent, BinaryUnloadedEvent, SampleSink};
@@ -288,10 +288,58 @@ fn parse_disk_macho(path: &str) -> Result<ParsedMachO, String> {
     raw.sort_by_key(|(a, _)| *a);
     raw.dedup_by_key(|(a, _)| *a);
 
+    // `LC_FUNCTION_STARTS` is the authoritative list of every function
+    // entry point — including functions the symbol table never names
+    // (inlined-only helpers, locals stripped by the linker, etc.). The
+    // nlist `n_value` gives a symbol's *start* but Mach-O carries no
+    // symbol size, so deriving a symbol's end from "the next *named*
+    // symbol's start" makes a named function swallow every following
+    // symbol-less function up to the next name. A sample landing in that
+    // dead-code gap (or in a sibling function that was inlined away and
+    // gated out at the call site) is then misattributed to the innocent
+    // preceding symbol. Bounding each symbol by the next *function start*
+    // instead keeps every symbol's range to its real extent; addresses in
+    // unnamed functions fall through to `binary+offset` (honest unknown)
+    // rather than poisoning a real symbol's self time.
+    let text_end = text_svma.saturating_add(text_vmsize);
+    let mut fn_starts: Vec<u64> = Vec::new();
+    if let Ok(mut commands) = file.macho_load_commands() {
+        while let Ok(Some(command)) = commands.next() {
+            if let Ok(LoadCommandVariant::LinkeditData(linkedit)) = command.variant() {
+                // `function_starts` errors for LinkeditData commands that
+                // aren't `LC_FUNCTION_STARTS`; skip those quietly.
+                if let Ok(mut iter) =
+                    linkedit.function_starts(file.endian(), file.data(), text_svma)
+                {
+                    while let Ok(Some(addr)) = iter.next() {
+                        fn_starts.push(addr);
+                    }
+                }
+            }
+        }
+    }
+    fn_starts.sort_unstable();
+    fn_starts.dedup();
+
     let mut symbols: Vec<MachOSymbol> = Vec::with_capacity(raw.len());
     for i in 0..raw.len() {
         let start = raw[i].0;
-        let end = raw.get(i + 1).map(|(a, _)| *a).unwrap_or(start + 4);
+        let end = if fn_starts.is_empty() {
+            // No function-starts table (stripped / unusual binary): fall
+            // back to the next-named-symbol heuristic.
+            raw.get(i + 1).map(|(a, _)| *a).unwrap_or(start + 4)
+        } else {
+            // First function start strictly after `start` == the true end
+            // of the function `start` belongs to. Clamp to the __TEXT
+            // segment so a trailing function can't run past the segment.
+            let next = fn_starts.partition_point(|&fs| fs <= start);
+            fn_starts
+                .get(next)
+                .copied()
+                .unwrap_or(text_end)
+                .min(text_end)
+                .max(start + 1)
+        };
         let name = std::mem::take(&mut raw[i].1);
         symbols.push(MachOSymbol {
             start_svma: start,
