@@ -12,7 +12,6 @@
 use std::env;
 use std::error::Error;
 use std::fs;
-#[cfg(target_os = "macos")]
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
