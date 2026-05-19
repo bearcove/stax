@@ -11,3 +11,5 @@ pub mod live_sink;
 pub mod cmd_record_mac;
 #[cfg(target_os = "macos")]
 pub mod cmd_setup_mac;
+#[cfg(target_os = "linux")]
+pub mod cmd_setup_linux;

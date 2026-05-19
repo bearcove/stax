@@ -27,10 +27,16 @@
 
 #![cfg(target_os = "linux")]
 
+mod daemon;
 mod elf;
 mod proc;
 mod session;
 mod sys;
+
+pub use daemon::record_via_daemon;
+/// The privileged half of the Linux fd broker, used by the `staxd`
+/// daemon to `perf_event_open` per CPU and report the ring geometry.
+pub use sys::{DATA_PAGES, online_cpus, open_cpu_fd, open_cpu_switch_fd, page_size};
 
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;

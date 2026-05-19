@@ -1,0 +1,23 @@
+[Unit]
+Description=stax privileged perf fd broker (staxd)
+Documentation=https://github.com/bearcove/stax
+After=network.target
+
+[Service]
+Type=simple
+# perf_event_open system-wide needs privilege. Running as root is the
+# simplest correct answer; CAP_PERFMON (5.8+) / CAP_SYS_ADMIN +
+# CAP_SYS_PTRACE are listed so a hardened deployment can instead drop
+# to a dedicated unprivileged user with just these ambient caps.
+User=root
+AmbientCapabilities=CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE
+ExecStart=/usr/local/bin/staxd --socket /run/staxd.sock
+Restart=always
+RestartSec=1
+Environment=RUST_LOG=staxd=info,stax_linux_capture=info,stax_vox_observe=info
+# Logs to the journal: journalctl -u eu.bearcove.staxd -f
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

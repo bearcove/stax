@@ -2458,8 +2458,10 @@ dependencies = [
  "perf-event-open-sys",
  "stax-demangle",
  "stax-mac-capture",
+ "staxd-proto",
  "tracing",
  "tracing-subscriber",
+ "vox",
 ]
 
 [[package]]
@@ -2549,6 +2551,7 @@ dependencies = [
  "stax-mac-shared-cache",
  "stax-vox-observe",
  "staxd-client",
+ "staxd-proto",
  "tokio",
  "tracing",
  "tracing-oslog",
@@ -2584,6 +2587,7 @@ dependencies = [
  "flume",
  "libc",
  "mach2",
+ "stax-linux-capture",
  "stax-mac-kperf-sys",
  "stax-vox-observe",
  "staxd-proto",

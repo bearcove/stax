@@ -516,30 +516,13 @@ fn drain_dispatch(r: &mut PerfRing, scratch: &mut Vec<u8>, sess: &mut Session) {
     }
 }
 
+/// In-process path: open the per-CPU rings here (needs the host's
+/// `perf_event_paranoid` to permit it) and drive them.
 pub fn run(
     opts: &RecordOptions,
     sink: &mut dyn SampleSink,
     should_stop: &AtomicBool,
 ) -> eyre::Result<RecordSummary> {
-    let start = Instant::now();
-
-    // Kernel symbols up front, same as the kperf backend, so the
-    // analysis side can resolve kernel_backtrace addresses. We also
-    // keep a name->addr map so a blocked thread's `/proc/.../wchan`
-    // (a kernel symbol name) can be turned into an address and used
-    // as the off-CPU leaf — that's what makes the reason classifier
-    // (futex/pipe/poll/...) bite on Linux.
-    let kallsyms = match std::fs::read("/proc/kallsyms") {
-        Ok(k) => {
-            sink.on_kallsyms(&k);
-            parse_kallsyms_names(&k)
-        }
-        Err(e) => {
-            warn!(%e, "could not read /proc/kallsyms; kernel frames stay raw");
-            HashMap::new()
-        }
-    };
-
     let cpus = online_cpus();
     let mut rings: Vec<PerfRing> = Vec::with_capacity(cpus.len());
     for cpu in &cpus {
@@ -568,6 +551,41 @@ pub fn run(
             }
         }
     }
+    run_with_rings(opts, sink, should_stop, rings, switch_rings)
+}
+
+/// Daemon path: the privileged staxd already did `perf_event_open` per
+/// CPU and handed us the fds (mapped into [`PerfRing`]s via
+/// [`crate::sys::ring_from_fd`]). Everything from here on —
+/// `/proc/kallsyms`, the `/proc/<pid>` synthesis, enabling the events,
+/// the poll/drain/parse loop — is unprivileged and identical to the
+/// in-process path, so both share [`run_with_rings`].
+pub fn run_with_rings(
+    opts: &RecordOptions,
+    sink: &mut dyn SampleSink,
+    should_stop: &AtomicBool,
+    mut rings: Vec<PerfRing>,
+    mut switch_rings: Vec<PerfRing>,
+) -> eyre::Result<RecordSummary> {
+    let start = Instant::now();
+
+    // Kernel symbols up front, same as the kperf backend, so the
+    // analysis side can resolve kernel_backtrace addresses. We also
+    // keep a name->addr map so a blocked thread's `/proc/.../wchan`
+    // (a kernel symbol name) can be turned into an address and used
+    // as the off-CPU leaf — that's what makes the reason classifier
+    // (futex/pipe/poll/...) bite on Linux.
+    let kallsyms = match std::fs::read("/proc/kallsyms") {
+        Ok(k) => {
+            sink.on_kallsyms(&k);
+            parse_kallsyms_names(&k)
+        }
+        Err(e) => {
+            warn!(%e, "could not read /proc/kallsyms; kernel frames stay raw");
+            HashMap::new()
+        }
+    };
+
     for r in rings.iter().chain(switch_rings.iter()) {
         r.enable()?;
     }

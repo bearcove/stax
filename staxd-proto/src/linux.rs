@@ -1,0 +1,126 @@
+//! Linux staxd protocol: a one-shot **fd broker**.
+//!
+//! Unlike macOS — where xnu has no descriptor to share so the daemon
+//! streams `KdBuf` records — Linux `perf_event_open` *is* a file
+//! descriptor. So the privileged daemon does only the privileged part
+//! (the per-CPU `perf_event_open`) and hands the resulting descriptors
+//! back to the unprivileged caller, which then mmaps the rings and
+//! drains/parses them itself (reusing the exact in-process capture
+//! core). The descriptors travel as [`vox::Fd`] in `SCM_RIGHTS`
+//! ancillary data over the Unix-domain link; the daemon is out of the
+//! data path the instant it replies.
+//!
+//! This keeps the wire stable for the same reason the macOS side is
+//! stable: everything that turns records into samples, attributes
+//! off-CPU intervals, resolves symbols, and renders the UI lives in
+//! the unprivileged client. The only privileged surface is "open
+//! these N perf events", which never changes shape.
+
+use facet::Facet;
+
+/// Default Unix-domain socket the systemd unit binds and the client
+/// dials. Production deployments may override via `--socket`.
+pub const STAXD_LINUX_SOCKET_DEFAULT: &str = "/run/staxd.sock";
+
+/// What the unprivileged client asks the privileged daemon to open.
+/// Mirrors `stax_linux_capture::RecordOptions` minus the bits the
+/// client handles itself after it has the fds (duration, stop flag).
+#[derive(Clone, Debug, Facet)]
+pub struct PerfSessionConfig {
+    /// Target pid. System-wide events are opened; the client filters
+    /// to this pid in userspace (so all of its threads, including
+    /// pre-existing and short-lived ones, are captured).
+    pub target_pid: u32,
+    /// Sampling frequency in Hz (kernel `freq` mode).
+    pub frequency_hz: u32,
+    /// Include kernel-side stack frames (`exclude_kernel = 0`). The
+    /// daemon is privileged so this generally succeeds; the client
+    /// degrades gracefully if a ring lacks kernel frames.
+    pub kernel_stacks: bool,
+}
+
+/// The fd-broker reply: per-CPU `perf_event_open` descriptors plus the
+/// scalars the unprivileged side needs to mmap and parse them.
+///
+/// Not `Clone` — [`vox::Fd`] owns a descriptor and is consumed once,
+/// when the client maps each ring.
+#[derive(Debug, Facet)]
+pub struct PerfSessionFds {
+    /// One sampling-ring fd per online CPU, in CPU order. The events
+    /// are opened **disabled**; the client enables them after mmap
+    /// (an ioctl on the fd it now owns — no privilege needed).
+    pub sampling: Vec<vox::Fd>,
+    /// One context-switch-ring fd per online CPU, in CPU order. Empty
+    /// when the kernel/host can't do `context_switch` (off-CPU
+    /// attribution disabled; the on-CPU profile still works).
+    pub switch: Vec<vox::Fd>,
+    /// `online_cpus().len()` the daemon used. Equals `sampling.len()`
+    /// on success; the client sizes its ring arrays from this.
+    pub cpu_count: u32,
+    /// `sysconf(_SC_PAGESIZE)` on the daemon host. The ring mmap is
+    /// `(1 + data_pages) * page_size` bytes.
+    pub page_size: u32,
+    /// Data pages per ring (the `2^n` in `1 + 2^n` pages).
+    pub data_pages: u32,
+    /// Echoed back so the client can sanity-check the handoff.
+    pub target_pid: u32,
+    pub frequency_hz: u32,
+    pub kernel_stacks: bool,
+}
+
+/// Why the daemon could not open a perf session. Variant names point
+/// at the failing step so the client can render a precise message
+/// (and decide whether to fall back to the in-process wchan path).
+#[derive(Clone, Debug, Facet)]
+#[repr(u8)]
+pub enum PerfSessionError {
+    /// The daemon can't `perf_event_open` system-wide: it is neither
+    /// root nor has `CAP_PERFMON`, and `perf_event_paranoid` is too
+    /// high for an unprivileged open. `detail` carries the host's
+    /// paranoid level / errno for diagnostics.
+    NotPrivileged { detail: String },
+    /// `perf_event_open` failed on a specific CPU for a reason other
+    /// than privilege (ENODEV, EMFILE, …).
+    PerfEventOpen { cpu: u32, errno: i32, detail: String },
+    /// `/proc/<pid>` does not exist — the target is gone.
+    NoSuchTarget(u32),
+    /// The connection's peer uid is not allowed to profile the target.
+    /// (Peer-credential authorisation is a follow-up; reserved here so
+    /// the wire already has the variant.)
+    NotAuthorized { caller_uid: u32, target_uid: u32 },
+}
+
+/// Cheap probe — what a client calls before `open_perf_session` to
+/// learn whether this daemon can actually broker fds on this host.
+#[derive(Clone, Debug, Facet)]
+pub struct DaemonStatus {
+    /// staxd version string (diagnostics only; vox handles schema
+    /// evolution).
+    pub version: String,
+    /// Architecture the daemon runs on ("x86_64", "aarch64").
+    pub host_arch: String,
+    /// True when the daemon process can `perf_event_open` system-wide
+    /// (running as root or holding `CAP_PERFMON`).
+    pub privileged: bool,
+    /// `/proc/sys/kernel/perf_event_paranoid`, or `i32::MIN` if it
+    /// could not be read.
+    pub perf_event_paranoid: i32,
+}
+
+/// The Linux staxd RPC. Deliberately tiny: one fd-broker call and one
+/// probe. There is no streaming channel — the descriptors *are* the
+/// payload, and the kernel ring buffers are the data path.
+#[vox::service]
+pub trait StaxdLinux {
+    /// `perf_event_open` the per-CPU sampling (and best-effort
+    /// context-switch) rings for `config.target_pid` and return their
+    /// descriptors. The daemon retains nothing: once this replies, the
+    /// caller owns the events and the daemon is free.
+    async fn open_perf_session(
+        &self,
+        config: PerfSessionConfig,
+    ) -> Result<PerfSessionFds, PerfSessionError>;
+
+    /// Reachability + capability probe.
+    async fn status(&self) -> DaemonStatus;
+}

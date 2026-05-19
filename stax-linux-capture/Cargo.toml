@@ -10,6 +10,8 @@ name = "stax_linux_capture"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 stax-mac-capture = { version = "0.1", path = "../stax-mac-capture" }
+staxd-proto = { version = "0.1", path = "../staxd-proto" }
+vox = "0.6"
 libc = "0.2"
 perf-event-open-sys = "4"
 object = { version = "0.39", default-features = false, features = ["std", "read_core", "elf", "unaligned"] }

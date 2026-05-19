@@ -146,16 +146,36 @@ async fn run_attach(
 
     #[cfg(target_os = "linux")]
     let result: eyre::Result<()> = {
-        let _ = &daemon_socket; // unused on Linux (no staxd socket)
         let opts = stax_linux_capture::RecordOptions {
             pid,
             frequency_hz,
             duration: time_limit,
             kernel_stacks: true,
         };
-        // Synchronous drain loop; this is already a dedicated thread
-        // whose only job is this recording, so blocking it is correct.
-        let summary = stax_linux_capture::record(&opts, &mut sink, &stop_flag)?;
+        // Prefer the privileged staxd fd broker when its socket is
+        // present (an explicit `daemon_socket`, else the systemd
+        // default): brokered fds work even where `perf_event_paranoid`
+        // forbids an unprivileged open. With no daemon we open
+        // in-process — the no-daemon path the wchan off-CPU
+        // approximation lives on.
+        let socket = if daemon_socket.is_empty() {
+            staxd_proto::STAXD_LINUX_SOCKET_DEFAULT.to_string()
+        } else {
+            daemon_socket.clone()
+        };
+        let summary = if std::path::Path::new(&socket).exists() {
+            tracing::info!(run_id = run_id.0, %socket, "using staxd fd broker");
+            stax_linux_capture::record_via_daemon(&socket, &opts, &mut sink, &stop_flag).await?
+        } else {
+            tracing::info!(
+                run_id = run_id.0,
+                socket = %socket,
+                "no staxd socket; opening perf_event_open in-process"
+            );
+            // Synchronous drain loop; this is already a dedicated
+            // thread whose only job is this recording.
+            stax_linux_capture::record(&opts, &mut sink, &stop_flag)?
+        };
         tracing::info!(
             run_id = run_id.0,
             samples = summary.samples,
@@ -163,7 +183,7 @@ async fn run_attach(
             intervals = summary.intervals,
             off_cpu_intervals = summary.off_cpu_intervals,
             lost = summary.lost_records,
-            "perf_event_open capture finished"
+            "linux perf capture finished"
         );
         Ok(())
     };

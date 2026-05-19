@@ -8,5 +8,10 @@ description = "Schema for the staxd RPC. Tiny crate consumed by both the runtime
 
 [dependencies]
 facet = { version = "0.46", features = ["camino", "reflect"] }
-stax-mac-kperf-sys = { version = "0.1", path = "../stax-mac-kperf-sys" }
 vox = { version = "0.6", default-features = false, features = ["runtime"] }
+
+# macOS streams raw KdBuf records, so the wire schema embeds the xnu
+# kd_buf representation. Linux is a pure fd broker (vox::Fd only) and
+# needs none of this.
+[target.'cfg(target_os = "macos")'.dependencies]
+stax-mac-kperf-sys = { version = "0.1", path = "../stax-mac-kperf-sys" }

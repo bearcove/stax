@@ -10,6 +10,11 @@ description = "Root daemon for stax. Owns the kperf + kdebug + kpc surface, vali
 name = "staxd"
 path = "src/main.rs"
 
+# Common to both platforms (the thin `main` dispatcher needs it).
+[dependencies]
+eyre = "0.6"
+
+# macOS: owns kperf+kdebug, streams raw KdBuf records.
 [target.'cfg(target_os = "macos")'.dependencies]
 staxd-proto = { path = "../staxd-proto" }
 stax-mac-kperf-sys = { version = "0.1", path = "../stax-mac-kperf-sys" }
@@ -23,4 +28,13 @@ tracing-oslog = "0.3"
 libc = "0.2"
 mach2 = "0.4"
 
-eyre = "0.6"
+# Linux: one-shot perf fd broker (perf_event_open per CPU -> vox::Fd).
+[target.'cfg(target_os = "linux")'.dependencies]
+staxd-proto = { path = "../staxd-proto" }
+stax-linux-capture = { version = "0.1", path = "../stax-linux-capture" }
+stax-vox-observe = { version = "0.1", path = "../stax-vox-observe" }
+vox = "0.6"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+libc = "0.2"

@@ -9,6 +9,8 @@ use stax_core::args::{
 };
 #[cfg(target_os = "macos")]
 use stax_core::cmd_setup_mac;
+#[cfg(target_os = "linux")]
+use stax_core::cmd_setup_linux;
 use stax_live_proto::{
     DiagnosticsSnapshot, FlameNode, FlamegraphUpdate, LiveFilter, OffCpuBreakdown, ProfilerClient,
     RunControlClient, RunSummary, ServerStatus, StopReason, ThreadsUpdate, TopSort, ViewParams,
@@ -50,12 +52,11 @@ fn main_impl() -> Result<(), Box<dyn Error>> {
         Command::Record(args) => run_record(args)?,
         #[cfg(target_os = "macos")]
         Command::Setup(args) => cmd_setup_mac::main(args)?,
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        Command::Setup(args) => cmd_setup_linux::main(args)?,
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         Command::Setup(_args) => {
-            return Err("stax setup is macOS-only (codesign/launchd); \
-                        on Linux run stax-server directly or via a \
-                        systemd unit"
-                .into());
+            return Err("stax setup is supported on macOS and Linux only".into());
         }
         Command::Status => block_on_async(async { run_status().await })?,
         Command::List => block_on_async(async { run_list().await })?,

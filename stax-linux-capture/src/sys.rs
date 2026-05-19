@@ -9,7 +9,7 @@
 
 use std::io;
 use std::mem;
-use std::os::fd::RawFd;
+use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::ptr;
 use std::sync::atomic::{Ordering, fence};
 
@@ -40,9 +40,9 @@ unsafe impl Send for PerfRing {}
 /// `1 + 2^DATA_PAGES` pages per ring. 512 data pages * 4K = 2 MiB of
 /// kernel-side buffering per CPU — comfortably rides out GC pauses /
 /// scheduling gaps without dropping records at a few-kHz sample rate.
-const DATA_PAGES: usize = 512;
+pub const DATA_PAGES: usize = 512;
 
-fn page_size() -> usize {
+pub fn page_size() -> usize {
     // SAFETY: sysconf with a constant query is always valid.
     unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize }
 }
@@ -150,9 +150,14 @@ fn map_ring(fd: RawFd) -> io::Result<PerfRing> {
     })
 }
 
-/// Open the per-CPU `perf_event_open` fd for `attr` (system-wide:
-/// `pid = -1`, `cpu = N`, no group, cloexec) and mmap its ring.
-fn open_ring(attr: &mut pe::bindings::perf_event_attr, cpu: u32) -> io::Result<PerfRing> {
+/// The privileged step, in isolation: `perf_event_open` the per-CPU
+/// event for `attr` (system-wide: `pid = -1`, `cpu = N`, no group,
+/// cloexec) and hand back the owned descriptor. No mmap — the caller
+/// (or, across the staxd fd broker, the unprivileged peer) maps it.
+fn perf_event_open_cpu(
+    attr: &mut pe::bindings::perf_event_attr,
+    cpu: u32,
+) -> io::Result<OwnedFd> {
     // SAFETY: FFI; attr is a valid initialized struct, fd args follow
     // the perf_event_open contract (pid=-1, cpu=N, no group, cloexec).
     let fd = unsafe {
@@ -167,7 +172,37 @@ fn open_ring(attr: &mut pe::bindings::perf_event_attr, cpu: u32) -> io::Result<P
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
-    map_ring(fd as RawFd)
+    // SAFETY: the kernel just handed us ownership of `fd`.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// Open the per-CPU `perf_event_open` fd for `attr` and mmap its ring
+/// in one step (the in-process path: same process opens and drains).
+fn open_ring(attr: &mut pe::bindings::perf_event_attr, cpu: u32) -> io::Result<PerfRing> {
+    ring_from_fd(perf_event_open_cpu(attr, cpu)?)
+}
+
+/// `perf_event_open` one **sampling** event on `cpu` (system-wide),
+/// returning just the descriptor — the privileged half of the staxd
+/// Linux fd broker. The event is created **disabled**; whoever maps
+/// it enables it.
+pub fn open_cpu_fd(cpu: u32, freq_hz: u32, kernel_stacks: bool) -> io::Result<OwnedFd> {
+    perf_event_open_cpu(&mut sampling_attr(freq_hz, kernel_stacks), cpu)
+}
+
+/// `perf_event_open` one **context-switch** (off-CPU) event on `cpu`,
+/// returning just the descriptor. Broker counterpart of
+/// [`open_cpu_fd`].
+pub fn open_cpu_switch_fd(cpu: u32) -> io::Result<OwnedFd> {
+    perf_event_open_cpu(&mut switch_attr(), cpu)
+}
+
+/// mmap the ring for an already-open perf fd (one received over the
+/// staxd fd broker, or just opened in-process) and wrap it in a
+/// [`PerfRing`]. Takes ownership of the descriptor; the `PerfRing`'s
+/// `Drop` closes it.
+pub fn ring_from_fd(fd: OwnedFd) -> io::Result<PerfRing> {
+    map_ring(fd.into_raw_fd())
 }
 
 /// Open + mmap one sampling ring on `cpu`. `pid = -1` → system-wide.
