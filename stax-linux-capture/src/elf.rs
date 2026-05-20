@@ -5,6 +5,8 @@
 //! This is the ELF analogue of `stax-mac-kperf-parse::image_scan` (which
 //! does the same job for Mach-O `LC_SYMTAB`).
 
+use std::io::Read;
+
 use object::read::elf::{ElfFile64, FileHeader, ProgramHeader};
 use object::{Object, ObjectSymbol, ObjectKind};
 use stax_mac_capture::proc_maps::MachOSymbol;
@@ -188,8 +190,8 @@ fn hex_lower(bytes: &[u8]) -> String {
 /// stripped distro libraries: `libc.so.6`, `libstdc++.so.6`,
 /// `ld-linux.so.2` etc. all ship without `.symtab` but their
 /// `*-dbg` / `*-debuginfo` package drops a fully-symboled `.debug`
-/// file under this path. (debuginfod HTTP lookup is a follow-on for
-/// hosts where the package isn't installed but the network is.)
+/// file under this path. The [debuginfod HTTP fallback](`debuginfod_fetch`)
+/// covers hosts without the dbg packages.
 pub fn load_separate_debug_by_build_id(build_id_full: &[u8]) -> Option<Vec<MachOSymbol>> {
     if build_id_full.len() < 2 {
         return None;
@@ -204,4 +206,188 @@ pub fn load_separate_debug_by_build_id(build_id_full: &[u8]) -> Option<Vec<MachO
     let bytes = std::fs::read(&path).ok()?;
     let file: ElfFile64 = ElfFile64::parse(&*bytes).ok()?;
     Some(extract_symbols(&file))
+}
+
+/// debuginfod HTTPS lookup config: where to ask, where to cache, how
+/// long to wait. One built per session via [`Self::from_env`] and
+/// passed into [`debuginfod_fetch`].
+#[derive(Clone, Debug)]
+pub struct DebuginfodConfig {
+    /// Base URLs to try in order (e.g.
+    /// `https://debuginfod.debian.net`). Empty = "no debuginfod
+    /// configured" — the helper short-circuits to `None` without any
+    /// network I/O.
+    pub urls: Vec<String>,
+    /// On-disk cache root. Hits are stored as
+    /// `<cache_dir>/<XX>/<YYY...>.debug`; misses (negative cache)
+    /// drop a zero-byte `.miss` sentinel so we don't re-fetch each
+    /// session.
+    pub cache_dir: std::path::PathBuf,
+    /// Per-request HTTP timeout. Image-loaded events fire on the
+    /// drain thread, so this directly caps how long a stripped image
+    /// can pause sampling. The first session pays the latency; the
+    /// disk cache makes every subsequent session instant.
+    pub timeout: std::time::Duration,
+}
+
+impl DebuginfodConfig {
+    /// Read the standard debuginfod configuration sources, returning
+    /// `None` when there is nothing to query (no env, no Debian-style
+    /// `/etc/debuginfod/*.urls`). Sources, in order:
+    ///   1. `DEBUGINFOD_URLS` env var (space/semicolon-separated).
+    ///   2. Every `*.urls` file under `/etc/debuginfod/` — one URL
+    ///      per non-comment line. The Debian `libdebuginfod-common`
+    ///      package drops `elfutils.urls` here.
+    pub fn from_env() -> Option<Self> {
+        let mut urls: Vec<String> = Vec::new();
+        if let Ok(s) = std::env::var("DEBUGINFOD_URLS") {
+            for url in s.split([' ', ';', '\t']) {
+                let url = url.trim();
+                if !url.is_empty() {
+                    urls.push(url.to_string());
+                }
+            }
+        }
+        if let Ok(entries) = std::fs::read_dir("/etc/debuginfod") {
+            for ent in entries.flatten() {
+                let p = ent.path();
+                if p.extension().and_then(|e| e.to_str()) != Some("urls") {
+                    continue;
+                }
+                let Ok(s) = std::fs::read_to_string(&p) else { continue };
+                for line in s.lines() {
+                    let line = line.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    if !urls.iter().any(|u| u == line) {
+                        urls.push(line.to_string());
+                    }
+                }
+            }
+        }
+        if urls.is_empty() {
+            return None;
+        }
+
+        // `$XDG_CACHE_HOME/stax/debuginfod`, falling back to
+        // `~/.cache/stax/debuginfod`. Same shape as elfutils'
+        // `debuginfod-client` so users can share with `debuginfod-find`
+        // if they want to (we don't read its cache yet, but the layout
+        // matches so a future opt-in is mechanical).
+        let cache_root = std::env::var_os("XDG_CACHE_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache")))
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+        let cache_dir = cache_root.join("stax").join("debuginfod");
+
+        Some(Self {
+            urls,
+            cache_dir,
+            timeout: std::time::Duration::from_secs(5),
+        })
+    }
+
+    /// Cache path for a given build-id hex. The shape mirrors
+    /// `/usr/lib/debug/.build-id/`.
+    fn cache_path(&self, hex: &str, suffix: &str) -> std::path::PathBuf {
+        self.cache_dir.join(&hex[..2]).join(format!("{}{suffix}", &hex[2..]))
+    }
+}
+
+/// Look up `build_id_full` against the configured debuginfod servers
+/// (or the local on-disk cache), returning the parsed symbols on hit.
+///
+/// The on-disk cache is consulted first, so warm starts are a single
+/// `read()` regardless of network state. A miss is recorded as an
+/// empty `.miss` sentinel next to where a hit would have lived; the
+/// next session sees it and short-circuits without re-trying the
+/// servers. (Cache-busting: delete the `<XX>/` subdir.)
+///
+/// Synchronous, blocking — image-load events come from the drain
+/// thread, and the natural unit of work is "one image, one HTTPS GET".
+/// Per-request timeout comes from [`DebuginfodConfig::timeout`]; on
+/// most programs the per-process image loads happen at process start
+/// so the latency is paid once, up front.
+pub fn debuginfod_fetch(
+    cfg: &DebuginfodConfig,
+    build_id_full: &[u8],
+) -> Option<Vec<MachOSymbol>> {
+    if cfg.urls.is_empty() || build_id_full.len() < 2 {
+        return None;
+    }
+    let hex = hex_lower(build_id_full);
+    let hit_path = cfg.cache_path(&hex, ".debug");
+    let miss_path = cfg.cache_path(&hex, ".miss");
+
+    // Warm cache hit.
+    if let Ok(bytes) = std::fs::read(&hit_path) {
+        let file: ElfFile64 = ElfFile64::parse(&*bytes).ok()?;
+        return Some(extract_symbols(&file));
+    }
+    // Negative cache: don't hammer the server for a known miss.
+    if miss_path.exists() {
+        return None;
+    }
+
+    // Cold lookup. Try every configured URL until one returns a
+    // parseable ELF; first hit wins.
+    let agent = ureq::AgentBuilder::new()
+        .timeout(cfg.timeout)
+        .user_agent(concat!("stax/", env!("CARGO_PKG_VERSION")))
+        .build();
+    for base in &cfg.urls {
+        let url = format!(
+            "{}/buildid/{hex}/debuginfo",
+            base.trim_end_matches('/')
+        );
+        let resp = match agent.get(&url).call() {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::debug!(url = %url, %e, "debuginfod GET failed");
+                continue;
+            }
+        };
+        if resp.status() != 200 {
+            tracing::debug!(url = %url, status = resp.status(), "debuginfod miss");
+            continue;
+        }
+        let mut bytes: Vec<u8> = Vec::new();
+        if let Err(e) = resp.into_reader().read_to_end(&mut bytes) {
+            tracing::debug!(url = %url, %e, "debuginfod body read failed");
+            continue;
+        }
+        if bytes.len() < 4 || &bytes[..4] != b"\x7fELF" {
+            tracing::debug!(url = %url, bytes = bytes.len(), "debuginfod body not an ELF");
+            continue;
+        }
+
+        // Persist the hit before symbol extraction — even if our parse
+        // fails we want the cache populated for the next attempt.
+        if let Some(parent) = hit_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let tmp = hit_path.with_extension("debug.tmp");
+        if std::fs::write(&tmp, &bytes).is_ok() {
+            let _ = std::fs::rename(&tmp, &hit_path);
+        }
+
+        let file: ElfFile64 = match ElfFile64::parse(&*bytes) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::debug!(url = %url, %e, "debuginfod ELF parse failed");
+                continue;
+            }
+        };
+        return Some(extract_symbols(&file));
+    }
+
+    // All URLs missed — drop a sentinel so we don't ask again this
+    // (or next) session. Best-effort; if the FS write fails we just
+    // pay the lookup again later.
+    if let Some(parent) = miss_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&miss_path, b"");
+    None
 }

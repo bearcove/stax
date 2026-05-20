@@ -69,17 +69,27 @@ fn main() -> eyre::Result<()> {
         .unwrap_or_else(|| "/tmp/staxd-test.sock".to_string());
     let secs: u64 = argv.next().and_then(|s| s.parse().ok()).unwrap_or(4);
 
-    // A child that's mostly off-CPU on a short timer: lots of wakeups
-    // for our session to attribute.
-    let mut child = std::process::Command::new("bash")
-        .arg("-c")
-        .arg(format!(
-            "i=0; while [ $i -lt {n} ]; do sleep 0.01; i=$((i+1)); done",
-            n = secs * 90 // ~90 sleeps/sec -> ~360 wakeups over 4s
-        ))
-        .spawn()?;
+    // Default: a child that's mostly off-CPU on a short timer (lots
+    // of wakeups for our session to attribute). Set
+    // `STAX_WAKING_SMOKE_CHILD=/path/to/binary` to swap in any other
+    // program — handy for testing image-load / debuginfod paths
+    // without recompiling the smoke.
+    let (prog, args): (String, Vec<String>) = match std::env::var("STAX_WAKING_SMOKE_CHILD") {
+        Ok(p) => (p, Vec::new()),
+        Err(_) => (
+            "bash".to_string(),
+            vec![
+                "-c".to_string(),
+                format!(
+                    "i=0; while [ $i -lt {n} ]; do sleep 0.01; i=$((i+1)); done",
+                    n = secs * 90 // ~90 sleeps/sec -> ~360 wakeups over 4s
+                ),
+            ],
+        ),
+    };
+    let mut child = std::process::Command::new(&prog).args(&args).spawn()?;
     let pid = child.id();
-    println!("spawned bash pid {pid} for ~{secs}s of timer wakeups");
+    println!("spawned {prog} pid {pid} for ~{secs}s");
 
     let opts = RecordOptions {
         pid,

@@ -17,6 +17,9 @@ perf-event-open-sys = "4"
 object = { version = "0.39", default-features = false, features = ["std", "read_core", "elf", "unaligned"] }
 tracing = "0.1"
 eyre = "0.6"
+# Blocking HTTPS client for the debuginfod fallback (rustls default —
+# no openssl/system-tls).
+ureq = { version = "2", default-features = false, features = ["tls"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

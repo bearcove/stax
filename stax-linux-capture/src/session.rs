@@ -147,6 +147,12 @@ struct Session<'s> {
     /// at lookup so a missed switch-in can't ascribe an ancient wake
     /// to a later off-CPU.
     recent_waking: HashMap<u32, RecentWaking>,
+    /// debuginfod HTTPS lookup config, built once per session from
+    /// the environment (`DEBUGINFOD_URLS` + `/etc/debuginfod/*.urls`)
+    /// and cached on disk under `~/.cache/stax/debuginfod/`. `None` =
+    /// no debuginfod configured; the lookup chain stops at the local
+    /// `/usr/lib/debug/.build-id/` tree.
+    debuginfod: Option<crate::elf::DebuginfodConfig>,
     summary: RecordSummary,
 }
 
@@ -619,21 +625,35 @@ impl Session<'_> {
             0
         });
         // Detached debug info: distro libraries (libc, libstdc++,
-        // ld-linux, …) ship stripped; if `*-dbg`/`*-debuginfo` is
-        // installed the matching `.symtab` is at
-        // `/usr/lib/debug/.build-id/XX/YYY...YY.debug`. Merge those
-        // symbols in before emit so the consumer never sees the
-        // stripped binary as "no syms". Cheap when missing: one stat.
+        // ld-linux, …) ship stripped. Two-step lookup:
+        //   1. `/usr/lib/debug/.build-id/XX/YYY...YY.debug` —
+        //      installed by the matching `*-dbg`/`*-debuginfo`
+        //      package. Cheap when missing (one stat).
+        //   2. debuginfod HTTPS GET (if configured) — covers hosts
+        //      where the dbg package isn't installed but the network
+        //      can reach `https://debuginfod.debian.net/` etc.
+        //      Disk-cached on hit + negative-cached on miss so the
+        //      second session is instant.
+        // Whichever path returns first wins; both produce a sorted
+        // symbol list we merge + dedup into the primary image's set.
         let mut debug_added = 0usize;
+        let mut debug_source: Option<&'static str> = None;
         if !img.build_id_full.is_empty() {
-            if let Some(extra) =
-                crate::elf::load_separate_debug_by_build_id(&img.build_id_full)
-            {
+            let extra = crate::elf::load_separate_debug_by_build_id(&img.build_id_full)
+                .map(|s| ("local", s))
+                .or_else(|| {
+                    self.debuginfod
+                        .as_ref()
+                        .and_then(|cfg| crate::elf::debuginfod_fetch(cfg, &img.build_id_full))
+                        .map(|s| ("debuginfod", s))
+                });
+            if let Some((src, extra)) = extra {
                 let before = img.symbols.len();
                 img.symbols.extend(extra);
                 img.symbols.sort_by_key(|s| s.start_svma);
                 img.symbols.dedup_by_key(|s| s.start_svma);
                 debug_added = img.symbols.len().saturating_sub(before);
+                debug_source = Some(src);
             }
         }
         self.summary.binaries = self.summary.binaries.saturating_add(1);
@@ -644,6 +664,7 @@ impl Session<'_> {
                 text_svma = format_args!("{text_svma:#x}"),
                 syms = img.symbols.len(),
                 from_debug = debug_added,
+                source = debug_source.unwrap_or("?"),
                 "image loaded (merged separate debug info)"
             );
         } else {
@@ -944,8 +965,17 @@ pub fn run_with_rings(
         prev_pmu_per_cpu: HashMap::new(),
         waking_offsets,
         recent_waking: HashMap::new(),
+        debuginfod: crate::elf::DebuginfodConfig::from_env(),
         summary: RecordSummary::default(),
     };
+    if let Some(cfg) = &sess.debuginfod {
+        info!(
+            urls = cfg.urls.len(),
+            cache = %cfg.cache_dir.display(),
+            timeout_ms = cfg.timeout.as_millis() as u64,
+            "debuginfod lookup enabled"
+        );
+    }
 
     // Synthesize the pre-existing state the kernel won't replay: every
     // executable mapping and thread name that predates our attach.
