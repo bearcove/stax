@@ -22,6 +22,9 @@ mod launch;
 #[cfg(target_os = "macos")]
 use launch::TerminalSize;
 
+#[cfg(target_os = "linux")]
+mod launch_linux;
+
 fn main_impl() -> Result<(), Box<dyn Error>> {
     if env::var("RUST_LOG").is_err() {
         // cranelift_jit/cranelift_codegen log every JIT'd function at info,
@@ -314,20 +317,16 @@ async fn run_record_launch(
     result
 }
 
-/// Linux `stax record -- <argv>`: launch the child, then have the
-/// server attach the perf session to its pid. Simpler than the macOS
-/// path: stdio is inherited (the child shares our terminal), so there
-/// is no PTY relay / raw-mode / SIGWINCH plumbing.
+/// Linux `stax record -- <argv>`: fork the child into a paused state,
+/// attach the perf session, then resume so the very first target
+/// instruction is sampled. Stdio is inherited (the child shares our
+/// terminal), so there is no PTY relay / raw-mode / SIGWINCH plumbing.
 ///
-/// Unlike macOS we do *not* spawn suspended: std `Command::spawn`
-/// synchronises on the child's `exec` (its CLOEXEC pipe), so a
-/// `pre_exec` `SIGSTOP` would deadlock `spawn()` itself, and Linux has
-/// no `posix_spawn` "start suspended" attribute. The cost is that the
-/// first few milliseconds before the server's per-CPU perf events are
-/// enabled go unsampled — irrelevant for a flamegraph of a workload
-/// that runs for more than an instant. A precise from-first-
-/// instruction launch (a fork + go-pipe handshake like `perf record`)
-/// is a follow-up.
+/// Unlike macOS, Linux has no `posix_spawn(START_SUSPENDED)` and a
+/// `pre_exec(SIGSTOP)` against `std::Command` deadlocks because
+/// `spawn()` itself blocks on the child's exec sync pipe. So the
+/// pause is built out of a parent→child "go" pipe — see
+/// [`launch_linux::fork_suspended`].
 #[cfg(target_os = "linux")]
 async fn run_record_launch_linux(
     client: RunControlClient,
@@ -336,12 +335,13 @@ async fn run_record_launch_linux(
     rest: Vec<String>,
     config: stax_live_proto::RunConfig,
 ) -> Result<(), Box<dyn Error>> {
-    let mut child = std::process::Command::new(&program)
-        .args(&rest)
-        .spawn()
-        .map_err(|e| format!("failed to spawn {program}: {e}"))?;
-    let target_pid = child.id();
-    eprintln!("stax: spawned {program} (pid {target_pid})");
+    let mut argv = Vec::with_capacity(1 + rest.len());
+    argv.push(program.clone());
+    argv.extend(rest);
+    let mut launched = launch_linux::fork_suspended(&argv)
+        .map_err(|e| format!("fork {program}: {e}"))?;
+    let target_pid = launched.pid;
+    eprintln!("stax: forked {program} (pid {target_pid}, paused)");
 
     let run_id = match client
         .start_attach(target_pid, config, args.daemon_socket.clone(), args.time_limit)
@@ -349,12 +349,20 @@ async fn run_record_launch_linux(
     {
         Ok(id) => id,
         Err(e) => {
-            let _ = child.kill();
-            let _ = child.wait();
+            launched.terminate();
             return Err(format!("{e:?}").into());
         }
     };
     eprintln!("stax: started run {}", run_id.0);
+
+    // Now that perf is attached, unblock the child so it `execvp`s
+    // the target — the kernel's `PERF_RECORD_MMAP*` for the new
+    // program text fires through the events we just opened, so we
+    // sample the target from its very first instruction.
+    if let Err(e) = launched.resume() {
+        launched.terminate();
+        return Err(format!("resume launched target: {e}").into());
+    }
 
     let child_exit_watcher = {
         let pid = target_pid;
@@ -378,8 +386,7 @@ async fn run_record_launch_linux(
     // If the run stopped first (Ctrl-C / time limit) the target may
     // still be alive; tear it down. If it already exited, the watcher
     // reaped it and these are harmless no-ops (ESRCH/ECHILD).
-    let _ = child.kill();
-    let _ = child.wait();
+    launched.terminate();
     result
 }
 
