@@ -599,7 +599,7 @@ impl Session<'_> {
                 return;
             }
         };
-        let img = match crate::elf::scan(&bytes) {
+        let mut img = match crate::elf::scan(&bytes) {
             Some(i) => i,
             None => return,
         };
@@ -618,14 +618,43 @@ impl Session<'_> {
             );
             0
         });
+        // Detached debug info: distro libraries (libc, libstdc++,
+        // ld-linux, …) ship stripped; if `*-dbg`/`*-debuginfo` is
+        // installed the matching `.symtab` is at
+        // `/usr/lib/debug/.build-id/XX/YYY...YY.debug`. Merge those
+        // symbols in before emit so the consumer never sees the
+        // stripped binary as "no syms". Cheap when missing: one stat.
+        let mut debug_added = 0usize;
+        if !img.build_id_full.is_empty() {
+            if let Some(extra) =
+                crate::elf::load_separate_debug_by_build_id(&img.build_id_full)
+            {
+                let before = img.symbols.len();
+                img.symbols.extend(extra);
+                img.symbols.sort_by_key(|s| s.start_svma);
+                img.symbols.dedup_by_key(|s| s.start_svma);
+                debug_added = img.symbols.len().saturating_sub(before);
+            }
+        }
         self.summary.binaries = self.summary.binaries.saturating_add(1);
-        info!(
-            path,
-            base_avma = format_args!("{base_avma:#x}"),
-            text_svma = format_args!("{text_svma:#x}"),
-            syms = img.symbols.len(),
-            "image loaded"
-        );
+        if debug_added > 0 {
+            info!(
+                path,
+                base_avma = format_args!("{base_avma:#x}"),
+                text_svma = format_args!("{text_svma:#x}"),
+                syms = img.symbols.len(),
+                from_debug = debug_added,
+                "image loaded (merged separate debug info)"
+            );
+        } else {
+            info!(
+                path,
+                base_avma = format_args!("{base_avma:#x}"),
+                text_svma = format_args!("{text_svma:#x}"),
+                syms = img.symbols.len(),
+                "image loaded"
+            );
+        }
         self.sink.on_binary_loaded(BinaryLoadedEvent {
             pid: self.opts.pid,
             base_avma,

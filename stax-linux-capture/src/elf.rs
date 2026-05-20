@@ -24,6 +24,12 @@ pub struct ElfImage {
     /// First 16 bytes of the GNU build-id, used like a Mach-O `LC_UUID`
     /// for image identity. `None` if the binary has no build-id note.
     pub build_id: Option<[u8; 16]>,
+    /// Full GNU build-id (typically 20 bytes / SHA-1) — kept around in
+    /// addition to the truncated [`Self::build_id`] because the
+    /// debuginfo lookup
+    /// (`/usr/lib/debug/.build-id/XX/YYY...YY.debug`) keys on the full
+    /// hex, not the truncated identity-only prefix.
+    pub build_id_full: Vec<u8>,
     /// Function symbols, addresses as SVMAs, sorted by `start_svma`.
     pub symbols: Vec<MachOSymbol>,
     pub loads: Vec<LoadSeg>,
@@ -87,20 +93,41 @@ pub fn scan(bytes: &[u8]) -> Option<ElfImage> {
     }
 
     let is_executable = matches!(file.kind(), ObjectKind::Executable);
-    let build_id = file
+    let build_id_bytes: Vec<u8> = file
         .build_id()
         .ok()
         .flatten()
-        .map(|id| {
-            let mut out = [0u8; 16];
-            let n = id.len().min(16);
-            out[..n].copy_from_slice(&id[..n]);
-            out
-        });
+        .map(|id| id.to_vec())
+        .unwrap_or_default();
+    let build_id = if build_id_bytes.is_empty() {
+        None
+    } else {
+        let mut out = [0u8; 16];
+        let n = build_id_bytes.len().min(16);
+        out[..n].copy_from_slice(&build_id_bytes[..n]);
+        Some(out)
+    };
 
     // Function/code symbols only, addresses as link-time SVMAs (ELF
-    // `st_value` already is one). Synthesize each symbol's end as the
-    // next start in the same image, falling back to +4.
+    // `st_value` already is one). Pulled into a helper so the
+    // separate-debug lookup path can produce the same shape.
+    let symbols = extract_symbols(&file);
+
+    Some(ElfImage {
+        arch: arch_str(&file),
+        is_executable,
+        build_id,
+        build_id_full: build_id_bytes,
+        symbols,
+        loads,
+    })
+}
+
+/// Extract function symbols from `.symtab` + `.dynsym` of `bytes`,
+/// returning them in the same SVMA-sorted shape [`scan`] produces.
+/// Shared between the primary image scan and the separate-debug
+/// lookup so the two paths can be merged.
+fn extract_symbols(file: &ElfFile64) -> Vec<MachOSymbol> {
     let mut symbols: Vec<MachOSymbol> = Vec::new();
     for sym in file.symbols().chain(file.dynamic_symbols()) {
         if !sym.is_definition() {
@@ -131,12 +158,50 @@ pub fn scan(bytes: &[u8]) -> Option<ElfImage> {
             }
         }
     }
+    symbols
+}
 
-    Some(ElfImage {
-        arch: arch_str(&file),
-        is_executable,
-        build_id,
-        symbols,
-        loads,
-    })
+/// Where the system stashes detached debug info, keyed by GNU build-id.
+/// `/usr/lib/debug/.build-id/XX/YYY...YY.debug` is the cross-distro
+/// convention (Debian, Ubuntu, Fedora, Arch — all the same). The
+/// `XX/` directory is the first byte of the build-id as two hex
+/// digits; the filename is the remaining hex + `.debug`.
+const DEBUG_BUILD_ID_ROOT: &str = "/usr/lib/debug/.build-id";
+
+/// Render `bytes` as lowercase ASCII hex. Plain helper — no `hex` crate
+/// dep just for one stringify of a 20-byte SHA-1.
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        s.push(char::from_digit((b >> 4) as u32, 16).unwrap());
+        s.push(char::from_digit((b & 0xf) as u32, 16).unwrap());
+    }
+    s
+}
+
+/// Try to load detached debug symbols for `build_id_full` from the
+/// local `/usr/lib/debug/.build-id/` tree. Returns the parsed symbols
+/// on hit, `None` on miss / parse failure (in which case the caller
+/// just uses whatever symbols the primary image had).
+///
+/// This is the first lookup in the chain a Linux profiler does on
+/// stripped distro libraries: `libc.so.6`, `libstdc++.so.6`,
+/// `ld-linux.so.2` etc. all ship without `.symtab` but their
+/// `*-dbg` / `*-debuginfo` package drops a fully-symboled `.debug`
+/// file under this path. (debuginfod HTTP lookup is a follow-on for
+/// hosts where the package isn't installed but the network is.)
+pub fn load_separate_debug_by_build_id(build_id_full: &[u8]) -> Option<Vec<MachOSymbol>> {
+    if build_id_full.len() < 2 {
+        return None;
+    }
+    let hex = hex_lower(build_id_full);
+    let path = format!(
+        "{}/{}/{}.debug",
+        DEBUG_BUILD_ID_ROOT,
+        &hex[..2],
+        &hex[2..]
+    );
+    let bytes = std::fs::read(&path).ok()?;
+    let file: ElfFile64 = ElfFile64::parse(&*bytes).ok()?;
+    Some(extract_symbols(&file))
 }
