@@ -172,11 +172,24 @@ impl StaxdLinux for LinuxStaxd {
 
         // Sampling rings: required. A privilege failure here is the
         // signal to the client that it must not silently fall back to
-        // an in-process open that would fail the same way.
-        let mut sampling = Vec::with_capacity(cpus.len());
+        // an in-process open that would fail the same way. We open the
+        // HW sibling group eagerly here (while we still hold the
+        // leader's `OwnedFd` directly) — that needs the leader's raw
+        // fd as `group_fd` and avoids reaching back into a `vox::Fd`
+        // wrapper later. The siblings are best-effort; the leader is
+        // not.
+        use std::os::fd::AsRawFd;
+        let mut sampling: Vec<vox::Fd> = Vec::with_capacity(cpus.len());
+        let mut pmu: Vec<vox::Fd> = Vec::with_capacity(cpus.len() * 4);
+        let mut pmu_ids: Vec<u64> = Vec::with_capacity(cpus.len() * 4);
+        let mut pmu_failed = !config.request_pmu;
         for &cpu in &cpus {
-            match stax_linux_capture::open_cpu_fd(cpu, config.frequency_hz, config.kernel_stacks) {
-                Ok(fd) => sampling.push(vox::Fd::new(fd)),
+            let leader = match stax_linux_capture::open_cpu_fd(
+                cpu,
+                config.frequency_hz,
+                config.kernel_stacks,
+            ) {
+                Ok(fd) => fd,
                 Err(e) => {
                     let errno = e.raw_os_error().unwrap_or(0);
                     if !root && matches!(errno, libc::EACCES | libc::EPERM) {
@@ -193,8 +206,35 @@ impl StaxdLinux for LinuxStaxd {
                         detail: e.to_string(),
                     });
                 }
+            };
+            if !pmu_failed {
+                match stax_linux_capture::open_cpu_pmu_siblings(
+                    cpu,
+                    leader.as_raw_fd(),
+                    config.kernel_stacks,
+                ) {
+                    Ok(members) => {
+                        for m in members {
+                            pmu_ids.push(m.id);
+                            pmu.push(vox::Fd::new(m.fd));
+                        }
+                    }
+                    Err(e) => {
+                        warn!(%e, cpu, "PMU sibling open failed; HW counters disabled");
+                        pmu_failed = true;
+                    }
+                }
             }
+            sampling.push(vox::Fd::new(leader));
         }
+        if pmu_failed {
+            // All-or-nothing: if any CPU couldn't open the full group,
+            // ship no PMU at all so the client doesn't have to handle
+            // a partial layout.
+            pmu.clear();
+            pmu_ids.clear();
+        }
+        let pmu_per_cpu: u32 = if pmu.is_empty() { 0 } else { 4 };
 
         // Context-switch rings: best-effort. A kernel/host without
         // `context_switch` loses off-CPU attribution but the on-CPU
@@ -252,6 +292,7 @@ impl StaxdLinux for LinuxStaxd {
             cpus = cpu_count,
             off_cpu = !switch.is_empty(),
             wakeups = !waking.is_empty(),
+            pmu = pmu_per_cpu > 0,
             "brokered perf fds to client"
         );
 
@@ -260,6 +301,9 @@ impl StaxdLinux for LinuxStaxd {
             switch,
             waking,
             waking_field_offsets,
+            pmu,
+            pmu_ids,
+            pmu_per_cpu,
             cpu_count,
             page_size: stax_linux_capture::page_size() as u32,
             data_pages: stax_linux_capture::DATA_PAGES as u32,

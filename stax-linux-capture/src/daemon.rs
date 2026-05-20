@@ -16,7 +16,7 @@ use std::sync::atomic::AtomicBool;
 use eyre::Context;
 use staxd_proto::{PerfSessionConfig, StaxdLinuxClient};
 
-use crate::sys::{PerfRing, PerfRingKind, ring_from_fd};
+use crate::sys::{PerfRing, PerfRingKind, PmuGroup, PmuKind, PmuMember, ring_from_fd};
 use crate::{RecordOptions, RecordSummary};
 
 /// Connect to the privileged staxd at `daemon_socket`, ask it to
@@ -49,6 +49,11 @@ pub async fn record_via_daemon(
             // exists on locked-down hosts; ask for it. Daemon falls
             // back to an empty `waking` if tracefs is unavailable.
             request_waking: true,
+            // HW counter group is the *other* thing only the daemon
+            // can open on locked-down hosts. Daemon returns an empty
+            // `pmu` if any CPU couldn't host the full group (cycles,
+            // instructions, L1D read misses, branch mispredicts).
+            request_pmu: true,
         })
         .await
         // vox folds the method's `Result<_, PerfSessionError>` into
@@ -62,6 +67,7 @@ pub async fn record_via_daemon(
         sampling = session.sampling.len(),
         switch = session.switch.len(),
         waking = session.waking.len(),
+        pmu_per_cpu = session.pmu_per_cpu,
         page_size = session.page_size,
         data_pages = session.data_pages,
         "received perf fds from staxd"
@@ -103,16 +109,53 @@ pub async fn record_via_daemon(
     }
     let waking_offsets = session.waking_field_offsets;
 
+    // PMU sibling group: the daemon shipped `pmu_per_cpu` fds per CPU
+    // in canonical `PmuKind::index()` order (cycles, instructions,
+    // L1d misses, branch mispredicts). All-or-nothing on the daemon
+    // side, so an empty `pmu` == "no HW counters this session".
+    let mut pmu = PmuGroup::default();
+    let per_cpu = session.pmu_per_cpu as usize;
+    if per_cpu > 0 {
+        let expected = per_cpu * session.cpu_count as usize;
+        if session.pmu.len() != expected || session.pmu_ids.len() != expected {
+            eyre::bail!(
+                "staxd: PMU layout mismatch (per_cpu={} cpus={} fds={} ids={})",
+                per_cpu,
+                session.cpu_count,
+                session.pmu.len(),
+                session.pmu_ids.len()
+            );
+        }
+        const KINDS: [PmuKind; 4] = [
+            PmuKind::Cycles,
+            PmuKind::Instructions,
+            PmuKind::L1dMisses,
+            PmuKind::BranchMisses,
+        ];
+        let mut id_iter = session.pmu_ids.into_iter();
+        let mut fd_iter = session.pmu.into_iter();
+        for cpu in 0..session.cpu_count as usize {
+            let mut siblings = Vec::with_capacity(per_cpu);
+            for slot in 0..per_cpu {
+                let id = id_iter.next().unwrap();
+                let fd = fd_iter
+                    .next()
+                    .unwrap()
+                    .into_owned_fd()
+                    .ok_or_else(|| eyre::eyre!("staxd sent a PMU Fd with no descriptor (cpu {cpu})"))?;
+                let kind = KINDS[slot];
+                pmu.id_to_kind.insert(id, kind);
+                siblings.push(PmuMember { kind, id, fd });
+            }
+            pmu.siblings.push(siblings);
+        }
+    }
+
     // Connection no longer needed — the kernel ring buffers are the
     // data path now. Closing it frees the daemon's per-connection
     // task while we profile (which can run for minutes).
     drop(client);
 
-    // No PMU group on the daemon-brokered path yet (the broker hands
-    // over sampling + switch + waking fds, but not HW counter
-    // siblings). The leader's SAMPLE_READ entry has an id the parser
-    // doesn't recognise, so cycles/instructions/etc. stay 0 — matching
-    // the SampleEvent contract. Brokering the PMU group is a follow-up.
     crate::session::run_with_rings(
         opts,
         sink,
@@ -121,6 +164,6 @@ pub async fn record_via_daemon(
         switch_rings,
         waking_rings,
         waking_offsets,
-        crate::sys::PmuGroup::default(),
+        pmu,
     )
 }

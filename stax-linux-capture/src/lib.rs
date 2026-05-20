@@ -37,8 +37,8 @@ pub use daemon::record_via_daemon;
 /// The privileged half of the Linux fd broker, used by the `staxd`
 /// daemon to `perf_event_open` per CPU and report the ring geometry.
 pub use sys::{
-    DATA_PAGES, online_cpus, open_cpu_fd, open_cpu_switch_fd, open_cpu_waking_fd, page_size,
-    read_sched_waking_tracepoint,
+    DATA_PAGES, PmuMember, online_cpus, open_cpu_fd, open_cpu_pmu_siblings, open_cpu_switch_fd,
+    open_cpu_waking_fd, page_size, read_sched_waking_tracepoint,
 };
 
 use std::sync::atomic::AtomicBool;

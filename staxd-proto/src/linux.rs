@@ -45,6 +45,17 @@ pub struct PerfSessionConfig {
     /// unreadable or the tracepoint isn't available, `waking` comes
     /// back empty and wakeups stay unattributed.
     pub request_waking: bool,
+    /// Also attach the HW counter group (cycles, instructions, L1D
+    /// read misses, branch mispredicts) as siblings of each per-CPU
+    /// sampling leader, and broker their fds + perf event ids. On a
+    /// locked-down host (`perf_event_paranoid >= 2`) the unprivileged
+    /// caller can't `perf_event_open` HW counters itself, so the
+    /// daemon is the only path to populating
+    /// `SampleEvent::{cycles, instructions, l1d_misses, branch_mispreds}`.
+    /// Best-effort: a host without an exposed vPMU just gets zeros
+    /// for those fields; the rest of the sample (callchain, off-CPU,
+    /// wakeups) is unaffected.
+    pub request_pmu: bool,
 }
 
 /// Where the wakee tid lives inside the `sched:sched_waking`
@@ -91,6 +102,22 @@ pub struct PerfSessionFds {
     /// the daemon from the live kernel's tracefs format file. `Some`
     /// iff [`Self::waking`] is non-empty.
     pub waking_field_offsets: Option<WakingFieldOffsets>,
+    /// HW counter sibling fds for the sampling-leader group, packed
+    /// per CPU in canonical [`PmuKind`] order (cycles, instructions,
+    /// L1D read misses, branch mispredicts). Empty when the client
+    /// didn't request the group, or when any CPU couldn't open all
+    /// four — the daemon prefers no group to a partial group so the
+    /// client doesn't have to special-case missing slots.
+    pub pmu: Vec<vox::Fd>,
+    /// `perf event id` (from `PERF_EVENT_IOC_ID`) of each entry in
+    /// [`Self::pmu`], parallel to it. The client demultiplexes the
+    /// leader's `PERF_SAMPLE_READ` block by id, so the daemon MUST
+    /// fetch and ship these — there is no way for the client to ask
+    /// the kernel about a sibling it didn't open.
+    pub pmu_ids: Vec<u64>,
+    /// Siblings per CPU — 4 (the full group) or 0 (no group). The
+    /// client uses this to split `pmu` into per-CPU chunks.
+    pub pmu_per_cpu: u32,
     /// `online_cpus().len()` the daemon used. Equals `sampling.len()`
     /// on success; the client sizes its ring arrays from this.
     pub cpu_count: u32,
