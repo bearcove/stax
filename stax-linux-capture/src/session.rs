@@ -12,8 +12,8 @@ use stax_mac_capture::{
 use tracing::{debug, info, warn};
 
 use crate::sys::{
-    PERF_CONTEXT_KERNEL, PERF_CONTEXT_MAX, PERF_CONTEXT_USER, PerfRing, online_cpus, open_cpu,
-    open_cpu_switch,
+    PERF_CONTEXT_KERNEL, PERF_CONTEXT_MAX, PERF_CONTEXT_USER, PerfRing, PmuGroup, PmuKind,
+    online_cpus, open_cpu, open_cpu_pmu_siblings, open_cpu_switch,
 };
 use crate::{RecordOptions, RecordSummary};
 
@@ -101,6 +101,14 @@ struct Session<'s> {
     /// Newest timestamp seen on any ring; bounds still-blocked threads
     /// at teardown.
     last_ts: u64,
+    /// `perf-event-id → counter kind` for the PMU sibling group. Empty
+    /// when no PMU group is attached (the daemon-broker path today) —
+    /// the SampleEvent contract documents 0 as "not available".
+    pmu_id_to_kind: HashMap<u64, PmuKind>,
+    /// Per-CPU running PMU counts at the last sample seen on that CPU.
+    /// Per-sample deltas are `cur - prev[cpu][k]`, then `prev = cur`.
+    /// Indexed by [`PmuKind::index`].
+    prev_pmu_per_cpu: HashMap<u32, [u64; 4]>,
     summary: RecordSummary,
 }
 
@@ -124,7 +132,8 @@ impl Session<'_> {
     }
 
     fn on_sample(&mut self, body: &[u8]) {
-        // sample_type = TID | TIME | CPU | CALLCHAIN (fixed order).
+        // sample_type = TID | TIME | CPU | READ | CALLCHAIN. The kernel
+        // emits fields in ascending bit order with CPU before READ.
         let mut c = Cur::new(body);
         let pid = match c.u32() {
             Some(v) => v,
@@ -135,8 +144,35 @@ impl Session<'_> {
             return; // system-wide ring; keep only the target.
         }
         let time = c.u64().unwrap_or(0);
-        let _cpu = c.u32();
+        let cpu = c.u32().unwrap_or(0);
         let _res = c.u32();
+
+        // PERF_SAMPLE_READ block with PERF_FORMAT_GROUP | PERF_FORMAT_ID:
+        // u64 nr_values; { u64 value; u64 id }[nr_values]
+        // `nr_values == 1` on the daemon-brokered path (leader only),
+        // `nr_values == 5` when [`open_cpu_pmu_siblings`] attached the
+        // 4-counter HW group. Unknown ids (the leader's SW_CPU_CLOCK,
+        // any sibling we didn't open) just get ignored.
+        let mut pmu_deltas = [0u64; 4];
+        let nr_pmu = c.u64().unwrap_or(0);
+        for _ in 0..nr_pmu {
+            let value = match c.u64() {
+                Some(v) => v,
+                None => return,
+            };
+            let id = match c.u64() {
+                Some(v) => v,
+                None => return,
+            };
+            if let Some(&kind) = self.pmu_id_to_kind.get(&id) {
+                let idx = kind.index();
+                let prev_slot = self.prev_pmu_per_cpu.entry(cpu).or_insert([0; 4]);
+                let prev = prev_slot[idx];
+                prev_slot[idx] = value;
+                pmu_deltas[idx] = value.saturating_sub(prev);
+            }
+        }
+
         let nr = match c.u64() {
             Some(n) => n,
             None => return,
@@ -174,12 +210,13 @@ impl Session<'_> {
             tid,
             backtrace: &user,
             kernel_backtrace: &kernel,
-            // PMU counters are a later sub-phase; the SampleEvent
-            // contract documents 0 as "not available (Linux backend)".
-            cycles: 0,
-            instructions: 0,
-            l1d_misses: 0,
-            branch_mispreds: 0,
+            // Deltas from the per-CPU running counters in the
+            // PERF_SAMPLE_READ block; 0 when no PMU group is attached
+            // or the host couldn't open this counter.
+            cycles: pmu_deltas[PmuKind::Cycles.index()],
+            instructions: pmu_deltas[PmuKind::Instructions.index()],
+            l1d_misses: pmu_deltas[PmuKind::L1dMisses.index()],
+            branch_mispreds: pmu_deltas[PmuKind::BranchMisses.index()],
         });
 
         // Synthesize the on-CPU interval the aggregator needs for time
@@ -525,16 +562,36 @@ pub fn run(
 ) -> eyre::Result<RecordSummary> {
     let cpus = online_cpus();
     let mut rings: Vec<PerfRing> = Vec::with_capacity(cpus.len());
+    let mut pmu = PmuGroup::default();
     for cpu in &cpus {
-        match open_cpu(*cpu, opts.frequency_hz, opts.kernel_stacks) {
-            Ok(r) => rings.push(r),
+        let leader = match open_cpu(*cpu, opts.frequency_hz, opts.kernel_stacks) {
+            Ok(r) => r,
             Err(e) => {
                 return Err(eyre::eyre!(
                     "perf_event_open on cpu {cpu} failed: {e} \
                      (need perf_event_paranoid low enough, or the daemon)"
                 ));
             }
+        };
+        // Best-effort: a host without enough PMU counters (PMU
+        // contention, virtualised, locked-down) just loses the
+        // counters — samples/callchains still flow.
+        match open_cpu_pmu_siblings(*cpu, leader.fd, opts.kernel_stacks) {
+            Ok(siblings) => {
+                for m in &siblings {
+                    pmu.id_to_kind.insert(m.id, m.kind);
+                }
+                pmu.siblings.push(siblings);
+            }
+            Err(e) => {
+                warn!(
+                    %e,
+                    cpu = *cpu,
+                    "PMU counter group unavailable; cycles/instructions/etc. left at 0"
+                );
+            }
         }
+        rings.push(leader);
     }
     // Side-band context-switch rings for off-CPU attribution. Best
     // effort: if these fail (older kernel without `context_switch`,
@@ -551,7 +608,7 @@ pub fn run(
             }
         }
     }
-    run_with_rings(opts, sink, should_stop, rings, switch_rings)
+    run_with_rings(opts, sink, should_stop, rings, switch_rings, pmu)
 }
 
 /// Daemon path: the privileged staxd already did `perf_event_open` per
@@ -566,7 +623,14 @@ pub fn run_with_rings(
     should_stop: &AtomicBool,
     mut rings: Vec<PerfRing>,
     mut switch_rings: Vec<PerfRing>,
+    pmu: PmuGroup,
 ) -> eyre::Result<RecordSummary> {
+    // Bind the PMU sibling fds for the lifetime of this function: the
+    // kernel removes a sibling from its group the moment its fd
+    // closes. Empty Vec on the daemon-broker path (no group attached
+    // there yet) — PMU fields then stay 0, matching the contract.
+    let _pmu_siblings = pmu.siblings;
+    let pmu_id_to_kind = pmu.id_to_kind;
     let start = Instant::now();
 
     // Kernel symbols up front, same as the kperf backend, so the
@@ -625,6 +689,8 @@ pub fn run_with_rings(
         off_start: HashMap::new(),
         kallsyms,
         last_ts: 0,
+        pmu_id_to_kind,
+        prev_pmu_per_cpu: HashMap::new(),
         summary: RecordSummary::default(),
     };
 

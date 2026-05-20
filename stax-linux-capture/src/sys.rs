@@ -7,9 +7,10 @@
 //! must allow it; on a locked-down host the daemon phase opens these
 //! with privilege instead.)
 
+use std::collections::HashMap;
 use std::io;
 use std::mem;
-use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::ptr;
 use std::sync::atomic::{Ordering, fence};
 
@@ -69,7 +70,15 @@ fn sampling_attr(freq_hz: u32, kernel_stacks: bool) -> pe::bindings::perf_event_
     attr.sample_type = (pe::bindings::PERF_SAMPLE_TID
         | pe::bindings::PERF_SAMPLE_TIME
         | pe::bindings::PERF_SAMPLE_CPU
+        | pe::bindings::PERF_SAMPLE_READ
         | pe::bindings::PERF_SAMPLE_CALLCHAIN) as u64;
+    // Group-read format so each sample carries `{u64 nr; (u64 value,
+    // u64 id)[nr]}` for the whole counter group. With no siblings
+    // (daemon-brokered path, today) `nr == 1` and we just ignore the
+    // leader's own SW_CPU_CLOCK value; with siblings (in-process,
+    // [`open_cpu_pmu_siblings`]) `nr == 5` and we attribute deltas per
+    // counter via the queried perf-event ID.
+    attr.read_format = (pe::bindings::PERF_FORMAT_GROUP | pe::bindings::PERF_FORMAT_ID) as u64;
     attr.set_disabled(1);
     attr.set_freq(1);
     attr.set_exclude_kernel(if kernel_stacks { 0 } else { 1 });
@@ -221,8 +230,12 @@ impl PerfRing {
     }
 
     pub fn enable(&self) -> io::Result<()> {
+        // `PERF_IOC_FLAG_GROUP`: if this fd is a group leader (the
+        // sampling ring is — PMU siblings attach to it), all siblings
+        // start together. Harmless no-op when there is no group.
         // SAFETY: ioctl on our own perf fd.
-        let rc = unsafe { pe::ioctls::ENABLE(self.fd, 0) };
+        let rc =
+            unsafe { pe::ioctls::ENABLE(self.fd, pe::bindings::PERF_IOC_FLAG_GROUP) };
         if rc < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -233,7 +246,7 @@ impl PerfRing {
         // SAFETY: ioctl on our own perf fd; errors are non-actionable
         // during teardown.
         unsafe {
-            pe::ioctls::DISABLE(self.fd, 0);
+            pe::ioctls::DISABLE(self.fd, pe::bindings::PERF_IOC_FLAG_GROUP);
         }
     }
 
@@ -298,4 +311,158 @@ impl Drop for PerfRing {
             libc::close(self.fd);
         }
     }
+}
+
+// --- PMU counter group ------------------------------------------------------
+//
+// Hardware counters attached as siblings to the sampling ring so each
+// PERF_RECORD_SAMPLE carries running counts via PERF_SAMPLE_READ. We pick
+// four to populate the PMU fields the SampleSink contract defines for the
+// macOS kperf backend, mapping them onto Linux's portable perf_event
+// hardware counters.
+
+/// Which hardware counter a perf event id corresponds to. Index order
+/// (0..4) matches the position of the field in [`PmuValues`] / the
+/// `SampleEvent` PMU fields, so callers can use [`PmuKind::index`] for
+/// O(1) bookkeeping.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum PmuKind {
+    Cycles,
+    Instructions,
+    L1dMisses,
+    BranchMisses,
+}
+
+impl PmuKind {
+    /// Stable index in `[cycles, instructions, l1d_misses, branch_misses]`.
+    pub fn index(self) -> usize {
+        match self {
+            PmuKind::Cycles => 0,
+            PmuKind::Instructions => 1,
+            PmuKind::L1dMisses => 2,
+            PmuKind::BranchMisses => 3,
+        }
+    }
+}
+
+/// One hardware counter inside a sampling group: the counter's perf
+/// event id (returned by `PERF_EVENT_IOC_ID`, used to demultiplex the
+/// `PERF_SAMPLE_READ` block) and the owning fd that keeps it alive.
+pub struct PmuMember {
+    pub kind: PmuKind,
+    pub id: u64,
+    /// Held to keep the perf event alive for the session — closing it
+    /// removes the sibling from the group. The `Drop` of [`OwnedFd`]
+    /// is the load-bearing part, so the field looks unread to the
+    /// dead-code lint.
+    #[allow(dead_code)]
+    pub fd: OwnedFd,
+}
+
+/// All sibling counters attached to one CPU's sampling-ring leader.
+pub type PmuSiblings = Vec<PmuMember>;
+
+/// The session-wide PMU state: every CPU's siblings (held to keep the
+/// counters alive) plus a global `perf-event-id → kind` map for sample
+/// parsing. perf event ids are globally unique, so one flat map covers
+/// all CPUs. Empty `PmuGroup::default()` = "no PMU on this run" — the
+/// sampling path then simply leaves cycles/instructions/etc. at 0.
+pub struct PmuGroup {
+    pub siblings: Vec<PmuSiblings>,
+    pub id_to_kind: HashMap<u64, PmuKind>,
+}
+
+impl Default for PmuGroup {
+    fn default() -> Self {
+        Self {
+            siblings: Vec::new(),
+            id_to_kind: HashMap::new(),
+        }
+    }
+}
+
+/// Attach a four-counter HW group (cycles / instructions / L1D-read
+/// misses / branch mispredicts) to `leader_fd` on `cpu`. Returns the
+/// siblings in stable order. Best-effort: on a PMU that can't hold the
+/// whole group, or when the host denies HW counters, the caller treats
+/// failure as "no PMU on this CPU" and continues without it.
+///
+/// The siblings inherit grouping from `leader_fd`: when the leader is
+/// enabled with `PERF_IOC_FLAG_GROUP` they all start, and each sample's
+/// `PERF_SAMPLE_READ` block carries the group's running values.
+pub fn open_cpu_pmu_siblings(
+    cpu: u32,
+    leader_fd: RawFd,
+    kernel_stacks: bool,
+) -> io::Result<PmuSiblings> {
+    // L1D-read miss as the cache event (PERF_TYPE_HW_CACHE encodes
+    // cache / op / result in `config`):
+    //   config = L1D | (READ << 8) | (MISS << 16)
+    let l1d_read_miss = (pe::bindings::PERF_COUNT_HW_CACHE_L1D as u64)
+        | ((pe::bindings::PERF_COUNT_HW_CACHE_OP_READ as u64) << 8)
+        | ((pe::bindings::PERF_COUNT_HW_CACHE_RESULT_MISS as u64) << 16);
+
+    let plan: [(PmuKind, u32, u64); 4] = [
+        (
+            PmuKind::Cycles,
+            pe::bindings::PERF_TYPE_HARDWARE,
+            pe::bindings::PERF_COUNT_HW_CPU_CYCLES as u64,
+        ),
+        (
+            PmuKind::Instructions,
+            pe::bindings::PERF_TYPE_HARDWARE,
+            pe::bindings::PERF_COUNT_HW_INSTRUCTIONS as u64,
+        ),
+        (PmuKind::L1dMisses, pe::bindings::PERF_TYPE_HW_CACHE, l1d_read_miss),
+        (
+            PmuKind::BranchMisses,
+            pe::bindings::PERF_TYPE_HARDWARE,
+            pe::bindings::PERF_COUNT_HW_BRANCH_MISSES as u64,
+        ),
+    ];
+
+    let mut out: PmuSiblings = Vec::with_capacity(4);
+    for (kind, ty, config) in plan {
+        // SAFETY: perf_event_attr is POD; zero then init `size` per ABI.
+        let mut attr: pe::bindings::perf_event_attr = unsafe { mem::zeroed() };
+        attr.type_ = ty;
+        attr.size = mem::size_of::<pe::bindings::perf_event_attr>() as u32;
+        attr.config = config;
+        // Same group-read format as the leader so the SAMPLE_READ
+        // block matches; same kernel/HV exclusion as the leader's
+        // callchain mask so the group is permissible (the kernel
+        // refuses to group events with incompatible exclude flags).
+        attr.read_format =
+            (pe::bindings::PERF_FORMAT_GROUP | pe::bindings::PERF_FORMAT_ID) as u64;
+        attr.set_disabled(1);
+        attr.set_exclude_kernel(if kernel_stacks { 0 } else { 1 });
+        attr.set_exclude_hv(1);
+
+        // SAFETY: FFI; `attr` is fully initialised; `group_fd` is the
+        // caller's live sampling fd; pid=-1 + cpu=N + cloexec match
+        // the leader's per-CPU system-wide scope.
+        let raw = unsafe {
+            pe::perf_event_open(
+                &mut attr,
+                -1,
+                cpu as i32,
+                leader_fd,
+                pe::bindings::PERF_FLAG_FD_CLOEXEC as u64,
+            )
+        };
+        if raw < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the kernel just handed us ownership of `raw`.
+        let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+
+        let mut id: u64 = 0;
+        // SAFETY: ioctl on our own fd; writes one u64.
+        let rc = unsafe { pe::ioctls::ID(fd.as_raw_fd(), &mut id as *mut u64) };
+        if rc < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        out.push(PmuMember { kind, id, fd });
+    }
+    Ok(out)
 }

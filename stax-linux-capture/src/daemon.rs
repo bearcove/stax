@@ -87,5 +87,17 @@ pub async fn record_via_daemon(
     // task while we profile (which can run for minutes).
     drop(client);
 
-    crate::session::run_with_rings(opts, sink, should_stop, rings, switch_rings)
+    // No PMU group on the daemon-brokered path yet (the broker hands
+    // over sampling + switch fds but not HW counter siblings). The
+    // leader's SAMPLE_READ entry has an id the parser doesn't
+    // recognise, so cycles/instructions/etc. stay 0 — matching the
+    // SampleEvent contract. Brokering the PMU group is a follow-up.
+    crate::session::run_with_rings(
+        opts,
+        sink,
+        should_stop,
+        rings,
+        switch_rings,
+        crate::sys::PmuGroup::default(),
+    )
 }
