@@ -16,7 +16,7 @@ use std::sync::atomic::AtomicBool;
 use eyre::Context;
 use staxd_proto::{PerfSessionConfig, StaxdLinuxClient};
 
-use crate::sys::{PerfRing, ring_from_fd};
+use crate::sys::{PerfRing, PerfRingKind, ring_from_fd};
 use crate::{RecordOptions, RecordSummary};
 
 /// Connect to the privileged staxd at `daemon_socket`, ask it to
@@ -45,6 +45,10 @@ pub async fn record_via_daemon(
             target_pid: opts.pid,
             frequency_hz: opts.frequency_hz,
             kernel_stacks: opts.kernel_stacks,
+            // Wakeup attribution is the whole reason this broker
+            // exists on locked-down hosts; ask for it. Daemon falls
+            // back to an empty `waking` if tracefs is unavailable.
+            request_waking: true,
         })
         .await
         // vox folds the method's `Result<_, PerfSessionError>` into
@@ -57,6 +61,7 @@ pub async fn record_via_daemon(
         cpus = session.cpu_count,
         sampling = session.sampling.len(),
         switch = session.switch.len(),
+        waking = session.waking.len(),
         page_size = session.page_size,
         data_pages = session.data_pages,
         "received perf fds from staxd"
@@ -71,16 +76,32 @@ pub async fn record_via_daemon(
         let owned = fd
             .into_owned_fd()
             .ok_or_else(|| eyre::eyre!("staxd sent a sampling Fd with no descriptor (cpu {cpu})"))?;
-        rings.push(ring_from_fd(owned).with_context(|| format!("mmap sampling ring cpu {cpu}"))?);
+        rings.push(
+            ring_from_fd(owned, PerfRingKind::Sampling)
+                .with_context(|| format!("mmap sampling ring cpu {cpu}"))?,
+        );
     }
     let mut switch_rings: Vec<PerfRing> = Vec::with_capacity(session.switch.len());
     for (cpu, fd) in session.switch.into_iter().enumerate() {
         let owned = fd
             .into_owned_fd()
             .ok_or_else(|| eyre::eyre!("staxd sent a switch Fd with no descriptor (cpu {cpu})"))?;
-        switch_rings
-            .push(ring_from_fd(owned).with_context(|| format!("mmap switch ring cpu {cpu}"))?);
+        switch_rings.push(
+            ring_from_fd(owned, PerfRingKind::Switch)
+                .with_context(|| format!("mmap switch ring cpu {cpu}"))?,
+        );
     }
+    let mut waking_rings: Vec<PerfRing> = Vec::with_capacity(session.waking.len());
+    for (cpu, fd) in session.waking.into_iter().enumerate() {
+        let owned = fd
+            .into_owned_fd()
+            .ok_or_else(|| eyre::eyre!("staxd sent a waking Fd with no descriptor (cpu {cpu})"))?;
+        waking_rings.push(
+            ring_from_fd(owned, PerfRingKind::Waking)
+                .with_context(|| format!("mmap waking ring cpu {cpu}"))?,
+        );
+    }
+    let waking_offsets = session.waking_field_offsets;
 
     // Connection no longer needed — the kernel ring buffers are the
     // data path now. Closing it frees the daemon's per-connection
@@ -88,16 +109,18 @@ pub async fn record_via_daemon(
     drop(client);
 
     // No PMU group on the daemon-brokered path yet (the broker hands
-    // over sampling + switch fds but not HW counter siblings). The
-    // leader's SAMPLE_READ entry has an id the parser doesn't
-    // recognise, so cycles/instructions/etc. stay 0 — matching the
-    // SampleEvent contract. Brokering the PMU group is a follow-up.
+    // over sampling + switch + waking fds, but not HW counter
+    // siblings). The leader's SAMPLE_READ entry has an id the parser
+    // doesn't recognise, so cycles/instructions/etc. stay 0 — matching
+    // the SampleEvent contract. Brokering the PMU group is a follow-up.
     crate::session::run_with_rings(
         opts,
         sink,
         should_stop,
         rings,
         switch_rings,
+        waking_rings,
+        waking_offsets,
         crate::sys::PmuGroup::default(),
     )
 }

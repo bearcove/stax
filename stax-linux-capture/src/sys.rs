@@ -15,6 +15,7 @@ use std::ptr;
 use std::sync::atomic::{Ordering, fence};
 
 use perf_event_open_sys as pe;
+use staxd_proto::WakingFieldOffsets;
 
 /// `PERF_CONTEXT_*` sentinels that split a callchain into kernel/user
 /// regions. They are huge unsigned values (negative `i64` cast to
@@ -24,9 +25,32 @@ pub const PERF_CONTEXT_USER: u64 = (-512i64) as u64;
 /// Largest reserved marker value; real addresses are always below this.
 pub const PERF_CONTEXT_MAX: u64 = (-4095i64) as u64;
 
+/// Which kind of perf event a [`PerfRing`] is draining. Determines
+/// how the drain loop dispatches a `PERF_RECORD_SAMPLE` from it: the
+/// per-event `sample_type` differs (the sampling ring has
+/// PERF_SAMPLE_READ + a callchain; the waking ring has CALLCHAIN +
+/// PERF_SAMPLE_RAW), and only the switch ring emits
+/// `PERF_RECORD_SWITCH_CPU_WIDE`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PerfRingKind {
+    /// `PERF_TYPE_SOFTWARE`/`SW_CPU_CLOCK` PET sampler. Drives the
+    /// flamegraph; the SAMPLE_READ block carries the PMU group.
+    Sampling,
+    /// `PERF_TYPE_SOFTWARE`/`SW_DUMMY` + `context_switch=1`. Emits
+    /// `PERF_RECORD_SWITCH_CPU_WIDE` for off-CPU attribution; no
+    /// samples.
+    Switch,
+    /// `PERF_TYPE_TRACEPOINT` on `sched:sched_waking`. Each sample
+    /// names a waker (the TID field), its stack (CALLCHAIN), and the
+    /// wakee tid (PERF_SAMPLE_RAW, demultiplexed via
+    /// `waking_field_offsets`).
+    Waking,
+}
+
 /// One online CPU's sampling fd plus its mmap'd ring buffer.
 pub struct PerfRing {
     pub fd: RawFd,
+    pub kind: PerfRingKind,
     base: *mut u8,
     mmap_len: usize,
     data_offset: usize,
@@ -126,7 +150,7 @@ fn switch_attr() -> pe::bindings::perf_event_attr {
 
 /// mmap the ring for an already-opened perf fd and wrap it in a
 /// `PerfRing`. Shared by the sampling and context-switch openers.
-fn map_ring(fd: RawFd) -> io::Result<PerfRing> {
+fn map_ring(fd: RawFd, kind: PerfRingKind) -> io::Result<PerfRing> {
     let ps = page_size();
     let mmap_len = (1 + DATA_PAGES) * ps;
     // SAFETY: mapping the perf ring for `fd`; len is the documented
@@ -150,6 +174,7 @@ fn map_ring(fd: RawFd) -> io::Result<PerfRing> {
 
     Ok(PerfRing {
         fd,
+        kind,
         base: base as *mut u8,
         mmap_len,
         // First page is the user/kernel control header; data follows.
@@ -187,8 +212,12 @@ fn perf_event_open_cpu(
 
 /// Open the per-CPU `perf_event_open` fd for `attr` and mmap its ring
 /// in one step (the in-process path: same process opens and drains).
-fn open_ring(attr: &mut pe::bindings::perf_event_attr, cpu: u32) -> io::Result<PerfRing> {
-    ring_from_fd(perf_event_open_cpu(attr, cpu)?)
+fn open_ring(
+    attr: &mut pe::bindings::perf_event_attr,
+    cpu: u32,
+    kind: PerfRingKind,
+) -> io::Result<PerfRing> {
+    ring_from_fd(perf_event_open_cpu(attr, cpu)?, kind)
 }
 
 /// `perf_event_open` one **sampling** event on `cpu` (system-wide),
@@ -209,19 +238,156 @@ pub fn open_cpu_switch_fd(cpu: u32) -> io::Result<OwnedFd> {
 /// mmap the ring for an already-open perf fd (one received over the
 /// staxd fd broker, or just opened in-process) and wrap it in a
 /// [`PerfRing`]. Takes ownership of the descriptor; the `PerfRing`'s
-/// `Drop` closes it.
-pub fn ring_from_fd(fd: OwnedFd) -> io::Result<PerfRing> {
-    map_ring(fd.into_raw_fd())
+/// `Drop` closes it. `kind` tells the drain loop how to parse
+/// `PERF_RECORD_SAMPLE` records out of this ring.
+pub fn ring_from_fd(fd: OwnedFd, kind: PerfRingKind) -> io::Result<PerfRing> {
+    map_ring(fd.into_raw_fd(), kind)
 }
 
 /// Open + mmap one sampling ring on `cpu`. `pid = -1` → system-wide.
 pub fn open_cpu(cpu: u32, freq_hz: u32, kernel_stacks: bool) -> io::Result<PerfRing> {
-    open_ring(&mut sampling_attr(freq_hz, kernel_stacks), cpu)
+    open_ring(
+        &mut sampling_attr(freq_hz, kernel_stacks),
+        cpu,
+        PerfRingKind::Sampling,
+    )
 }
 
 /// Open + mmap one context-switch (off-CPU) tracking ring on `cpu`.
 pub fn open_cpu_switch(cpu: u32) -> io::Result<PerfRing> {
-    open_ring(&mut switch_attr(), cpu)
+    open_ring(&mut switch_attr(), cpu, PerfRingKind::Switch)
+}
+
+/// `perf_event_open` one **`sched:sched_waking` tracepoint** event on
+/// `cpu` (system-wide), returning just the descriptor. Privileged
+/// step of the staxd broker for wakeup attribution: the tracepoint
+/// `id` (config) and field offsets live in root-only tracefs.
+pub fn open_cpu_waking_fd(
+    cpu: u32,
+    tracepoint_id: u64,
+    kernel_stacks: bool,
+) -> io::Result<OwnedFd> {
+    perf_event_open_cpu(&mut waking_attr(tracepoint_id, kernel_stacks), cpu)
+}
+
+/// Open + mmap one waking ring on `cpu` (in-process fallback when
+/// the host's `perf_event_paranoid` permits it and tracefs is
+/// readable; the broker is the locked-down-host path).
+pub fn open_cpu_waking(
+    cpu: u32,
+    tracepoint_id: u64,
+    kernel_stacks: bool,
+) -> io::Result<PerfRing> {
+    open_ring(
+        &mut waking_attr(tracepoint_id, kernel_stacks),
+        cpu,
+        PerfRingKind::Waking,
+    )
+}
+
+/// Read the live kernel's `sched:sched_waking` tracepoint id and the
+/// byte offset/size of its `pid` field (the wakee tid) inside the
+/// tracepoint RAW payload. Both files live in tracefs and are
+/// typically root-only — which is the whole reason the staxd broker
+/// (running as root) is the canonical caller. The in-process path
+/// can try it too on a permissive host, and falls back to no
+/// wakeup attribution on failure.
+pub fn read_sched_waking_tracepoint() -> io::Result<(u64, WakingFieldOffsets)> {
+    // Modern: /sys/kernel/tracing. Legacy: /sys/kernel/debug/tracing.
+    const CANDIDATES: [&str; 2] = [
+        "/sys/kernel/tracing/events/sched/sched_waking",
+        "/sys/kernel/debug/tracing/events/sched/sched_waking",
+    ];
+    let base = CANDIDATES
+        .iter()
+        .find(|p| std::path::Path::new(p).is_dir())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "no tracefs sched_waking event (tried /sys/kernel/tracing \
+                 and /sys/kernel/debug/tracing)",
+            )
+        })?;
+
+    let id_str = std::fs::read_to_string(format!("{base}/id"))?;
+    let id: u64 = id_str
+        .trim()
+        .parse()
+        .map_err(|e| io::Error::other(format!("parse tracepoint id {:?}: {e}", id_str.trim())))?;
+
+    let format = std::fs::read_to_string(format!("{base}/format"))?;
+    let offsets = parse_waking_format(&format).ok_or_else(|| {
+        io::Error::other("sched_waking format file missed `pid` field (kernel layout drift?)")
+    })?;
+    Ok((id, offsets))
+}
+
+/// Parse a tracepoint `format` file and return offset+size of the
+/// `pid` field (the wakee tid for `sched:sched_waking`). Not
+/// `common_pid` (that's the waker, free from the sample's TID).
+fn parse_waking_format(s: &str) -> Option<WakingFieldOffsets> {
+    for line in s.lines() {
+        let line = line.trim();
+        if !line.starts_with("field:") {
+            continue;
+        }
+        // "field:pid_t pid;\toffset:24;\tsize:4;\tsigned:1;"
+        let parts: Vec<&str> = line
+            .split([';', '\t'])
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        let decl = *parts.first()?; // "field:pid_t pid"
+        let raw_name = decl.split_whitespace().next_back()?;
+        let name = raw_name.split('[').next()?;
+        if name != "pid" {
+            continue;
+        }
+        let mut offset: Option<u32> = None;
+        let mut size: Option<u32> = None;
+        for p in &parts {
+            if let Some(v) = p.strip_prefix("offset:") {
+                offset = v.parse().ok();
+            } else if let Some(v) = p.strip_prefix("size:") {
+                size = v.parse().ok();
+            }
+        }
+        if let (Some(o), Some(s)) = (offset, size) {
+            return Some(WakingFieldOffsets {
+                wakee_pid_offset: o,
+                wakee_pid_size: s,
+            });
+        }
+    }
+    None
+}
+
+/// Tracepoint attr for `sched:sched_waking`. Every wakeup fires
+/// (`sample_period = 1`); the sample carries the waker's TID + stack
+/// (CALLCHAIN) and the wakee tid embedded in PERF_SAMPLE_RAW.
+fn waking_attr(tracepoint_id: u64, kernel_stacks: bool) -> pe::bindings::perf_event_attr {
+    // SAFETY: POD; zero then init `size` per ABI.
+    let mut attr: pe::bindings::perf_event_attr = unsafe { mem::zeroed() };
+    attr.type_ = pe::bindings::PERF_TYPE_TRACEPOINT;
+    attr.size = mem::size_of::<pe::bindings::perf_event_attr>() as u32;
+    attr.config = tracepoint_id;
+    // Count-mode (no freq): one sample per wakeup. Wakeups are
+    // bursty but bounded by scheduler activity.
+    attr.__bindgen_anon_1.sample_period = 1;
+    attr.sample_type = (pe::bindings::PERF_SAMPLE_TID
+        | pe::bindings::PERF_SAMPLE_TIME
+        | pe::bindings::PERF_SAMPLE_CPU
+        | pe::bindings::PERF_SAMPLE_CALLCHAIN
+        | pe::bindings::PERF_SAMPLE_RAW) as u64;
+    attr.set_disabled(1);
+    attr.set_exclude_kernel(if kernel_stacks { 0 } else { 1 });
+    attr.set_exclude_hv(1);
+    // The sampling ring owns mmap/comm/task bookkeeping.
+    attr.set_sample_id_all(0);
+    // Wake reader after a small batch — wakeups are frequent but each
+    // sample is small.
+    attr.__bindgen_anon_2.wakeup_events = 64;
+    attr
 }
 
 impl PerfRing {

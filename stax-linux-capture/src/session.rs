@@ -8,12 +8,15 @@ use std::time::Instant;
 
 use stax_mac_capture::{
     BinaryLoadedEvent, CpuIntervalEvent, CpuIntervalKind, SampleEvent, SampleSink, ThreadNameEvent,
+    WakeupEvent,
 };
+use staxd_proto::WakingFieldOffsets;
 use tracing::{debug, info, warn};
 
 use crate::sys::{
-    PERF_CONTEXT_KERNEL, PERF_CONTEXT_MAX, PERF_CONTEXT_USER, PerfRing, PmuGroup, PmuKind,
-    online_cpus, open_cpu, open_cpu_pmu_siblings, open_cpu_switch,
+    PERF_CONTEXT_KERNEL, PERF_CONTEXT_MAX, PERF_CONTEXT_USER, PerfRing, PerfRingKind, PmuGroup,
+    PmuKind, online_cpus, open_cpu, open_cpu_pmu_siblings, open_cpu_switch, open_cpu_waking,
+    read_sched_waking_tracepoint,
 };
 use crate::{RecordOptions, RecordSummary};
 
@@ -65,6 +68,12 @@ impl<'a> Cur<'a> {
         let end = rest.iter().position(|&c| c == 0).unwrap_or(rest.len());
         &rest[..end]
     }
+    fn bytes(&mut self, n: usize) -> Option<&'a [u8]> {
+        let e = self.p + n;
+        let s = self.b.get(self.p..e)?;
+        self.p = e;
+        Some(s)
+    }
 }
 
 #[derive(Default)]
@@ -72,6 +81,22 @@ struct ImageRegistry {
     /// Mappings we've already announced, keyed by runtime base addr.
     seen: HashMap<u64, ()>,
 }
+
+/// A `sched:sched_waking` event we've seen but not yet matched against
+/// a switch-in. Keyed in [`Session::recent_waking`] by the wakee tid.
+struct RecentWaking {
+    waker_tid: u32,
+    waker_user_stack: Box<[u64]>,
+    waker_kernel_stack: Box<[u64]>,
+    time_ns: u64,
+}
+
+/// Drop a `RecentWaking` entry whose `sched_waking` event predates the
+/// switch-in by more than this. Wakeups are normally consumed within
+/// microseconds (try_to_wake_up -> the CPU running it picks the wakee
+/// up almost immediately); a generous window covers loaded scheduler
+/// latency without misattributing ancient unrelated wakeups.
+const WAKING_STALENESS_NS: u64 = 100_000_000;
 
 struct Session<'s> {
     opts: RecordOptions,
@@ -109,13 +134,35 @@ struct Session<'s> {
     /// Per-sample deltas are `cur - prev[cpu][k]`, then `prev = cur`.
     /// Indexed by [`PmuKind::index`].
     prev_pmu_per_cpu: HashMap<u32, [u64; 4]>,
+    /// Byte offsets of `sched:sched_waking`'s `pid` field inside its
+    /// RAW payload, supplied by whoever opened the tracepoint (the
+    /// daemon, or the local in-process attempt). `None` = no wakeup
+    /// rings were attached, so `on_sample_from_waking` is never
+    /// called and the off-CPU close path skips waker attribution.
+    waking_offsets: Option<WakingFieldOffsets>,
+    /// `wakee tid → most recent waking event`, awaiting its
+    /// switch-in. Bounded in practice by the number of distinct tids
+    /// (one entry per tid; later wakeups overwrite). Stale entries
+    /// (> [`WAKING_STALENESS_NS`] before the switch-in) are ignored
+    /// at lookup so a missed switch-in can't ascribe an ancient wake
+    /// to a later off-CPU.
+    recent_waking: HashMap<u32, RecentWaking>,
     summary: RecordSummary,
 }
 
 impl Session<'_> {
-    fn handle(&mut self, ty: u32, misc: u16, body: &[u8]) {
+    fn handle(&mut self, ty: u32, misc: u16, body: &[u8], kind: PerfRingKind) {
         match ty {
-            PERF_RECORD_SAMPLE => self.on_sample(body),
+            PERF_RECORD_SAMPLE => match kind {
+                // Each ring's `sample_type` is different, so the
+                // parser must too: the sampling ring has
+                // PERF_SAMPLE_READ + a callchain; the waking
+                // tracepoint ring has CALLCHAIN + PERF_SAMPLE_RAW.
+                PerfRingKind::Sampling => self.on_sample(body),
+                PerfRingKind::Waking => self.on_sample_from_waking(body),
+                // Switch rings (SW_DUMMY) don't emit SAMPLE.
+                PerfRingKind::Switch => {}
+            },
             PERF_RECORD_MMAP2 => self.on_mmap2(misc, body),
             PERF_RECORD_MMAP => self.on_mmap(body),
             PERF_RECORD_COMM => self.on_comm(body),
@@ -132,8 +179,12 @@ impl Session<'_> {
     }
 
     fn on_sample(&mut self, body: &[u8]) {
-        // sample_type = TID | TIME | CPU | READ | CALLCHAIN. The kernel
-        // emits fields in ascending bit order with CPU before READ.
+        // PERF_RECORD_SAMPLE layout per kernel `perf_output_sample`:
+        // IDENTIFIER, IP, TID, TIME, ADDR, ID, STREAM_ID, CPU, PERIOD,
+        // READ, CALLCHAIN, RAW — each only present when its
+        // `PERF_SAMPLE_*` bit is set in `sample_type`. Ours has
+        // TID|TIME|CPU|READ|CALLCHAIN, so on the wire: pid/tid, time,
+        // cpu/res, read block, callchain.
         let mut c = Cur::new(body);
         let pid = match c.u32() {
             Some(v) => v,
@@ -203,6 +254,7 @@ impl Session<'_> {
                 user.push(ip);
             }
         }
+
         self.summary.samples = self.summary.samples.saturating_add(1);
         self.sink.on_sample(SampleEvent {
             timestamp_ns: time,
@@ -314,6 +366,19 @@ impl Session<'_> {
             self.off_start.insert(sid_tid, (time, stack));
         } else if let Some((start, stack)) = self.off_start.remove(&sid_tid) {
             if time > start {
+                // Wakeup attribution: if `sched:sched_waking` for this
+                // tid landed recently (within the staleness window),
+                // the sample's waker_tid + stack identifies who woke
+                // it. The staleness filter rejects ancient unrelated
+                // wakes if a switch-in went missing.
+                let waking = self
+                    .recent_waking
+                    .remove(&sid_tid)
+                    .filter(|w| time.saturating_sub(w.time_ns) <= WAKING_STALENESS_NS);
+                let (waker_tid, waker_user_stack) = match &waking {
+                    Some(w) => (Some(w.waker_tid), Some(w.waker_user_stack.as_ref())),
+                    None => (None, None),
+                };
                 self.sink.on_cpu_interval(CpuIntervalEvent {
                     pid: self.opts.pid,
                     tid: sid_tid,
@@ -321,14 +386,115 @@ impl Session<'_> {
                     end_ns: time,
                     kind: CpuIntervalKind::OffCpu {
                         stack: &stack,
-                        waker_tid: None,
-                        waker_user_stack: None,
+                        waker_tid,
+                        waker_user_stack,
                     },
                 });
                 self.summary.off_cpu_intervals =
                     self.summary.off_cpu_intervals.saturating_add(1);
             }
         }
+    }
+
+    /// One `sched:sched_waking` tracepoint sample. The sample's TID
+    /// is the **waker** (whoever was on-CPU when `try_to_wake_up` ran);
+    /// the CALLCHAIN is the waker's stack; and `PERF_SAMPLE_RAW`
+    /// carries the wakee tid at the offset
+    /// [`Session::waking_offsets`] tells us. We stream a `WakeupEvent`
+    /// to the sink (for the aggregator's wakeup view) and stash the
+    /// record by wakee tid in [`Session::recent_waking`] for the next
+    /// switch-in to pick up as `OffCpu.waker_tid`.
+    fn on_sample_from_waking(&mut self, body: &[u8]) {
+        let Some(offsets) = self.waking_offsets else {
+            return;
+        };
+        // PERF_RECORD_SAMPLE layout per kernel `perf_output_sample`:
+        // TID|TIME|CPU|CALLCHAIN|RAW → on the wire: pid/tid, time,
+        // cpu/res, callchain (u64 nr; ips[nr]), raw (u32 size; data).
+        let mut c = Cur::new(body);
+        let _waker_pid = match c.u32() {
+            Some(v) => v,
+            None => return,
+        };
+        let waker_tid = c.u32().unwrap_or(0);
+        let time = c.u64().unwrap_or(0);
+        let _cpu = c.u32();
+        let _res = c.u32();
+        let nr = match c.u64() {
+            Some(n) => n,
+            None => return,
+        };
+        let mut user: Vec<u64> = Vec::new();
+        let mut kernel: Vec<u64> = Vec::new();
+        let mut in_kernel = false;
+        for _ in 0..nr {
+            let ip = match c.u64() {
+                Some(v) => v,
+                None => return,
+            };
+            if ip >= PERF_CONTEXT_MAX {
+                if ip == PERF_CONTEXT_KERNEL {
+                    in_kernel = true;
+                } else if ip == PERF_CONTEXT_USER {
+                    in_kernel = false;
+                }
+                continue;
+            }
+            if in_kernel {
+                kernel.push(ip);
+            } else {
+                user.push(ip);
+            }
+        }
+        // RAW: u32 size; u8 data[size]
+        let raw_size = match c.u32() {
+            Some(s) => s,
+            None => return,
+        } as usize;
+        let raw = match c.bytes(raw_size) {
+            Some(b) => b,
+            None => return,
+        };
+        let off = offsets.wakee_pid_offset as usize;
+        let sz = offsets.wakee_pid_size as usize;
+        if raw.len() < off.saturating_add(sz) {
+            return;
+        }
+        let wakee_tid: u32 = match sz {
+            4 => i32::from_le_bytes(raw[off..off + 4].try_into().unwrap()) as u32,
+            8 => u64::from_le_bytes(raw[off..off + 8].try_into().unwrap()) as u32,
+            _ => return,
+        };
+        if time != 0 {
+            self.last_ts = self.last_ts.max(time);
+        }
+
+        let waker_user_stack: Box<[u64]> = user.into_boxed_slice();
+        let waker_kernel_stack: Box<[u64]> = kernel.into_boxed_slice();
+
+        // Stream the wakeup itself (aggregator's wakeup view).
+        self.sink.on_wakeup(WakeupEvent {
+            timestamp_ns: time,
+            pid: self.opts.pid,
+            waker_tid,
+            wakee_tid,
+            waker_user_stack: &waker_user_stack,
+            waker_kernel_stack: &waker_kernel_stack,
+        });
+
+        // Stash for the matching switch-in to consume. A later wakeup
+        // for the same wakee overwrites — the freshest wins, which is
+        // the correct association when a thread is woken multiple
+        // times before it actually gets scheduled.
+        self.recent_waking.insert(
+            wakee_tid,
+            RecentWaking {
+                waker_tid,
+                waker_user_stack,
+                waker_kernel_stack,
+                time_ns: time,
+            },
+        );
     }
 
     /// At teardown, close out threads still parked: emit their open
@@ -548,7 +714,7 @@ fn drain_dispatch(r: &mut PerfRing, scratch: &mut Vec<u8>, sess: &mut Session) {
         if size < 8 || off + size > scratch.len() {
             break;
         }
-        sess.handle(ty, misc, &scratch[off + 8..off + size]);
+        sess.handle(ty, misc, &scratch[off + 8..off + size], r.kind);
         off += size;
     }
 }
@@ -608,7 +774,55 @@ pub fn run(
             }
         }
     }
-    run_with_rings(opts, sink, should_stop, rings, switch_rings, pmu)
+    // sched:sched_waking tracepoint rings for wakeup attribution.
+    // Best-effort in-process: tracefs is typically root-only, so this
+    // generally fails outside the daemon path. When it does, wakeups
+    // are simply unattributed (the off-CPU intervals still flow).
+    let (waking_rings, waking_offsets) = match read_sched_waking_tracepoint() {
+        Ok((id, offsets)) => {
+            let mut wr: Vec<PerfRing> = Vec::with_capacity(cpus.len());
+            let mut failed = false;
+            for cpu in &cpus {
+                match open_cpu_waking(*cpu, id, opts.kernel_stacks) {
+                    Ok(r) => wr.push(r),
+                    Err(e) => {
+                        warn!(
+                            %e,
+                            cpu = *cpu,
+                            "sched_waking ring open failed; wakeups disabled"
+                        );
+                        failed = true;
+                        break;
+                    }
+                }
+            }
+            if failed {
+                (Vec::new(), None)
+            } else {
+                (wr, Some(offsets))
+            }
+        }
+        Err(e) => {
+            debug!(
+                %e,
+                "sched_waking tracepoint unavailable in-process \
+                 (tracefs is usually root-only); wakeups attributed only \
+                 over the staxd broker"
+            );
+            (Vec::new(), None)
+        }
+    };
+
+    run_with_rings(
+        opts,
+        sink,
+        should_stop,
+        rings,
+        switch_rings,
+        waking_rings,
+        waking_offsets,
+        pmu,
+    )
 }
 
 /// Daemon path: the privileged staxd already did `perf_event_open` per
@@ -623,6 +837,8 @@ pub fn run_with_rings(
     should_stop: &AtomicBool,
     mut rings: Vec<PerfRing>,
     mut switch_rings: Vec<PerfRing>,
+    mut waking_rings: Vec<PerfRing>,
+    waking_offsets: Option<WakingFieldOffsets>,
     pmu: PmuGroup,
 ) -> eyre::Result<RecordSummary> {
     // Bind the PMU sibling fds for the lifetime of this function: the
@@ -650,7 +866,11 @@ pub fn run_with_rings(
         }
     };
 
-    for r in rings.iter().chain(switch_rings.iter()) {
+    for r in rings
+        .iter()
+        .chain(switch_rings.iter())
+        .chain(waking_rings.iter())
+    {
         r.enable()?;
     }
     info!(
@@ -658,12 +878,14 @@ pub fn run_with_rings(
         freq_hz = opts.frequency_hz,
         cpus = rings.len(),
         off_cpu = !switch_rings.is_empty(),
+        wakeups = !waking_rings.is_empty(),
         "linux perf capture started"
     );
 
     let mut pollfds: Vec<libc::pollfd> = rings
         .iter()
         .chain(switch_rings.iter())
+        .chain(waking_rings.iter())
         .map(|r| libc::pollfd {
             fd: r.fd,
             events: libc::POLLIN,
@@ -691,6 +913,8 @@ pub fn run_with_rings(
         last_ts: 0,
         pmu_id_to_kind,
         prev_pmu_per_cpu: HashMap::new(),
+        waking_offsets,
+        recent_waking: HashMap::new(),
         summary: RecordSummary::default(),
     };
 
@@ -729,16 +953,28 @@ pub fn run_with_rings(
         unsafe {
             libc::poll(pollfds.as_mut_ptr(), pollfds.len() as libc::nfds_t, 100);
         }
-        for r in rings.iter_mut().chain(switch_rings.iter_mut()) {
+        for r in rings
+            .iter_mut()
+            .chain(switch_rings.iter_mut())
+            .chain(waking_rings.iter_mut())
+        {
             drain_dispatch(r, &mut scratch, &mut sess);
         }
     }
 
-    for r in rings.iter().chain(switch_rings.iter()) {
+    for r in rings
+        .iter()
+        .chain(switch_rings.iter())
+        .chain(waking_rings.iter())
+    {
         r.disable();
     }
     // Final sweep so the tail of the recording isn't lost.
-    for r in rings.iter_mut().chain(switch_rings.iter_mut()) {
+    for r in rings
+        .iter_mut()
+        .chain(switch_rings.iter_mut())
+        .chain(waking_rings.iter_mut())
+    {
         drain_dispatch(r, &mut scratch, &mut sess);
     }
     // Close out threads still parked at stop time.

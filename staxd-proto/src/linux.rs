@@ -37,6 +37,32 @@ pub struct PerfSessionConfig {
     /// daemon is privileged so this generally succeeds; the client
     /// degrades gracefully if a ring lacks kernel frames.
     pub kernel_stacks: bool,
+    /// Also broker per-CPU `sched:sched_waking` tracepoint rings so
+    /// the client can attribute `OffCpu.waker_tid`. The tracepoint
+    /// id/format lives in root-only tracefs, so the unprivileged side
+    /// can't open these itself — this is the whole reason the daemon
+    /// exists. Best-effort on the daemon side: if tracefs is
+    /// unreadable or the tracepoint isn't available, `waking` comes
+    /// back empty and wakeups stay unattributed.
+    pub request_waking: bool,
+}
+
+/// Where the wakee tid lives inside the `sched:sched_waking`
+/// tracepoint RAW payload. The kernel writes the fields at host-
+/// specific byte offsets that come from
+/// `/sys/kernel/tracing/events/sched/sched_waking/format`; the
+/// privileged daemon parses that file (root-only on most hosts) and
+/// hands the offsets to the unprivileged client. There is no stable
+/// across-kernels layout, so the format MUST come from the live
+/// kernel that issued the fds.
+#[derive(Clone, Copy, Debug, Default, Facet)]
+pub struct WakingFieldOffsets {
+    /// Byte offset of `pid_t pid` (the wakee tid) inside the RAW
+    /// payload. Note: *not* `common_pid` (that's the waker, which we
+    /// get for free as the sample's TID).
+    pub wakee_pid_offset: u32,
+    /// Size of the wakee field in bytes (typically 4 for `pid_t`).
+    pub wakee_pid_size: u32,
 }
 
 /// The fd-broker reply: per-CPU `perf_event_open` descriptors plus the
@@ -54,6 +80,17 @@ pub struct PerfSessionFds {
     /// when the kernel/host can't do `context_switch` (off-CPU
     /// attribution disabled; the on-CPU profile still works).
     pub switch: Vec<vox::Fd>,
+    /// One `sched:sched_waking` tracepoint fd per online CPU, in CPU
+    /// order. Populated only when the client set
+    /// [`PerfSessionConfig::request_waking`] and the daemon could
+    /// read the tracepoint id/format from tracefs. Empty otherwise —
+    /// the client then falls back to no wakeup attribution
+    /// (`OffCpu.waker_tid = None`).
+    pub waking: Vec<vox::Fd>,
+    /// RAW-payload field offsets for `sched:sched_waking`, parsed by
+    /// the daemon from the live kernel's tracefs format file. `Some`
+    /// iff [`Self::waking`] is non-empty.
+    pub waking_field_offsets: Option<WakingFieldOffsets>,
     /// `online_cpus().len()` the daemon used. Equals `sampling.len()`
     /// on success; the client sizes its ring arrays from this.
     pub cpu_count: u32,

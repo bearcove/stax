@@ -13,7 +13,7 @@ stax-mac-kperf-parse = { version = "0.1", path = "../stax-mac-kperf-parse" }
 stax-mac-capture = { version = "0.1", path = "../stax-mac-capture" }
 stax-mac-shared-cache = { version = "0.1", path = "../stax-mac-shared-cache" }
 stax-vox-observe = { version = "0.1", path = "../stax-vox-observe" }
-vox = "0.6"
+vox = "0.7"
 tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
 log = "0.4"
 tracing = "0.1"

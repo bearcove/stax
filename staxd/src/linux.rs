@@ -211,17 +211,55 @@ impl StaxdLinux for LinuxStaxd {
             }
         }
 
+        // sched:sched_waking tracepoint rings — the wakeup-attribution
+        // payload the entire broker exists for on locked-down hosts.
+        // Best-effort: a host without tracefs / `sched:sched_waking`
+        // (rare, stripped kernels) just loses waker_tid; the on-CPU
+        // profile and off-CPU intervals are unaffected.
+        let (waking, waking_field_offsets) = if config.request_waking {
+            match stax_linux_capture::read_sched_waking_tracepoint() {
+                Ok((id, offsets)) => {
+                    let mut fds: Vec<vox::Fd> = Vec::with_capacity(cpus.len());
+                    let mut failed = false;
+                    for &cpu in &cpus {
+                        match stax_linux_capture::open_cpu_waking_fd(
+                            cpu,
+                            id,
+                            config.kernel_stacks,
+                        ) {
+                            Ok(fd) => fds.push(vox::Fd::new(fd)),
+                            Err(e) => {
+                                warn!(%e, cpu, "sched_waking open failed; wakeup attribution disabled");
+                                failed = true;
+                                break;
+                            }
+                        }
+                    }
+                    if failed { (Vec::new(), None) } else { (fds, Some(offsets)) }
+                }
+                Err(e) => {
+                    warn!(%e, "reading sched_waking tracepoint id/format failed; wakeups disabled");
+                    (Vec::new(), None)
+                }
+            }
+        } else {
+            (Vec::new(), None)
+        };
+
         let cpu_count = sampling.len() as u32;
         info!(
             pid = config.target_pid,
             cpus = cpu_count,
             off_cpu = !switch.is_empty(),
+            wakeups = !waking.is_empty(),
             "brokered perf fds to client"
         );
 
         Ok(PerfSessionFds {
             sampling,
             switch,
+            waking,
+            waking_field_offsets,
             cpu_count,
             page_size: stax_linux_capture::page_size() as u32,
             data_pages: stax_linux_capture::DATA_PAGES as u32,

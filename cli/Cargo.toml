@@ -14,7 +14,7 @@ stax-core = { path = "..", default-features = false }
 stax-live-proto = { path = "../stax-live-proto" }
 stax-vox-observe = { path = "../stax-vox-observe" }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }
-vox = "0.6"
+vox = "0.7"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tracing-oslog = "0.3"
