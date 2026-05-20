@@ -28,6 +28,8 @@
 #![cfg(target_os = "linux")]
 
 mod daemon;
+#[cfg(target_arch = "x86_64")]
+mod dwarf;
 mod elf;
 mod proc;
 mod session;
@@ -65,6 +67,16 @@ pub struct RecordOptions {
     /// Include kernel-side stack frames (requires the host to allow it;
     /// `perf_event_paranoid <= 1`). User frames are always captured.
     pub kernel_stacks: bool,
+    /// Replay user stacks via `.eh_frame` CFI in userspace, instead of
+    /// (just) the kernel's frame-pointer walker. Asks each sample to
+    /// also carry the user `rip/rsp/rbp` plus an 8 KiB stack snapshot;
+    /// `framehop` then unwinds against the live ELF's DWARF unwind
+    /// tables. Necessary for `-fomit-frame-pointer` binaries (most
+    /// distro libc, libstdc++, OpenSSL, Rust release builds without
+    /// `-Cforce-frame-pointers`) — without it the kernel CALLCHAIN
+    /// truncates at the first non-FP frame. x86_64-only this round;
+    /// silently ignored on aarch64-Linux (FP-by-default ABI).
+    pub dwarf_unwind: bool,
 }
 
 impl Default for RecordOptions {
@@ -74,6 +86,7 @@ impl Default for RecordOptions {
             frequency_hz: 999,
             duration: None,
             kernel_stacks: true,
+            dwarf_unwind: false,
         }
     }
 }

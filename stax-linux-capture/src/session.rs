@@ -18,6 +18,8 @@ use crate::sys::{
     PmuKind, online_cpus, open_cpu, open_cpu_pmu_siblings, open_cpu_switch, open_cpu_waking,
     read_sched_waking_tracepoint,
 };
+#[cfg(target_arch = "x86_64")]
+use crate::sys::PERF_SAMPLE_REGS_ABI_64;
 use crate::{RecordOptions, RecordSummary};
 
 // perf_event.h record types we handle.
@@ -153,6 +155,12 @@ struct Session<'s> {
     /// no debuginfod configured; the lookup chain stops at the local
     /// `/usr/lib/debug/.build-id/` tree.
     debuginfod: Option<crate::elf::DebuginfodConfig>,
+    /// Userspace DWARF unwinder, populated by `emit_image` as each
+    /// binary's `.eh_frame` lands. `Some` iff
+    /// `opts.dwarf_unwind` was honoured by the broker — when the
+    /// kernel paired REGS_USER + STACK_USER with each sample.
+    #[cfg(target_arch = "x86_64")]
+    dwarf: Option<crate::dwarf::DwarfUnwinder>,
     summary: RecordSummary,
 }
 
@@ -258,6 +266,49 @@ impl Session<'_> {
                 kernel.push(ip);
             } else {
                 user.push(ip);
+            }
+        }
+
+        // Optional REGS_USER + STACK_USER blocks (only present when
+        // opts.dwarf_unwind was honoured by the broker). Layout:
+        //   regs_user: u64 abi; u64 regs[popcount(mask)]
+        //     — our mask is bp|sp|ip so three u64s in ascending
+        //       bit-index order: bp, sp, ip.
+        //   stack_user: u64 size; u8 data[size]; (u64 dyn_size if size!=0)
+        // If we get a usable triple + non-empty stack snapshot, ask
+        // framehop to replace the user half of the callchain with a
+        // DWARF-unwound version. Falls back silently to the kernel's
+        // frame-pointer CALLCHAIN on any irregularity.
+        #[cfg(target_arch = "x86_64")]
+        if self.opts.dwarf_unwind {
+            let abi = c.u64().unwrap_or(0);
+            if abi == PERF_SAMPLE_REGS_ABI_64 {
+                let bp = c.u64().unwrap_or(0);
+                let sp = c.u64().unwrap_or(0);
+                let ip = c.u64().unwrap_or(0);
+                let stack_size = c.u64().unwrap_or(0) as usize;
+                let stack = c.bytes(stack_size);
+                let dyn_size = if stack_size != 0 { c.u64().unwrap_or(0) as usize } else { 0 };
+                if let (Some(stack), Some(uw)) = (stack, self.dwarf.as_mut()) {
+                    let filled = dyn_size.min(stack.len());
+                    if filled >= 16 && ip != 0 && sp != 0 {
+                        let unwound = uw.unwind(ip, sp, bp, sp, &stack[..filled]);
+                        // Trust framehop only when it produced more
+                        // frames than the kernel's FP walk did — that's
+                        // the regime where we beat the fallback. For
+                        // FP-built binaries (Fedora glibc, Apple-style
+                        // Rust builds with `force-frame-pointers`) the
+                        // kernel walk and DWARF agree, and we keep
+                        // either; the test is just a robustness check
+                        // so a no-op DWARF run can't shorten a stack.
+                        if unwound.len() > user.len() {
+                            user = unwound;
+                        }
+                    }
+                }
+            } else if abi != 0 {
+                // 32-bit task on a 64-bit kernel, or some other oddity
+                // — skip without burning a warn per sample.
             }
         }
 
@@ -656,6 +707,36 @@ impl Session<'_> {
                 debug_source = Some(src);
             }
         }
+        // Hand the binary's `.eh_frame` to framehop so subsequent
+        // samples whose RIP lives in this image can be DWARF-unwound.
+        // No-op when the image lacks `.eh_frame` (data-only libs, or
+        // a build stripped of unwind info) or when this session
+        // didn't enable DWARF unwinding.
+        //
+        // `base_avma` here is the AVMA of the mmapped executable
+        // LOAD, not the image's SVMA-0 base. framehop's address
+        // translation is `avma - module_base_avma = svma - base_svma`,
+        // so with `base_svma = 0` we have to subtract `pgoff` to get
+        // back to the SVMA-0 anchor — every section's SVMA is then
+        // exactly the offset from there.
+        #[cfg(target_arch = "x86_64")]
+        if let (Some(uw), Some(eh)) = (self.dwarf.as_mut(), img.eh_frame.as_ref()) {
+            let text = img.text.as_ref();
+            let image_base_avma = base_avma.saturating_sub(pgoff);
+            uw.add_image(
+                path,
+                base_avma,
+                image_base_avma,
+                vmsize,
+                text.map(|t| t.svma.clone()),
+                text.map(|t| t.bytes.clone()),
+                eh.svma.clone(),
+                eh.bytes.clone(),
+                img.eh_frame_hdr.as_ref().map(|h| h.svma.clone()),
+                img.eh_frame_hdr.as_ref().map(|h| h.bytes.clone()),
+            );
+        }
+
         self.summary.binaries = self.summary.binaries.saturating_add(1);
         if debug_added > 0 {
             info!(
@@ -780,7 +861,12 @@ pub fn run(
     let mut rings: Vec<PerfRing> = Vec::with_capacity(cpus.len());
     let mut pmu = PmuGroup::default();
     for cpu in &cpus {
-        let leader = match open_cpu(*cpu, opts.frequency_hz, opts.kernel_stacks) {
+        let leader = match open_cpu(
+            *cpu,
+            opts.frequency_hz,
+            opts.kernel_stacks,
+            opts.dwarf_unwind,
+        ) {
             Ok(r) => r,
             Err(e) => {
                 return Err(eyre::eyre!(
@@ -966,6 +1052,12 @@ pub fn run_with_rings(
         waking_offsets,
         recent_waking: HashMap::new(),
         debuginfod: crate::elf::DebuginfodConfig::from_env(),
+        #[cfg(target_arch = "x86_64")]
+        dwarf: if opts.dwarf_unwind {
+            Some(crate::dwarf::DwarfUnwinder::new())
+        } else {
+            None
+        },
         summary: RecordSummary::default(),
     };
     if let Some(cfg) = &sess.debuginfod {

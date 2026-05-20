@@ -56,6 +56,16 @@ pub struct PerfSessionConfig {
     /// for those fields; the rest of the sample (callchain, off-CPU,
     /// wakeups) is unaffected.
     pub request_pmu: bool,
+    /// Open the per-CPU sampling rings with `PERF_SAMPLE_REGS_USER` +
+    /// `PERF_SAMPLE_STACK_USER` so each sample carries the user
+    /// rip/rsp/rbp plus an 8 KiB stack snapshot. The unprivileged
+    /// client uses these to DWARF-unwind through `-fomit-frame-pointer`
+    /// binaries (libc, OpenSSL, most Rust release builds, …) where
+    /// the kernel's frame-pointer CALLCHAIN truncates early. Perf attrs
+    /// are immutable post-open, so the bit has to ride the broker
+    /// request rather than be flipped on the unprivileged side. The
+    /// flag is a no-op on non-x86_64 daemons (FP-by-default ABIs).
+    pub request_dwarf_unwind: bool,
 }
 
 /// Where the wakee tid lives inside the `sched:sched_waking`

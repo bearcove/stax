@@ -25,6 +25,36 @@ pub const PERF_CONTEXT_USER: u64 = (-512i64) as u64;
 /// Largest reserved marker value; real addresses are always below this.
 pub const PERF_CONTEXT_MAX: u64 = (-4095i64) as u64;
 
+/// `<asm/perf_regs.h>` indices for the x86_64 user GPRs that framehop
+/// asks for (and only those three — DWARF rules can reference other
+/// regs but framehop deliberately doesn't recover them since they
+/// aren't needed for return addresses). perf streams the captured
+/// values in ascending bit-index order, so with this mask the on-wire
+/// triple is `bp, sp, ip`.
+#[cfg(target_arch = "x86_64")]
+pub const PERF_REG_X86_BP: u32 = 6;
+#[cfg(target_arch = "x86_64")]
+pub const PERF_REG_X86_SP: u32 = 7;
+#[cfg(target_arch = "x86_64")]
+pub const PERF_REG_X86_IP: u32 = 8;
+
+/// Bitmask we pass in `perf_event_attr.sample_regs_user`. Only the
+/// three regs framehop needs.
+#[cfg(target_arch = "x86_64")]
+pub const DWARF_USER_REGS_MASK: u64 =
+    (1u64 << PERF_REG_X86_BP) | (1u64 << PERF_REG_X86_SP) | (1u64 << PERF_REG_X86_IP);
+
+/// `abi` value the kernel writes at the head of a `PERF_SAMPLE_REGS_USER`
+/// block to say "the regs are 64-bit". `_NONE` (0) means the kernel
+/// couldn't capture them (e.g. sample taken in kernel mode for a
+/// 32-bit task on a 64-bit kernel).
+pub const PERF_SAMPLE_REGS_ABI_64: u64 = 2;
+
+/// Bytes of user stack we ask the kernel to snapshot per sample. 8 KiB
+/// covers a typical "go through libc into a Rust callback" frame chain
+/// without blowing the per-CPU ring on a hot loop.
+pub const DWARF_USER_STACK_SIZE: u32 = 8 * 1024;
+
 /// Which kind of perf event a [`PerfRing`] is draining. Determines
 /// how the drain loop dispatches a `PERF_RECORD_SAMPLE` from it: the
 /// per-event `sample_type` differs (the sampling ring has
@@ -82,7 +112,17 @@ pub fn online_cpus() -> Vec<u32> {
 /// Build the sampling `perf_event_attr`: a frequency-driven software
 /// CPU-clock event with TID/TIME/CPU/CALLCHAIN sample fields, plus
 /// `mmap2`/`comm`/`task` records so we learn about images and threads.
-fn sampling_attr(freq_hz: u32, kernel_stacks: bool) -> pe::bindings::perf_event_attr {
+///
+/// `dwarf_unwind = true` additionally requests `PERF_SAMPLE_REGS_USER`
+/// (rip/rsp/rbp) + `PERF_SAMPLE_STACK_USER` (8 KiB) so userspace can
+/// replay the unwind through `.eh_frame` CFI for binaries without
+/// frame pointers. x86_64-only: on other arches the flag is a no-op
+/// (the kernel CALLCHAIN already works on FP-by-default ABIs).
+fn sampling_attr(
+    freq_hz: u32,
+    kernel_stacks: bool,
+    dwarf_unwind: bool,
+) -> pe::bindings::perf_event_attr {
     // SAFETY: perf_event_attr is a plain-old-data struct; zeroing it is
     // the documented way to start (size field then declares the ABI).
     let mut attr: pe::bindings::perf_event_attr = unsafe { mem::zeroed() };
@@ -91,11 +131,21 @@ fn sampling_attr(freq_hz: u32, kernel_stacks: bool) -> pe::bindings::perf_event_
     attr.config = pe::bindings::PERF_COUNT_SW_CPU_CLOCK as u64;
     // Frequency mode: kernel auto-tunes the period to hit ~freq_hz.
     attr.__bindgen_anon_1.sample_freq = freq_hz.max(1) as u64;
-    attr.sample_type = (pe::bindings::PERF_SAMPLE_TID
+    let mut sample_type = (pe::bindings::PERF_SAMPLE_TID
         | pe::bindings::PERF_SAMPLE_TIME
         | pe::bindings::PERF_SAMPLE_CPU
         | pe::bindings::PERF_SAMPLE_READ
         | pe::bindings::PERF_SAMPLE_CALLCHAIN) as u64;
+    #[cfg(target_arch = "x86_64")]
+    if dwarf_unwind {
+        sample_type |= (pe::bindings::PERF_SAMPLE_REGS_USER
+            | pe::bindings::PERF_SAMPLE_STACK_USER) as u64;
+        attr.sample_regs_user = DWARF_USER_REGS_MASK;
+        attr.sample_stack_user = DWARF_USER_STACK_SIZE;
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = dwarf_unwind; // No-op on non-x86_64 — FP-by-default ABIs.
+    attr.sample_type = sample_type;
     // Group-read format so each sample carries `{u64 nr; (u64 value,
     // u64 id)[nr]}` for the whole counter group. With no siblings
     // (daemon-brokered path, today) `nr == 1` and we just ignore the
@@ -224,8 +274,17 @@ fn open_ring(
 /// returning just the descriptor — the privileged half of the staxd
 /// Linux fd broker. The event is created **disabled**; whoever maps
 /// it enables it.
-pub fn open_cpu_fd(cpu: u32, freq_hz: u32, kernel_stacks: bool) -> io::Result<OwnedFd> {
-    perf_event_open_cpu(&mut sampling_attr(freq_hz, kernel_stacks), cpu)
+///
+/// `dwarf_unwind` adds the REGS_USER + STACK_USER sample bits so the
+/// unprivileged peer can DWARF-unwind through `-fomit-frame-pointer`
+/// binaries (x86_64 only; ignored on other arches).
+pub fn open_cpu_fd(
+    cpu: u32,
+    freq_hz: u32,
+    kernel_stacks: bool,
+    dwarf_unwind: bool,
+) -> io::Result<OwnedFd> {
+    perf_event_open_cpu(&mut sampling_attr(freq_hz, kernel_stacks, dwarf_unwind), cpu)
 }
 
 /// `perf_event_open` one **context-switch** (off-CPU) event on `cpu`,
@@ -245,9 +304,14 @@ pub fn ring_from_fd(fd: OwnedFd, kind: PerfRingKind) -> io::Result<PerfRing> {
 }
 
 /// Open + mmap one sampling ring on `cpu`. `pid = -1` → system-wide.
-pub fn open_cpu(cpu: u32, freq_hz: u32, kernel_stacks: bool) -> io::Result<PerfRing> {
+pub fn open_cpu(
+    cpu: u32,
+    freq_hz: u32,
+    kernel_stacks: bool,
+    dwarf_unwind: bool,
+) -> io::Result<PerfRing> {
     open_ring(
-        &mut sampling_attr(freq_hz, kernel_stacks),
+        &mut sampling_attr(freq_hz, kernel_stacks, dwarf_unwind),
         cpu,
         PerfRingKind::Sampling,
     )
@@ -631,4 +695,43 @@ pub fn open_cpu_pmu_siblings(
         out.push(PmuMember { kind, id, fd });
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `dwarf_unwind = false` must produce byte-for-byte the same
+    /// `perf_event_attr` as before this feature landed — anything
+    /// else is a regression on every recording that doesn't use the
+    /// new path.
+    #[test]
+    fn sampling_attr_off_path_unchanged() {
+        let a = sampling_attr(999, true, false);
+        let regs_user = pe::bindings::PERF_SAMPLE_REGS_USER as u64;
+        let stack_user = pe::bindings::PERF_SAMPLE_STACK_USER as u64;
+        assert_eq!(a.sample_type & (regs_user | stack_user), 0);
+        assert_eq!(a.sample_regs_user, 0);
+        assert_eq!(a.sample_stack_user, 0);
+    }
+
+    /// `dwarf_unwind = true` sets the REGS_USER + STACK_USER sample
+    /// bits and the `sample_regs_user` / `sample_stack_user` fields
+    /// framehop relies on. x86_64-only — non-x86_64 takes the no-op
+    /// branch and is covered by `_off_path_unchanged`.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn sampling_attr_dwarf_on_sets_regs_and_stack() {
+        let a = sampling_attr(999, true, true);
+        let regs_user = pe::bindings::PERF_SAMPLE_REGS_USER as u64;
+        let stack_user = pe::bindings::PERF_SAMPLE_STACK_USER as u64;
+        assert_eq!(a.sample_type & regs_user, regs_user);
+        assert_eq!(a.sample_type & stack_user, stack_user);
+        assert_eq!(a.sample_regs_user, DWARF_USER_REGS_MASK);
+        assert_eq!(a.sample_stack_user, DWARF_USER_STACK_SIZE);
+        // Exactly three regs requested (BP, SP, IP) — framehop's full
+        // set on x86_64. Adding extras would just bloat per-sample
+        // payload without recovering more frames.
+        assert_eq!(DWARF_USER_REGS_MASK.count_ones(), 3);
+    }
 }

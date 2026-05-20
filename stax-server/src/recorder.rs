@@ -146,11 +146,20 @@ async fn run_attach(
 
     #[cfg(target_os = "linux")]
     let result: eyre::Result<()> = {
+        // Opt-in for now: `STAX_DWARF_UNWIND=1` flips `.eh_frame`
+        // userspace unwinding (needed for `-fomit-frame-pointer`
+        // libraries like libc/OpenSSL/most Rust release builds where
+        // the kernel's FP-based CALLCHAIN truncates). The full
+        // RunConfig flag is a small follow-up — env var keeps the
+        // wire schema unchanged while the feature beds in.
+        let dwarf_unwind = std::env::var_os("STAX_DWARF_UNWIND")
+            .is_some_and(|v| !v.is_empty() && v != "0");
         let opts = stax_linux_capture::RecordOptions {
             pid,
             frequency_hz,
             duration: time_limit,
             kernel_stacks: true,
+            dwarf_unwind,
         };
         // Prefer the privileged staxd fd broker when its socket is
         // present (an explicit `daemon_socket`, else the systemd

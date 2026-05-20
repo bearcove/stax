@@ -54,6 +54,10 @@ pub async fn record_via_daemon(
             // `pmu` if any CPU couldn't host the full group (cycles,
             // instructions, L1D read misses, branch mispredicts).
             request_pmu: true,
+            // Perf attrs are immutable post-open, so DWARF unwinding
+            // has to be set at open time. Daemon honours this; the
+            // sample-side parser only activates when the bit is on.
+            request_dwarf_unwind: opts.dwarf_unwind,
         })
         .await
         // vox folds the method's `Result<_, PerfSessionError>` into

@@ -6,9 +6,10 @@
 //! does the same job for Mach-O `LC_SYMTAB`).
 
 use std::io::Read;
+use std::ops::Range;
 
 use object::read::elf::{ElfFile64, FileHeader, ProgramHeader};
-use object::{Object, ObjectSymbol, ObjectKind};
+use object::{Object, ObjectSection, ObjectSymbol, ObjectKind};
 use stax_mac_capture::proc_maps::MachOSymbol;
 
 /// One executable `PT_LOAD` segment: enough to map a file offset back
@@ -35,6 +36,29 @@ pub struct ElfImage {
     /// Function symbols, addresses as SVMAs, sorted by `start_svma`.
     pub symbols: Vec<MachOSymbol>,
     pub loads: Vec<LoadSeg>,
+    /// `.text` SVMA range + bytes. Populated when the section exists;
+    /// `None` for purely data libraries. framehop uses both the range
+    /// (to detect "is this PC inside text?") and the bytes (for
+    /// prologue/epilogue instruction analysis).
+    pub text: Option<SectionSlice>,
+    /// `.eh_frame` SVMA range + bytes. This is the DWARF CFI that
+    /// userspace unwinders walk to recover return addresses through
+    /// `-fomit-frame-pointer` code. `None` ⇒ no DWARF unwinding for
+    /// this image (framehop falls back to frame-pointer chasing).
+    pub eh_frame: Option<SectionSlice>,
+    /// `.eh_frame_hdr` SVMA range + bytes, when present. The
+    /// pre-built binary search index over `.eh_frame`; framehop uses
+    /// it when available and synthesises one otherwise.
+    pub eh_frame_hdr: Option<SectionSlice>,
+}
+
+/// One ELF section's link-time address range and the bytes that live
+/// at it. Cloned into framehop's per-module storage, so it owns the
+/// data for the session.
+#[derive(Clone, Debug)]
+pub struct SectionSlice {
+    pub svma: Range<u64>,
+    pub bytes: Vec<u8>,
 }
 
 impl ElfImage {
@@ -115,6 +139,14 @@ pub fn scan(bytes: &[u8]) -> Option<ElfImage> {
     // separate-debug lookup path can produce the same shape.
     let symbols = extract_symbols(&file);
 
+    // Sections the DWARF unwinder needs. Each is optional: many
+    // shared libraries don't ship a `.eh_frame_hdr`, and tiny shims
+    // can lack `.text`. framehop tolerates any combination — what
+    // it can't do is unwind through code with no `.eh_frame`.
+    let text = read_section(&file, b".text");
+    let eh_frame = read_section(&file, b".eh_frame");
+    let eh_frame_hdr = read_section(&file, b".eh_frame_hdr");
+
     Some(ElfImage {
         arch: arch_str(&file),
         is_executable,
@@ -122,6 +154,26 @@ pub fn scan(bytes: &[u8]) -> Option<ElfImage> {
         build_id_full: build_id_bytes,
         symbols,
         loads,
+        text,
+        eh_frame,
+        eh_frame_hdr,
+    })
+}
+
+/// Pull one section's `(svma, bytes)` out of an ELF, or `None` if it
+/// isn't present / has no on-disk data (e.g. `SHT_NOBITS`).
+fn read_section(file: &ElfFile64, name: &[u8]) -> Option<SectionSlice> {
+    let section = file
+        .sections()
+        .find(|s| s.name_bytes().ok().is_some_and(|n| n == name))?;
+    let data = section.data().ok()?;
+    if data.is_empty() {
+        return None;
+    }
+    let addr = section.address();
+    Some(SectionSlice {
+        svma: addr..addr.saturating_add(data.len() as u64),
+        bytes: data.to_vec(),
     })
 }
 

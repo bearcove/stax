@@ -188,6 +188,7 @@ impl StaxdLinux for LinuxStaxd {
                 cpu,
                 config.frequency_hz,
                 config.kernel_stacks,
+                config.request_dwarf_unwind,
             ) {
                 Ok(fd) => fd,
                 Err(e) => {
