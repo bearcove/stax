@@ -2793,7 +2793,6 @@ dependencies = [
  "libc",
  "log",
  "stax-core",
- "stax-linux-capture",
  "stax-live-proto",
  "stax-vox-observe",
  "tokio",

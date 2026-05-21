@@ -19,11 +19,6 @@ vox = "0.7"
 [target.'cfg(target_os = "macos")'.dependencies]
 tracing-oslog = "0.3"
 
-# Linux/x86_64 only: the ELF frame-pointer scan that powers
-# `--dwarf-unwind`'s auto mode. Reuses the capture crate's ELF parser.
-[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
-stax-linux-capture = { path = "../stax-linux-capture" }
-
 [dependencies.tokio]
 version = "1"
 features = ["rt-multi-thread", "signal", "sync"]

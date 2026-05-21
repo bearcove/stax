@@ -162,10 +162,15 @@ async fn run_attach(
 
     #[cfg(target_os = "linux")]
     let result: eyre::Result<()> = {
-        // `dwarf_unwind` arrives already resolved: the `stax` CLI
-        // applies the `--dwarf-unwind` flag, the `STAX_DWARF_UNWIND`
-        // env var, and the auto frame-pointer detection before
-        // building the `RunConfig`, so the recorder just honours it.
+        // `.eh_frame` userspace unwinding (needed for
+        // `-fomit-frame-pointer` libraries like libc/OpenSSL/most
+        // Rust release builds where the kernel's FP-based CALLCHAIN
+        // truncates) is requested via `stax record --dwarf-unwind`.
+        // `STAX_DWARF_UNWIND=1` stays as an escape hatch for runs
+        // started by a client that can't set the flag.
+        let dwarf_unwind = dwarf_unwind
+            || std::env::var_os("STAX_DWARF_UNWIND")
+                .is_some_and(|v| !v.is_empty() && v != "0");
         let opts = stax_linux_capture::RecordOptions {
             pid,
             frequency_hz,

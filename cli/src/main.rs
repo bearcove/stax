@@ -204,86 +204,6 @@ fn pids_by_exact_process_name(name: &str) -> Result<Vec<u32>, Box<dyn Error>> {
     .into())
 }
 
-/// Decide whether to enable `.eh_frame` DWARF unwinding for this run.
-///
-/// Precedence:
-///  1. `--dwarf-unwind` on the command line → always on.
-///  2. `STAX_DWARF_UNWIND` env var → on/off (escape hatch, mainly to
-///     force *off* since the flag can only force on).
-///  3. Auto: inspect the target executable's frame-pointer usage. A
-///     `-fomit-frame-pointer` build (most C/C++ `-O2`, many Rust
-///     release builds) makes the kernel's `CALLCHAIN` truncate, so
-///     DWARF unwinding is enabled; an FP-keeping build leaves it off.
-///
-/// Auto runs on Linux/x86_64 only — DWARF unwinding is a no-op on
-/// macOS (kperf walks full stacks) and on aarch64 (FP-by-default ABI).
-fn resolve_dwarf_unwind(args: &RecordArgs, target: &stax_core::args::TargetProcess) -> bool {
-    if args.dwarf_unwind {
-        return true;
-    }
-    if let Some(v) = env::var_os("STAX_DWARF_UNWIND") {
-        let v = v.to_string_lossy();
-        let v = v.trim();
-        if !v.is_empty() {
-            return !matches!(v, "0" | "false" | "off" | "no");
-        }
-    }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    {
-        let Some(path) = target_executable_path(target) else {
-            return false;
-        };
-        match stax_linux_capture::scan_frame_pointers(&path) {
-            Some(stats) => {
-                let omitted = stats.omits_frame_pointers();
-                eprintln!(
-                    "stax: auto dwarf-unwind — {}/{} sampled functions keep a frame \
-                     pointer; DWARF unwinding {}",
-                    stats.with_prologue,
-                    stats.scanned,
-                    if omitted { "ON" } else { "off" },
-                );
-                omitted
-            }
-            None => {
-                eprintln!(
-                    "stax: auto dwarf-unwind — couldn't inspect {} (stripped or not \
-                     ELF); leaving DWARF unwinding off (pass --dwarf-unwind to force)",
-                    path.display(),
-                );
-                false
-            }
-        }
-    }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-    {
-        let _ = target;
-        false
-    }
-}
-
-/// On-disk path of the executable a record target will run. For an
-/// existing pid that's `/proc/<pid>/exe`; for a launch it's the
-/// program argument, PATH-resolved the way `execvp` will resolve it.
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-fn target_executable_path(target: &stax_core::args::TargetProcess) -> Option<PathBuf> {
-    match target {
-        stax_core::args::TargetProcess::ByPid(pid) => {
-            std::fs::read_link(format!("/proc/{pid}/exe")).ok()
-        }
-        stax_core::args::TargetProcess::Launch { program, .. } => {
-            let p = PathBuf::from(program);
-            if program.contains('/') {
-                return p.is_file().then_some(p);
-            }
-            // Bare command name — search PATH like execvp does.
-            env::split_paths(&env::var_os("PATH")?)
-                .map(|dir| dir.join(program))
-                .find(|cand| cand.is_file())
-        }
-    }
-}
-
 async fn run_record_async(args: RecordArgs) -> Result<(), Box<dyn Error>> {
     let url = require_server_socket()?;
     let client: RunControlClient = vox::connect(&url).await?;
@@ -297,7 +217,7 @@ async fn run_record_async(args: RecordArgs) -> Result<(), Box<dyn Error>> {
     let config = stax_live_proto::RunConfig {
         label,
         frequency_hz: args.frequency,
-        dwarf_unwind: resolve_dwarf_unwind(&args, &target),
+        dwarf_unwind: args.dwarf_unwind,
     };
 
     match target {

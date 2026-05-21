@@ -36,29 +36,12 @@ mod session;
 mod sys;
 
 pub use daemon::record_via_daemon;
-pub use elf::FramePointerStats;
 /// The privileged half of the Linux fd broker, used by the `staxd`
 /// daemon to `perf_event_open` per CPU and report the ring geometry.
 pub use sys::{
     DATA_PAGES, PmuMember, online_cpus, open_cpu_fd, open_cpu_pmu_siblings, open_cpu_switch_fd,
     open_cpu_waking_fd, page_size, read_sched_waking_tracepoint,
 };
-
-/// Inspect an executable's `.text` function prologues to guess whether
-/// it was built `-fomit-frame-pointer`. Powers `stax record`'s
-/// `--dwarf-unwind` auto mode: when the target omits frame pointers
-/// the kernel's `CALLCHAIN` truncates and DWARF unwinding is worth its
-/// per-sample cost.
-///
-/// `None` when the binary can't be inspected confidently — unreadable,
-/// not a 64-bit ELF, or stripped down to fewer than 8 functions in
-/// `.text`. Callers treat `None` as "leave DWARF unwinding off; the
-/// user can still force it with `--dwarf-unwind`".
-pub fn scan_frame_pointers(exe_path: &std::path::Path) -> Option<FramePointerStats> {
-    let bytes = std::fs::read(exe_path).ok()?;
-    let img = elf::scan(&bytes)?;
-    elf::frame_pointer_stats(&img.symbols, img.text.as_ref()?)
-}
 
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
