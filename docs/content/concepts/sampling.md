@@ -59,26 +59,29 @@ But "what is burning CPU" is only half of "why is this slow". A program can
 be slow because it waits — and waiting, by definition, produces no on-CPU
 samples. So stax measures the gaps too.
 
-On macOS, stax subscribes to the kernel's `kdebug` scheduler events. Every
-time a thread goes **off** the CPU, stax records an **off-CPU interval**: how
-long the thread was descheduled, and *why*. The reason is bucketed into one
-of:
+Whenever a thread goes **off** the CPU, stax records an **off-CPU
+interval**: how long the thread was descheduled, and *why*. macOS reads this
+from `kdebug` scheduler events; Linux from `PERF_RECORD_SWITCH`
+context-switch records, with the kernel wait-site from `/proc/<tid>/wchan`
+naming the cause. Either way the reason is bucketed into one of:
 
 `idle` · `lock` · `sem` · `ipc` · `ioR` · `ioW` · `ready` · `sleep` ·
 `conn` · `other`
 
 Off-CPU intervals are not sampled — they are exact, measured durations with a
 cause attached. That is what fills the `off-CPU ms` and `blocked` columns of
-[`stax threads`](@/guide/inspecting-a-run.md#stax-threads). Off-CPU
-attribution is a macOS capability today; see
-[Platform Support](@/concepts/platform-support.md).
+[`stax threads`](@/guide/inspecting-a-run.md#stax-threads).
 
 ### Wakeups
 
 stax also tracks **wakeup edges** — which thread *woke* a sleeping thread.
 When thread A releases a lock that thread B was blocked on, that is a wakeup
 from A to B. It is the thread of causality that turns "B waited 200 ms on a
-lock" into "…and A is what kept it waiting."
+lock" into "…and A is what kept it waiting." On macOS this comes for free
+with the scheduler events; on Linux it needs the `staxd` broker, because the
+underlying tracepoint is root-only — see
+[Platform Support](@/concepts/platform-support.md). Off-CPU intervals
+themselves are recorded either way.
 
 ## Self vs total
 

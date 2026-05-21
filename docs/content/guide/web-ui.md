@@ -5,7 +5,7 @@ insert_anchor_links = "heading"
 +++
 
 The CLI is one face of stax. The other is a browser UI that renders the same
-live run — flamegraph, top-N functions, and annotated disassembly — and
+live run — flamegraph, top-N functions, timeline, annotated disassembly — and
 updates continuously as samples land.
 
 ## The WebSocket endpoint
@@ -27,46 +27,67 @@ Override the bind address with `STAX_SERVER_WS_BIND`:
 STAX_SERVER_WS_BIND=127.0.0.1:9000 stax-server
 ```
 
-To make it stick, set it in the LaunchAgent plist's `EnvironmentVariables` —
-see [Environment Variables](@/reference/environment-variables.md).
-
 > **Bind to loopback.** The default `127.0.0.1` keeps the endpoint local to
 > your machine. There is no authentication on the WebSocket; do not bind it
 > to a public interface.
 
+## Running the frontend
+
+The UI lives in the repo under `frontend/` — a Vite + React + TypeScript app
+(`stax-live-frontend`). Run it with [pnpm](https://pnpm.io):
+
+```bash
+cd frontend
+pnpm install
+pnpm dev          # Vite dev server on http://localhost:5173
+```
+
+`pnpm build` produces a static bundle in `dist/` if you'd rather serve it
+some other way; `pnpm preview` serves that bundle locally.
+
+By default the UI connects to `ws://127.0.0.1:8080`. Point it elsewhere with
+a `?ws=` query parameter — `http://localhost:5173/?ws=ws://127.0.0.1:9000`.
+
 ## What the UI shows
 
-The browser client connects to the WebSocket and subscribes to the
-`Profiler` service. It lays out three panels:
+The UI connects to the `Profiler` service and subscribes to a stream per
+panel, so every view refreshes on its own while a recording is in progress —
+there is nothing to reload. The layout, top to bottom:
 
+- **Topbar** — connection status, a pause toggle for ingestion, a thread
+  switcher, a symbol search (substring or regex), display-mode pills
+  (on-CPU / off-CPU / wall), PMU-metric pills (IPC / L1-d misses / branch
+  mispredicts), a binary-kind filter, and a light/dark toggle.
+- **Timeline** — per-bucket wall time, with drag-to-brush time-range
+  selection that scopes every other panel.
+- **Off-CPU reason legend** and a **wakers panel** — what threads were
+  blocked on, and who woke them.
 - **Flamegraph** — the on-CPU call tree, the same data as
   [`stax flame`](@/guide/inspecting-a-run.md#stax-flame), rendered as a
-  zoomable graph instead of an indented tree.
-- **Top-N functions** — the hot-leaf leaderboard, the same data as
-  [`stax top`](@/guide/inspecting-a-run.md#stax-top).
-- **Annotated disassembly** — per-instruction sample counts for a selected
-  function, the same data as
-  [`stax annotate`](@/guide/inspecting-a-run.md#stax-annotate).
-
-Because every panel is driven by a `subscribe_*` RPC, the view refreshes on
-its own while a recording is in progress — there is nothing to reload.
-
-## Using it
-
-1. Make sure `stax-server` is running — `stax status` confirms it.
-2. Start a recording: `stax record -- ./mybench`.
-3. Open the browser client pointed at `ws://127.0.0.1:8080`.
+  zoomable graph with focus / drop-symbol / Esc keyboard shortcuts and
+  off-CPU reason stripes.
+- **Top-N table** — the hot-leaf leaderboard, the same data as
+  [`stax top`](@/guide/inspecting-a-run.md#stax-top), sortable by self or
+  total.
+- **A tabbed detail pane** — *disassembly* (cost-annotated, source-headed,
+  the same data as [`stax annotate`](@/guide/inspecting-a-run.md#stax-annotate)),
+  *family tree* (callers/callees around a symbol), and *intervals* (the
+  individual off-CPU intervals, with reasons and wakers).
 
 The UI and the CLI are interchangeable: a run started from the CLI shows up
 in the browser, and vice versa. They are both just clients of the same
 daemon.
 
-## Building your own client
+## Regenerating the RPC bindings
 
-The web UI is a vox RPC client like any other. If you want to build your
-own dashboard, or drive stax from a script in another language, the
-WebSocket transport is the entry point — and vox can generate TypeScript
-bindings for the protocol. See
-[Programmatic Usage](@/reference/rpc-services.md) for the service surface and
-[`cargo xtask codegen`](@/reference/rpc-services.md#typescript-bindings) for
-the generated types.
+The frontend talks to `stax-server` through generated TypeScript bindings in
+`frontend/src/generated/` — vox generates them from the Rust service
+definitions, so the types never drift. After changing the protocol:
+
+```bash
+pnpm codegen      # runs `cargo run -p xtask -- codegen`
+```
+
+> **Generated code is generated.** Don't hand-edit anything under
+> `frontend/src/generated/` — change the Rust protocol and re-run codegen.
+> See [Programmatic Usage](@/reference/rpc-services.md).

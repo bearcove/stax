@@ -14,7 +14,10 @@ defaults to.
 | `STAX_SERVER_SOCKET`      | `stax`, `stax-server`    | *(see [socket resolution](#stax-server-socket))* |
 | `STAX_SERVER_WS_BIND`     | `stax-server`            | `127.0.0.1:8080`                          |
 | `STAX_CODESIGN_IDENTITY`  | `cargo xtask install`    | auto-detected                             |
+| `STAX_DWARF_UNWIND`       | recorder (Linux)         | *(unset → auto-detect)*                   |
+| `DEBUGINFOD_URLS`         | recorder (Linux)         | *(unset → debuginfod disabled)*           |
 | `XDG_RUNTIME_DIR`         | `stax`, `stax-server`    | *(unset → falls back to `/tmp`)*          |
+| `XDG_CACHE_HOME`          | recorder (Linux)         | *(unset → `~/.cache`)*                    |
 | `RUST_LOG`                | all binaries             | *(see [logging](#rust-log))*              |
 
 ## `STAX_SERVER_SOCKET`
@@ -64,11 +67,48 @@ STAX_CODESIGN_IDENTITY="Developer ID Application: …" cargo xtask install
 Set it to `-` only when you explicitly want **ad-hoc** signing. See
 [Getting Started](@/guide/getting-started.md).
 
+## `STAX_DWARF_UNWIND`
+
+**Linux only.** Controls `.eh_frame` DWARF unwinding of user stacks (x86-64).
+
+By default stax auto-detects — it enables DWARF unwinding when the target
+binary omits frame pointers. The override:
+
+- `STAX_DWARF_UNWIND=0` — force DWARF unwinding **off**, even for a
+  frame-pointer-less binary.
+- The [`--dwarf-unwind`](@/reference/cli.md#stax-record) flag forces it
+  **on**.
+
+No effect on macOS or on aarch64. See
+[Stack Unwinding](@/concepts/stack-unwinding.md).
+
+## `DEBUGINFOD_URLS`
+
+**Linux only.** A space- or semicolon-separated list of
+[debuginfod](https://sourceware.org/elfutils/Debuginfod.html) server URLs.
+When set, stax fetches missing symbols for stripped system libraries over
+HTTPS, keyed by build-id.
+
+stax also reads `*.urls` files under `/etc/debuginfod/` (the standard
+location the `libdebuginfod-common` package populates). If neither source is
+configured, debuginfod lookup is disabled and stax does no network I/O.
+
+Fetched debug files are cached under
+`$XDG_CACHE_HOME/stax/debuginfod/` (see `XDG_CACHE_HOME` below). See
+[Symbolication](@/concepts/symbolication.md).
+
 ## `XDG_RUNTIME_DIR`
 
 Not a stax-specific variable, but stax uses it to locate `stax-server`'s
 socket (see [`STAX_SERVER_SOCKET`](#stax-server-socket) above). When it is
 unset, stax falls back to `/tmp/stax-server-$UID.sock`.
+
+## `XDG_CACHE_HOME`
+
+Not stax-specific. On Linux, stax stores its
+[debuginfod](#debuginfod-urls) cache under `$XDG_CACHE_HOME/stax/debuginfod/`,
+falling back to `~/.cache/stax/debuginfod/` when unset. A cache hit makes
+every session after the first one resolve symbols without network I/O.
 
 ## `RUST_LOG`
 

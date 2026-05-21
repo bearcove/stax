@@ -5,8 +5,9 @@ insert_anchor_links = "heading"
 +++
 
 When stax misbehaves, it is almost always one of a handful of things: a
-daemon that isn't running, a run that's in the way, or a target stax can't
-attach to. This page covers the diagnostic tools and the common errors.
+daemon that isn't running, a run that's in the way, or — on Linux — a host
+that won't let an unprivileged process sample. This page covers the
+diagnostic tools and the common errors.
 
 ## Diagnostic commands
 
@@ -26,20 +27,20 @@ guessing.
 ### stax dump
 
 Asks every running stax process (`staxd`, `stax-server`, `stax`) to write a
-SIGUSR1 telemetry/debug snapshot into the system log.
+SIGUSR1 telemetry/debug snapshot into its log output.
 
 ```bash
 stax dump
 ```
 
-The snapshots land in unified logging (macOS) — read them with the `log`
-commands below. This is the heavier sibling of `stax diagnose`: it captures
-deep per-process state for after-the-fact analysis.
+This is the heavier sibling of `stax diagnose`: it captures deep per-process
+state for after-the-fact analysis. Read it back with the log commands below.
 
 ## Reading the logs
 
-Both daemons log through macOS unified logging (`os_log`). Nothing is written
-to a file on disk.
+### macOS
+
+Both daemons log through macOS unified logging (`os_log`) — nothing on disk:
 
 ```bash
 # stax-server — your user, no sudo
@@ -52,24 +53,40 @@ sudo log stream --predicate 'subsystem == "eu.bearcove.staxd"'
 log stream --predicate 'subsystem == "eu.bearcove.stax"'
 ```
 
-Swap `stream` for `show --last 10m` to query past events instead of
-following live ones. Or open **Console.app**, enable *Include Info Messages*
-and *Include Debug Messages* from the Action menu, and filter by subsystem.
+Swap `stream` for `show --last 10m` to query past events. Or use
+**Console.app** with *Include Info/Debug Messages* enabled.
+
+### Linux
+
+`staxd` runs under systemd, so its logs are in the journal:
+
+```bash
+journalctl -u eu.bearcove.staxd -f
+```
+
+`stax-server` is a process you started yourself — its logs go wherever you
+pointed its stdout/stderr. The CLI logs to stderr. Raise the level on any of
+them with `RUST_LOG` (see
+[Environment Variables](@/reference/environment-variables.md)).
 
 ## Common errors
 
 ### `error: stax-server isn't running`
 
-The LaunchAgent isn't loaded. `cargo xtask install` loads it; to do it by
-hand:
+Every subcommand except `setup` needs `stax-server`. Start it:
 
-```bash
-launchctl bootstrap "gui/$(id -u)" \
-  ~/Library/LaunchAgents/eu.bearcove.stax-server.plist
-```
+- **macOS** — the LaunchAgent didn't load. Reload it:
 
-Confirm with `launchctl list eu.bearcove.stax-server` — you want a pid and a
-`0` exit status.
+  ```bash
+  launchctl bootstrap "gui/$(id -u)" \
+    ~/Library/LaunchAgents/eu.bearcove.stax-server.plist
+  ```
+
+  Confirm with `launchctl list eu.bearcove.stax-server` — you want a pid and
+  a `0` exit status.
+
+- **Linux** — just run it: `stax-server &`. See
+  [Getting Started](@/guide/getting-started.md).
 
 ### `another run is already active`
 
@@ -81,21 +98,45 @@ stax wait     # block until it finishes on its own
 stax stop     # or stop it now
 ```
 
-### `stax record` says `stax-server unreachable`
-
-The recording daemon is down. Sampling still starts, but the events have
-nowhere to go and no query will work. Fix `stax-server` first (see the
-LaunchAgent error above), then re-record.
-
 ### `stax top` returns `(no samples yet — is a recording in progress?)`
 
-Either no run is active, or the run hasn't ingested any PET samples yet —
-very early in a run's life. Confirm a run exists with `stax status`, or
-block until data is in:
+Either no run is active, or the run hasn't ingested any samples yet — very
+early in a run's life. Confirm a run exists with `stax status`, or block
+until data is in:
 
 ```bash
 stax wait --for-samples 100
 ```
+
+### Linux: shallow stacks, no kernel frames, or no hardware counters
+
+The in-process Linux recorder is limited by `perf_event_paranoid`. If stacks
+come back shallow, kernel frames are missing, or PMU columns are empty, the
+host is restricting unprivileged `perf_event_open`. Two fixes:
+
+```bash
+# loosen the host policy for the session…
+sudo sysctl kernel.perf_event_paranoid=1
+
+# …or, better, install the staxd broker so the policy stops mattering:
+sudo stax setup
+```
+
+The `staxd` broker is also what unlocks **wakeup attribution** and
+**hardware counters** on Linux — see
+[Platform Support](@/concepts/platform-support.md#linux--perf-event-paranoid).
+
+### Linux: frame-pointer-less binary, truncated stacks
+
+If a flamegraph is suspiciously flat on x86-64 Linux, the target was likely
+built `-fomit-frame-pointer`. stax auto-detects this and switches on DWARF
+unwinding; force it if the heuristic missed:
+
+```bash
+stax record --dwarf-unwind -- ./mybench
+```
+
+See [Stack Unwinding](@/concepts/stack-unwinding.md).
 
 ### macOS asks whether `stax-server` can access another app's data
 
@@ -109,16 +150,14 @@ outside `~/Library`.
 
 ## Limitations
 
-- **Hardened-runtime targets are out of scope.** The attachment helper is
-  same-uid and aimed at ordinary local developer processes. A target with
-  the hardened runtime and no `get-task-allow` entitlement cannot be
-  attached to.
+- **macOS: hardened-runtime targets are out of scope.** An app with the
+  hardened runtime and no `get-task-allow` entitlement cannot be attached to.
 - **Run history is in-memory.** `stax list` shows history, but it does not
-  survive a `stax-server` restart. Persistence is a follow-up.
+  survive a `stax-server` restart.
 - **No per-run query selector yet.** Queries hit whichever run is active or
   most recent — see [Run Lifecycle](@/guide/run-lifecycle.md).
 
 ## Still stuck?
 
-Capture a `stax diagnose` dump and the relevant `log show` output, and open
-an issue at [github.com/bearcove/stax](https://github.com/bearcove/stax/issues).
+Capture a `stax diagnose` dump and the relevant log output, and open an issue
+at [github.com/bearcove/stax](https://github.com/bearcove/stax/issues).

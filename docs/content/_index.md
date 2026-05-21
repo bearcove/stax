@@ -63,11 +63,14 @@ nothing depends on it.
 - **Built for agents as much as humans.** Every query is a subcommand with
   plain-text output and meaningful exit codes. `stax wait --for-samples N`
   lets a script block until there's enough data to look at.
-- **On-CPU *and* off-CPU.** On macOS, stax correlates `kdebug` scheduler
-  events, so it knows not just where the CPU time goes but *why* a thread was
-  blocked — lock, sleep, I/O, IPC.
+- **On-CPU *and* off-CPU.** stax doesn't just show where the CPU time goes —
+  it correlates scheduler events to show *why* a thread was blocked: lock,
+  sleep, I/O, IPC.
 - **Down to the instruction.** `stax annotate` disassembles a hot function and
   attributes samples to individual instructions, interleaved with source.
+- **Symbolicates stripped binaries.** On Linux, stax pulls symbols from local
+  debug packages and [debuginfod](@/concepts/symbolication.md); on macOS, from
+  the dyld shared cache — so system-library frames get real names.
 - **JIT-aware.** A JIT that emits a [perf jitdump](@/guide/profiling-jit-code.md)
   file gets its compiled functions symbolicated and disassembled like any
   other code.

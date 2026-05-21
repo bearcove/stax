@@ -20,40 +20,44 @@ RPC layer directly when you want to:
   generated TypeScript types is a complete client;
 - **embed** run control into a larger tool.
 
-## The three services
+## The two services
 
-All three are defined in the **`stax-live-proto`** crate.
+Both are defined in the **`stax-live-proto`** crate and exposed by
+`stax-server` on **both** transports (the local socket and the WebSocket).
 
 ### `RunControl`
 
-Run lifecycle — the surface behind `stax status`, `list`, `wait`, `stop`.
+The lifecycle and control plane — the surface behind `stax status`, `list`,
+`diagnose`, `wait`, `stop`, and the start of `stax record`.
 
-| method         | purpose                                          |
-|----------------|--------------------------------------------------|
-| `status`       | the daemon's current state + active run          |
-| `list_runs`    | every run hosted, active and history             |
-| `wait_active`  | block until a `WaitCondition` fires or the run stops |
-| `stop_active`  | stop the active run cleanly                      |
+| method          | purpose                                                    |
+|-----------------|------------------------------------------------------------|
+| `status`        | the active run plus server-wide info                       |
+| `list_runs`     | every run hosted, active and history                       |
+| `diagnostics`   | telemetry counters, phases, histograms, recent events      |
+| `start_attach`  | begin a recording by attaching to a pid                    |
+| `wait_active`   | block until a `WaitCondition` fires or the run stops       |
+| `stop_active`   | stop the active run cleanly, returning its final summary   |
+
+`start_attach` is how recordings begin: for `stax record -- <argv>`, the CLI
+launches the target suspended and hands the PID to this call.
 
 ### `Profiler`
 
-The query surface — the live aggregator. Methods come in two shapes:
+The query surface — the live aggregator. Most methods come in two shapes:
 
-- **one-shot** — e.g. `top` returns a single snapshot;
-- **`subscribe_*`** — push periodic updates over a `vox::Tx<…>` channel for
-  as long as you hold it: `subscribe_top`, `subscribe_flamegraph`,
-  `subscribe_annotated`, `subscribe_neighbors`, `subscribe_threads`,
-  `subscribe_timeline`, and more.
+- **one-shot** — `top`, `flamegraph`, `threads`, `annotated`, `timeline`,
+  `neighbors`, `intervals`, `pet_samples`, `wakers`, `cfg`, `total_on_cpu_ns`
+  — return a single snapshot;
+- **`subscribe_*`** — the same queries, but each pushes periodic updates
+  over a `vox::Tx<…>` channel for as long as you hold it.
 
 The `subscribe_*` variants are how the web UI stays live without polling —
 each panel holds one subscription and re-renders when an update arrives.
+There is also `set_paused` / `is_paused` to freeze and resume ingestion.
 
-### `RunIngest`
-
-The recorder-side ingest path: `start_run` opens a run and takes an
-`Rx<IngestEvent>` channel that the recorder feeds samples into. This is an
-internal service between the recording task and the registry — clients
-querying or controlling runs do not need it.
+Every query takes a `ViewParams` (thread filter, time range, exclude-symbol
+list), so any view can be scoped — the equivalent of the CLI's `--tid`.
 
 ## Connecting
 
@@ -65,16 +69,16 @@ ws://127.0.0.1:8080
 ```
 
 - **`local://…`** — a Unix domain socket, for trusted local clients on the
-  same machine: the CLI, local agents, scripts. The socket path resolution
-  matches [`STAX_SERVER_SOCKET`](@/reference/environment-variables.md):
-  the env override, then `$XDG_RUNTIME_DIR/stax-server.sock`, then
+  same machine: the CLI, local agents, scripts. The path resolution matches
+  [`STAX_SERVER_SOCKET`](@/reference/environment-variables.md): the env
+  override, then `$XDG_RUNTIME_DIR/stax-server.sock`, then
   `/tmp/stax-server-$UID.sock`.
 - **`ws://127.0.0.1:8080`** — the WebSocket, for browser clients. Override
   the bind with [`STAX_SERVER_WS_BIND`](@/reference/environment-variables.md).
   There is no authentication; keep it bound to loopback.
 
-Both transports speak the same three services — the only difference is who
-can reach them.
+Both transports speak both services — the only difference is who can reach
+them.
 
 ## Rust clients
 
@@ -82,27 +86,27 @@ can reach them.
 `RunControlClient` and `ProfilerClient` — alongside the shared types
 (`ServerStatus`, `RunSummary`, `WaitCondition`, `WaitOutcome`, `TopSort`,
 `ViewParams`, `FlamegraphUpdate`, `FlameNode`, `ThreadsUpdate`,
-`OffCpuBreakdown`, `DiagnosticsSnapshot`, …). The `stax` CLI is itself a
-straightforward consumer of these clients — `cli/src/main.rs` is the
-worked example to read.
+`DiagnosticsSnapshot`, …). The `stax` CLI is itself a straightforward
+consumer of these clients — `cli/src/main.rs` is the worked example to read.
 
 ## TypeScript bindings
 
-vox can generate TypeScript types for an RPC protocol, so a browser or
-Node client gets the exact same shapes the Rust side uses — no hand-written
-interfaces, no drift.
+vox generates TypeScript types from the Rust service definitions, so a
+browser or Node client gets the exact same shapes the Rust side uses — no
+hand-written interfaces, no drift.
 
 ```bash
-cargo xtask codegen
+cargo run -p xtask -- codegen     # or, from frontend/: pnpm codegen
 ```
 
-This regenerates the TypeScript bindings for `stax-live` into
-`frontend/src/generated/`. Combined with the WebSocket transport, that is a
-complete, typed client for the `Profiler` and `RunControl` services.
+This regenerates the bindings into `frontend/src/generated/` —
+`profiler.generated.ts`, `runcontrol.generated.ts`, and a `theme.css`. The
+[web UI](@/guide/web-ui.md) is the reference client: a Vite + React app that
+subscribes to `Profiler` over the WebSocket transport.
 
 > **Generated code is generated.** Do not hand-edit anything under
 > `frontend/src/generated/` — change the Rust protocol in `stax-live-proto`
-> and re-run `cargo xtask codegen`.
+> and re-run codegen.
 
 ## See also
 

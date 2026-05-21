@@ -101,7 +101,8 @@ one of `idle`, `lock`, `sem`, `ipc`, `ioR`, `ioW`, `ready`, `sleep`, `conn`,
 |-------------------|--------------------------------------------------------|
 | `-n, --limit <N>` | how many threads to print — default **20**; `0` for all|
 
-Off-CPU attribution is a macOS feature — see
+Off-CPU intervals are recorded on both macOS and Linux. The *waker*
+attribution shown elsewhere needs the `staxd` broker on Linux — see
 [Platform Support](@/concepts/platform-support.md).
 
 ## stax annotate

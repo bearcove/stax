@@ -14,15 +14,18 @@ This page is the contract. Any JIT — Cranelift, a custom backend, V8, the
 JVM — that follows it will light up in `stax top`, `stax flame`, and
 `stax annotate`.
 
+> **Platform.** jitdump tailing currently runs on the macOS capture backend.
+> The contract below is platform-neutral — a runtime that emits the file is
+> ready for jitdump support wherever stax surfaces it.
+
 ## How stax consumes a jitdump
 
 - The runtime writes a growing stream of records to **`/tmp/jit-<pid>.dump`**,
   where `<pid>` is the *profiled process's* PID.
-- stax's preload library notices the target `open()` that path and tells the
-  recorder about it.
-- A tailer opens the file, parses the 40-byte global header, and on every
-  tick reads newly-appended `JIT_CODE_LOAD` records — emitting a synthetic
-  binary-load event per compiled function.
+- stax watches for that path to appear and, once it does, opens a tailer.
+- The tailer parses the 40-byte global header and, on every tick, reads
+  newly-appended `JIT_CODE_LOAD` records — emitting a synthetic binary-load
+  event per compiled function.
 
 From then on, that address range resolves to the name you gave it. Because
 each record **carries the code bytes**, `stax annotate` can disassemble JIT'd

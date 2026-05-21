@@ -56,10 +56,9 @@ stax wait --for-samples 20000
 stax flame
 ```
 
-The recording is hosted by `stax-server`, not by the `stax record` process
-itself — so backgrounding or even killing the `stax record` invocation does
-not lose the run. Use [`stax stop`](@/guide/run-lifecycle.md) to end it
-cleanly.
+The run lives in `stax-server`, not in the `stax record` process — so the
+recording keeps going while you query it from other shells. Use
+[`stax stop`](@/guide/run-lifecycle.md) to end it cleanly.
 
 ## Flags
 
@@ -91,22 +90,43 @@ stax record --pid $(pgrep -n myserver) --time-limit 30
 Attach to an existing process instead of launching one. Mutually exclusive
 with a launch command.
 
+### `--dwarf-unwind`
+
+**Linux only.** Force `.eh_frame` DWARF unwinding of user stacks instead of
+relying on the kernel's frame-pointer walk.
+
+By default stax **auto-detects**: it inspects the target executable and turns
+DWARF unwinding on when the binary omits frame pointers (most C/C++ `-O2`
+builds, many Rust release builds), where the kernel's stack walk would
+otherwise truncate. Pass `--dwarf-unwind` to force it on regardless; set
+`STAX_DWARF_UNWIND=0` to force it off.
+
+It costs a per-sample register + 8 KiB stack copy, and is x86-64 only
+(aarch64 keeps a frame pointer by ABI). No-op on macOS. See
+[Stack Unwinding](@/concepts/stack-unwinding.md).
+
 ### `--daemon-socket <PATH>`
 
 The local socket of the privileged `staxd` daemon. **Default:
-`/var/run/staxd.sock`** — the path `sudo stax setup` installs. You only need
-this if you're running `staxd` somewhere non-standard.
+`/var/run/staxd.sock`** (on Linux this resolves to `/run/staxd.sock`, the
+path `sudo stax setup` installs). Override it only if you run `staxd`
+somewhere non-standard. On Linux, if no `staxd` socket is present, stax
+records [in-process](@/concepts/platform-support.md#linux--two-recording-modes)
+instead.
 
-## What flows where
+## How a recording runs
 
-When you start a recording, `stax-server` receives a continuous stream over
-its local socket: every PET sample, every off-CPU interval, every wakeup
-edge, every binary load, and every thread-name event. That stream is what
-populates the live aggregator the query commands read.
+`stax record` does not do the sampling itself. It launches the target (or
+resolves the `--pid`), hands it to `stax-server`, and `stax-server` drives
+the capture on an in-process per-run task — folding every sample, off-CPU
+interval, wakeup, and image load straight into the live aggregator the query
+commands read. See [Architecture](@/concepts/architecture.md).
 
-If `stax-server` is **not** running when you `stax record`, recording still
-starts, but the events have nowhere to go and no query will work. stax warns
-you (`stax-server unreachable`); fix the daemon first. See
+So `stax record` needs `stax-server` to be running; without it the command
+fails immediately. On macOS it also needs `staxd`; on Linux `staxd` is
+needed only on a locked-down host — see
+[Platform Support](@/concepts/platform-support.md#linux--two-recording-modes). If a
+prerequisite is missing, fix it first — see
 [Troubleshooting](@/guide/troubleshooting.md).
 
 ## After recording

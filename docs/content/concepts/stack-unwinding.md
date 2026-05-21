@@ -11,15 +11,12 @@ instruction. Turning one PC into a backtrace is *stack unwinding*, and how
 stax does it has a direct, practical consequence for how you build the code
 you profile.
 
-**The short version: build with frame pointers, or your profile will have no
-call stacks.**
-
 ## Two ways to walk a stack
 
-When a thread is paused mid-execution, its stack is a wall of bytes:
-saved registers, locals, spilled values, return addresses, all interleaved.
-The return addresses are in there — but nothing in the raw bytes says
-*which* words they are. There are two ways to find them.
+When a thread is paused mid-execution, its stack is a wall of bytes: saved
+registers, locals, spilled values, return addresses, all interleaved. The
+return addresses are in there — but nothing in the raw bytes says *which*
+words they are. There are two ways to find them.
 
 ### Frame pointers
 
@@ -49,47 +46,75 @@ caller's registers. This is DWARF CFI (`.eh_frame`) on Linux and *compact
 unwind* (`__unwind_info`) in Mach-O.
 
 Table-based unwinding is precise and works on frame-pointer-less code, but it
-is far more expensive: you need the unwind tables *and* a copy of the thread's
-stack memory, and the walk is an interpreter, not a pointer chase. Profilers
-that use it generally **copy the raw stack at sample time and unwind later**,
-off the hot path.
+is far more expensive: you need the unwind tables *and* a copy of the
+thread's stack memory, and the walk is an interpreter, not a pointer chase.
+So it is done by **copying the raw stack at sample time and unwinding it
+afterwards**, off the hot path.
 
-## What stax does today
+## What stax does
 
-**stax unwinds with frame pointers, on both platforms.**
+stax uses **frame pointers by default, on both platforms** — and on x86-64
+Linux it can additionally fall back to **`.eh_frame` DWARF unwinding** for
+code that was built without them.
 
-- **macOS** — `kperf`'s PET sampler walks the frame-pointer chain in the
-  kernel and hands stax a finished backtrace per tick.
-- **Linux** — `perf_event_open` is opened with `PERF_SAMPLE_CALLCHAIN`; the
-  kernel walks the frame-pointer chain and the sample arrives with the
-  call chain already attached.
+### macOS — frame pointers, in-kernel
 
-stax does **not** do DWARF / compact-unwind table unwinding at this time.
-That means it never copies the target's stack memory and never pays the
-unwinder-interpreter cost — recording stays light — but it also means stax
-sees exactly the frames the frame-pointer chain exposes, and no more.
+`kperf`'s sampler walks the frame-pointer chain in the kernel and hands stax
+a finished backtrace — user *and* kernel — per tick. stax does no unwinding
+of its own. There is no DWARF or compact-unwind path on macOS; stax sees
+exactly the frames the frame-pointer chain exposes.
 
-## The consequence: build with frame pointers
+This is reliable on **Apple Silicon** because Apple's ARM64 ABI *requires* a
+chained frame pointer in `x29` — system libraries and well-behaved code
+already have it.
 
-If a function was compiled **without** a frame pointer, it is not a node in
-the chain. The walker skips straight past it — or, worse, the chain breaks
-and the backtrace simply ends there.
+### Linux — frame pointers, with a DWARF fallback
 
-In practice that shows up as:
+By default the kernel walks the frame-pointer chain (`PERF_SAMPLE_CALLCHAIN`)
+and the sample arrives with the call chain attached. On **aarch64** that is
+the whole story — AArch64's ABI keeps `x29` as a frame pointer in practice,
+so the chain is intact.
 
-- **Shallow flamegraphs.** Stacks bottom out far earlier than the code's
-  real call depth.
-- **Missing callers.** A hot leaf still appears in
-  [`stax top --sort self`](@/guide/inspecting-a-run.md#stax-top) — its PC was
-  sampled directly — but the functions that *called* it are gone, so
-  `--sort total` and [`stax flame`](@/guide/inspecting-a-run.md#stax-flame)
-  are degraded or wrong.
-- **Stacks that "teleport".** A frame-pointer-less frame in the middle gets
-  silently dropped, so a callee appears to be called directly by its
-  grandparent.
+On **x86-64**, where there is no such ABI guarantee, stax adds a second path:
+userspace **`.eh_frame` DWARF unwinding** with [framehop](https://docs.rs/framehop).
+When it is active, each sample also carries the user registers and an 8 KiB
+snapshot of the thread's stack; stax replays the unwind against each loaded
+image's `.eh_frame` CFI — recovering the full chain through
+frame-pointer-less code that the kernel walker would truncate.
 
-If your flamegraphs look suspiciously flat, missing frame pointers is the
-first thing to check.
+**stax decides automatically.** Before a recording starts it inspects the
+target executable's `.text`: if fewer than half the functions open with the
+frame-pointer prologue (`push %rbp; mov %rsp,%rbp`), the binary was built
+`-fomit-frame-pointer` and DWARF unwinding is switched on. You can override
+the decision:
+
+```bash
+stax record --dwarf-unwind -- ./mybench   # force it on
+STAX_DWARF_UNWIND=0 stax record -- ./mybench   # force it off
+```
+
+DWARF unwinding costs a per-sample register + stack copy, so stax only pays
+it when the auto-detector (or you) says the kernel walker would otherwise
+come back truncated. It is **x86-64 Linux only** — `--dwarf-unwind` is a
+no-op on macOS and on aarch64.
+
+## Build with frame pointers anyway
+
+DWARF unwinding rescues binaries you *cannot* rebuild — distro `libc`,
+`libstdc++`, a release artifact from someone else. For code you control,
+frame pointers are still the better default: they are cheaper at record time
+(no per-sample stack copy), and they are the **only** mechanism on macOS.
+
+If a function was compiled **without** a frame pointer and DWARF unwinding is
+not in play, it is not a node in the chain. The walker skips past it — or the
+chain breaks and the backtrace ends there. That shows up as:
+
+- **Shallow flamegraphs** — stacks bottom out far earlier than the real call
+  depth.
+- **Missing callers** — a hot leaf still appears in
+  [`stax top --sort self`](@/guide/inspecting-a-run.md#stax-top), but the
+  functions that *called* it are gone, so `--sort total` and
+  [`stax flame`](@/guide/inspecting-a-run.md#stax-flame) are degraded.
 
 ### Rust
 
@@ -108,8 +133,9 @@ rustflags = ["-C", "force-frame-pointers=yes"]
 ```
 
 Keep `debug = 1` (or higher) in your release profile too — stax wants line
-tables for source-interleaved [`annotate`](@/guide/inspecting-a-run.md#stax-annotate)
-output. stax's own workspace already sets `[profile.release] debug = 1`.
+tables for source-interleaved
+[`annotate`](@/guide/inspecting-a-run.md#stax-annotate) output. stax's own
+workspace already sets `[profile.release] debug = 1`.
 
 ### C and C++
 
@@ -117,40 +143,28 @@ output. stax's own workspace already sets `[profile.release] debug = 1`.
 -fno-omit-frame-pointer
 ```
 
-Pass it to every translation unit you want to see in a backtrace — including
-the hot dependencies, not just your own code.
+Pass it to every translation unit you want to see in a backtrace.
 
 ### Platform defaults
 
-- **Apple Silicon (`aarch64`).** Apple's ARM64 ABI *requires* a chained
-  frame pointer in `x29`. System libraries and well-behaved code already
-  have it — which is why frame-pointer unwinding is reliable on Apple
-  Silicon. You still need to enable it for your *own* optimized build.
-- **x86-64.** There is no ABI guarantee. Whether a given binary — yours, a
-  dependency, a system library — has frame pointers depends entirely on how
-  it was compiled. Recent Linux distributions have begun re-enabling
-  frame pointers across their package sets, but you cannot assume it.
+- **Apple Silicon (`aarch64`).** Apple's ARM64 ABI requires a chained frame
+  pointer; you still need to enable it for your *own* optimized build.
+- **aarch64 Linux.** The ABI keeps `x29` in practice — frame-pointer
+  unwinding works without DWARF.
+- **x86-64.** No ABI guarantee. On Linux, stax's DWARF fallback covers it;
+  on macOS x86-64, frame pointers are the only option.
 
 ## JIT'd code
 
 A JIT emits machine code at runtime, so *it* decides whether to set up a
-frame pointer in the code it generates. If you want JIT'd functions to have
-callers in a stax backtrace, have the JIT emit the frame-pointer
-prologue/epilogue. Naming the code is a separate step — see
-[Profiling JIT Code](@/guide/profiling-jit-code.md).
-
-## On the roadmap
-
-Table-based unwinding — capturing the raw stack at sample time and unwinding
-it afterward against `.eh_frame` / `__unwind_info` — is a planned addition.
-It would let stax profile frame-pointer-less binaries you cannot rebuild.
-Until it lands, the rule stands: **build the code you profile with frame
-pointers.**
+frame pointer. If you want JIT'd functions to have callers in a stax
+backtrace, have the JIT emit the frame-pointer prologue/epilogue. Naming the
+code is a separate step — see [Profiling JIT Code](@/guide/profiling-jit-code.md).
 
 ## See also
 
-- [Sampling](@/concepts/sampling.md) — what each sample measures.
 - [Platform Support](@/concepts/platform-support.md) — the per-platform
   capture backends.
-- [Inspecting a Run](@/guide/inspecting-a-run.md) — the views that degrade
-  when frames are missing.
+- [Symbolication](@/concepts/symbolication.md) — turning the unwound
+  addresses into function names.
+- [Sampling](@/concepts/sampling.md) — what each sample measures.
