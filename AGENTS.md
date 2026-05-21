@@ -1,41 +1,63 @@
 # Using stax from an agent
 
 stax is built around a long-running unprivileged daemon, **stax-server**, that
-hosts the run registry, the live aggregator, and three vox services. Both
-human users on the CLI and AI agents talk to the same surface.
+hosts the run registry, the live aggregator, and two vox services
+(`RunControl` + `Profiler`). Both human users on the CLI and AI agents talk
+to the same surface.
 
 This document is the agent-facing manual: install, lifecycle, query, wait.
+stax runs on **macOS** and **Linux**; platform differences are called out
+where they matter.
 
 ## Install
 
-One command from a fresh checkout:
+One command from a fresh checkout builds and stages the binaries:
 
 ```
 cargo xtask install
 ```
 
-…builds release binaries for `stax`, `staxd`, and `stax-server`, copies them
-to `~/.cargo/bin/`, codesigns them on macOS, and **bootstraps `stax-server`
-as a per-user LaunchAgent** so it's running on login.
+…builds release binaries for `stax`, `staxd`, and `stax-server` and copies
+them to `~/.cargo/bin/`.
+
+- **macOS** — also codesigns the binaries and **bootstraps `stax-server` as a
+  per-user LaunchAgent**, so it is running now and on every login.
+- **Linux** — stops at copying the binaries; you start `stax-server`
+  yourself (next step).
 
 On macOS, `cargo xtask install` prefers `Developer ID Application` and then
 `Apple Development` identities from `security find-identity`. Override with
 `STAX_CODESIGN_IDENTITY=<identity-or-hash>`; set it to `-` only when you
 explicitly want ad-hoc signing.
 
-After that, one privileged step installs `staxd` as a LaunchDaemon:
+### Start stax-server (Linux)
+
+On macOS the LaunchAgent runs it for you. On Linux, start it yourself — it is
+unprivileged and takes no arguments:
 
 ```
-sudo -n /usr/local/sbin/stax-agent setup --yes
+stax-server &
 ```
 
-…installs `staxd` (the privileged kperf/kdebug owner) as a LaunchDaemon. From
-this point on, `stax record …` is unprivileged. Human operators without the
-agent wrapper can run `sudo stax setup` manually.
+### Install staxd (the privileged helper)
+
+```
+sudo stax setup
+```
+
+- **macOS** — installs `staxd` as a root **LaunchDaemon**. **Required**:
+  `staxd` is the only path to `kperf`.
+- **Linux** — installs `staxd` as a **systemd service** (`eu.bearcove.staxd`).
+  **Optional**: when `perf_event_paranoid` is permissive, `stax-server`
+  records in-process with no daemon. Install it to profile on a locked-down
+  host, and to unlock PMU counters + wakeup attribution.
+
+From this point on, `stax record …` is unprivileged.
 
 ### Privileged agent commands
 
-On Amos's development machine, agents have a passwordless privileged wrapper:
+On Amos's development machine (macOS), agents have a passwordless privileged
+wrapper:
 
 ```
 sudo -n /usr/local/sbin/stax-agent setup --yes
@@ -55,49 +77,73 @@ sudo -n log stream --predicate 'subsystem == "eu.bearcove.staxd"'
 
 ### What runs where
 
-| component     | privilege  | launchd kind      | socket                                     |
-|---------------|------------|-------------------|--------------------------------------------|
-| `staxd`       | root       | LaunchDaemon      | `/var/run/staxd.sock`                      |
-| `stax-server` | user       | LaunchAgent       | `$XDG_RUNTIME_DIR/stax-server.sock` or `/tmp/stax-server-$UID.sock` |
-| `stax`        | user       | (CLI)             | (no socket)                                |
+| component     | privilege | macOS              | Linux                       | socket |
+|---------------|-----------|--------------------|-----------------------------|--------|
+| `staxd`       | root      | LaunchDaemon       | systemd service *(optional)* | `/var/run/staxd.sock` (macOS) · `/run/staxd.sock` (Linux) |
+| `stax-server` | user      | LaunchAgent        | run it yourself             | `$XDG_RUNTIME_DIR/stax-server.sock` or `/tmp/stax-server-$UID.sock` |
+| `stax`        | user      | (CLI)              | (CLI)                       | (no socket) |
 
 `stax-server` also binds **`ws://127.0.0.1:8080`** for the web UI. Override
-with `STAX_SERVER_WS_BIND=host:port` (set in the LaunchAgent plist's
-`EnvironmentVariables` if you want it persistent).
+with `STAX_SERVER_WS_BIND=host:port`.
 
-The default local socket intentionally lives outside
-`~/Library/Group Containers`. A bare LaunchAgent/CLI touching app data paths
+What `staxd` *does* differs by platform:
+
+- **macOS** — owns `kperf` / `kdebug` / `kpc`, and **streams** raw trace
+  records to `stax-server` for the whole recording.
+- **Linux** — a stateless `perf_event_open` **fd broker**: it does the one
+  privileged `perf_event_open` per CPU, hands the descriptors back over the
+  socket, and then drops out of the data path entirely.
+
+On macOS the default `stax-server` socket intentionally lives outside
+`~/Library/Group Containers`. A bare LaunchAgent/CLI touching app-data paths
 triggers `kTCCServiceSystemPolicyAppData` prompts even when it is signed by
 the right team.
 
 ### Logs
 
-Both daemons log via macOS unified logging (`os_log`). No files on
-disk — view live with:
+- **macOS** — both daemons log via unified logging (`os_log`); nothing on
+  disk:
 
-```
-# stax-server (your user, no sudo)
-log stream --predicate 'subsystem == "eu.bearcove.stax-server"'
+  ```
+  log stream --predicate 'subsystem == "eu.bearcove.stax-server"'
+  sudo -n log stream --predicate 'subsystem == "eu.bearcove.staxd"'
+  ```
 
-# staxd (root LaunchDaemon — needs sudo)
-sudo -n log stream --predicate 'subsystem == "eu.bearcove.staxd"'
-```
+  Past events: `log show --last 10m --predicate '…'`. Or **Console.app** →
+  *Include Info / Debug Messages*, filter by subsystem.
 
-Or open **Console.app** → Action menu → *Include Info Messages* /
-*Include Debug Messages*, then filter by subsystem. Past events are
-queryable with `log show --last 10m --predicate '…'`.
+- **Linux** — `staxd` runs under systemd; read its log from the journal:
+
+  ```
+  journalctl -u eu.bearcove.staxd -f
+  ```
+
+  `stax-server` logs to wherever you pointed its stdout/stderr. Raise the
+  level on any binary with `RUST_LOG`.
 
 ### Verifying the install
 
 ```
-stax status            # talks to stax-server, reports active run
+stax status                              # talks to stax-server
+```
+
+macOS:
+
+```
 test -S /var/run/staxd.sock              # staxd socket exists
-launchctl list eu.bearcove.stax-server  # should show pid + 0
+launchctl list eu.bearcove.stax-server   # should show pid + 0
+```
+
+Linux (only if you installed `staxd`):
+
+```
+test -S /run/staxd.sock                  # staxd socket exists
+systemctl status eu.bearcove.staxd       # should be active (running)
 ```
 
 ## Concurrency model
 
-**One active run at a time.** `stax-server` rejects a second `start_run` while
+**One active run at a time.** `stax-server` rejects a second recording while
 one is in flight. If you hit this, your options are:
 
 ```
@@ -112,7 +158,7 @@ in-memory only for now — persistence is a follow-up).
 
 There's no run selector yet. They operate on the **current** aggregator
 state, which is whichever run is active *or* the most recent one — the
-aggregator stays populated until the next `start_run` resets it. So the
+aggregator stays populated until the next recording resets it. So the
 working flow is:
 
 ```
@@ -153,8 +199,8 @@ stax stop
 
 ## Subcommands reference
 
-All subcommands connect to `stax-server` via its local socket. They fail
-loudly if the daemon isn't running.
+All subcommands except `setup` connect to `stax-server` via its local socket.
+They fail loudly if the daemon isn't running.
 
 ### `stax record [-- COMMAND…]`
 
@@ -170,17 +216,25 @@ stax record -- ./target/release/foo --bench bar
 stax record --pid 12345
 ```
 
+Pass exactly one of a launch command or `--pid` — not both, not neither.
+
 Useful flags:
 
-- `-F, --frequency <HZ>` — PET sampling rate (default 900)
+- `-F, --frequency <HZ>` — sampling rate (default 900)
 - `-l, --time-limit <SECS>` — stop after N seconds (otherwise Ctrl-C)
+- `-p, --pid <PID>` — attach to an existing process instead of launching one
+- `--dwarf-unwind` — Linux x86-64 only: force `.eh_frame` DWARF unwinding of
+  user stacks. Auto-detected by default (on when the target omits frame
+  pointers); `STAX_DWARF_UNWIND=0` forces it off. No-op on macOS.
 - `--daemon-socket <PATH>` — override `staxd`'s socket
-- `--serve <ADDR>` — *legacy* in-process WS aggregator. Skips
-  stax-server entirely; only useful when you don't want the daemon.
 
-When the daemon is running and `--serve` is **not** passed, stax-server
-gets every PET sample, off-CPU interval, wakeup edge, binary load, and
-thread name event over the local socket.
+`stax record` does no sampling itself. It launches the target (or resolves
+`--pid`), hands it to `stax-server` over the `RunControl` service, and
+`stax-server` drives the capture on an in-process per-run task — every PET
+sample, off-CPU interval, wakeup edge, binary load, and thread-name event
+folds straight into the live aggregator. So `stax record` needs
+`stax-server`; on macOS it also needs `staxd`; on Linux `staxd` is needed
+only on a locked-down host.
 
 ### `stax status`
 
@@ -279,7 +333,8 @@ $ stax threads -n 5
 
 The `blocked` column names the largest off-CPU bucket for that
 thread (`idle`, `lock`, `sem`, `ipc`, `ioR`, `ioW`, `ready`,
-`sleep`, `conn`, `other`).
+`sleep`, `conn`, `other`). Off-CPU intervals are recorded on both macOS
+and Linux.
 
 `-n 0` prints every thread. Default 20.
 
@@ -340,60 +395,87 @@ stax: matched "translate" → vox_jit::translate (3812 self samples)
   …
 ```
 
-`--tid` filters to one thread. Omit for whole-process.
+Disassembly works on `x86_64` and `aarch64`. `--tid` filters to one thread;
+omit for whole-process.
+
+### `stax diagnose`
+
+Dump `stax-server` diagnostics: telemetry phases, counters, histograms, and
+recent events. Use it when numbers look wrong and you want the pipeline's own
+accounting.
+
+### `stax dump`
+
+Ask every running stax process (`staxd`, `stax-server`, `stax`) to write a
+SIGUSR1 telemetry/debug snapshot into its log output (see [Logs](#logs)).
 
 ### `stax setup`
 
-Privileged install of `staxd` (LaunchDaemon). Agents should use
-`sudo -n /usr/local/sbin/stax-agent setup --yes` on Amos's machine, not
-interactive `sudo stax setup`. Not part of the routine agent flow.
+Privileged install of `staxd` — a LaunchDaemon on macOS, a systemd service on
+Linux. Agents on Amos's machine should use
+`sudo -n /usr/local/sbin/stax-agent setup --yes`, not interactive
+`sudo stax setup`. Not part of the routine agent flow.
 
 ## Wire / RPC services
 
-Programmatic clients can skip `stax` and talk to the daemon's vox services
-directly. All three live in `stax-live-proto`:
+Programmatic clients can skip `stax` and talk to `stax-server`'s vox services
+directly. Both live in `stax-live-proto` and are exposed on the local socket
+*and* `ws://127.0.0.1:8080`:
 
-- **`RunControl`** — agent lifecycle (`status`, `list_runs`, `wait_active`,
-  `stop_active`).
-- **`RunIngest`** — recorder-side ingest (`start_run` with a
-  `Rx<IngestEvent>` channel). Agents shouldn't need this.
-- **`Profiler`** — query surface (`top`, `subscribe_top`,
-  `subscribe_flamegraph`, `subscribe_annotated`, `subscribe_neighbors`,
-  `subscribe_threads`, `subscribe_timeline`, …). The `subscribe_*` variants
-  push periodic updates over a `vox::Tx<…>`; receive a single update for a
-  one-shot snapshot.
+- **`RunControl`** — lifecycle: `status`, `list_runs`, `diagnostics`,
+  `start_attach`, `wait_active`, `stop_active`.
+- **`Profiler`** — query surface: `top`, `flamegraph`, `threads`,
+  `annotated`, `timeline`, `neighbors`, `intervals`, `wakers`, … most with a
+  `subscribe_*` variant that pushes periodic updates over a `vox::Tx<…>`
+  (a one-shot call is the snapshot form).
+
+There is no separate ingest service — recording runs in-process inside
+`stax-server`.
 
 Connect with:
 
 - `local://$XDG_RUNTIME_DIR/stax-server.sock` or `/tmp/stax-server-$UID.sock`,
   for trusted local agents
-- `ws://127.0.0.1:8080`, for browser clients (TS bindings live in
-  `frontend/src/generated/`)
+- `ws://127.0.0.1:8080`, for browser clients
+
+TypeScript bindings are generated into `frontend/src/generated/` by
+`cargo run -p xtask -- codegen` (or `pnpm codegen` from `frontend/`).
 
 ## Common pitfalls
 
-- **`error: stax-server isn't running`** — the LaunchAgent isn't loaded.
-  `cargo xtask install` does this; or by hand:
+- **`error: stax-server isn't running`** — start the server. macOS: the
+  LaunchAgent isn't loaded —
 
       launchctl bootstrap "gui/$(id -u)" \
         ~/Library/LaunchAgents/eu.bearcove.stax-server.plist
 
+  Linux: just run `stax-server &`.
+
 - **`another run is already active`** — single-active-run model. Use
   `stax wait` or `stax stop` first.
 
-- **`stax record` says “stax-server unreachable”** — daemon's down.
-  Recording proceeds but events go nowhere; no agent queries will work.
-  Fix the daemon first.
+- **`stax record` fails immediately** — `stax-server` is down (recording
+  runs *inside* it, so there is nowhere for the run to live). On macOS,
+  `staxd` must also be installed. Fix the daemon first.
 
-- **macOS asks whether `stax-server` can access another app's data** —
-  the server is touching an app/container data path. By default it should use
+- **Linux: shallow stacks / no kernel frames / no PMU columns** — the
+  in-process recorder is gated by `perf_event_paranoid`. Lower it
+  (`sudo sysctl kernel.perf_event_paranoid=1`) or, better, install the
+  `staxd` broker (`sudo stax setup`) so the host setting stops mattering.
+
+- **Linux: a suspiciously flat flamegraph on x86-64** — the target was built
+  `-fomit-frame-pointer`. stax auto-detects this; force it with
+  `stax record --dwarf-unwind`.
+
+- **macOS asks whether `stax-server` can access another app's data** — the
+  server is touching an app/container data path. By default it uses
   `$XDG_RUNTIME_DIR/stax-server.sock` or `/tmp/stax-server-$UID.sock`, not a
   path under `~/Library/Group Containers`.
 
 - **`stax top` returns `(no samples yet — is a recording in progress?)`** —
-  either no run is active, or the run hasn't ingested any PET samples yet
-  (very early in the lifecycle). Try `stax status` to confirm a run exists,
-  or `stax wait --for-samples 100` to block until data is in.
+  either no run is active, or the run hasn't ingested any samples yet (very
+  early in the lifecycle). Try `stax status` to confirm a run exists, or
+  `stax wait --for-samples 100` to block until data is in.
 
-- **Hardened-runtime targets** are out of scope. The attachment helper is
-  same-uid and intended for normal local developer processes.
+- **Hardened-runtime targets** (macOS) are out of scope. The attachment
+  helper is same-uid and intended for normal local developer processes.
