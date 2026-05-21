@@ -74,8 +74,10 @@ pub struct RecordOptions {
     /// tables. Necessary for `-fomit-frame-pointer` binaries (most
     /// distro libc, libstdc++, OpenSSL, Rust release builds without
     /// `-Cforce-frame-pointers`) — without it the kernel CALLCHAIN
-    /// truncates at the first non-FP frame. x86_64-only this round;
-    /// silently ignored on aarch64-Linux (FP-by-default ABI).
+    /// truncates at the first non-FP frame. The `stax` CLI turns this
+    /// on by default on x86_64 (where the system libc omits frame
+    /// pointers); x86_64-only, silently ignored on aarch64-Linux
+    /// (FP-by-default ABI).
     pub dwarf_unwind: bool,
 }
 

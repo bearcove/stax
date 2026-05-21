@@ -834,10 +834,13 @@ pub struct RunConfig {
     /// PET sampling frequency the recorder requested, Hz. Surfaced in
     /// `RunSummary` so the UI can label samples.
     pub frequency_hz: u32,
-    /// Linux only: replay user stacks via `.eh_frame` DWARF unwinding
+    /// Whether to replay user stacks via `.eh_frame` DWARF unwinding
     /// rather than the kernel's frame-pointer walk, so call chains
-    /// stay complete through `-fomit-frame-pointer` code. Ignored on
-    /// macOS (kperf already walks full stacks).
+    /// stay complete through `-fomit-frame-pointer` code. Already
+    /// resolved by the `stax` CLI — on by default on x86_64 Linux,
+    /// off elsewhere, overridable with `--no-dwarf-unwind` /
+    /// `STAX_DWARF_UNWIND`. Ignored by the recorder on macOS (kperf
+    /// already walks full stacks).
     pub dwarf_unwind: bool,
 }
 

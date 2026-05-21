@@ -204,6 +204,28 @@ fn pids_by_exact_process_name(name: &str) -> Result<Vec<u32>, Box<dyn Error>> {
     .into())
 }
 
+/// Resolve whether this run uses `.eh_frame` DWARF unwinding.
+///
+/// On x86_64 Linux it is **on by default**: the system libc is built
+/// `-fomit-frame-pointer`, so the kernel's frame-pointer `CALLCHAIN`
+/// truncates for any sample landing in libc. It is off everywhere
+/// else — macOS kperf already walks full user stacks, and aarch64
+/// keeps a frame pointer by ABI. `--no-dwarf-unwind` forces it off;
+/// `STAX_DWARF_UNWIND` (`0`/`off` or `1`/`on`) overrides either way.
+fn resolve_dwarf_unwind(args: &RecordArgs) -> bool {
+    if args.no_dwarf_unwind {
+        return false;
+    }
+    if let Some(v) = env::var_os("STAX_DWARF_UNWIND") {
+        let v = v.to_string_lossy();
+        let v = v.trim();
+        if !v.is_empty() {
+            return !matches!(v, "0" | "false" | "off" | "no");
+        }
+    }
+    cfg!(all(target_os = "linux", target_arch = "x86_64"))
+}
+
 async fn run_record_async(args: RecordArgs) -> Result<(), Box<dyn Error>> {
     let url = require_server_socket()?;
     let client: RunControlClient = vox::connect(&url).await?;
@@ -217,7 +239,7 @@ async fn run_record_async(args: RecordArgs) -> Result<(), Box<dyn Error>> {
     let config = stax_live_proto::RunConfig {
         label,
         frequency_hz: args.frequency,
-        dwarf_unwind: args.dwarf_unwind,
+        dwarf_unwind: resolve_dwarf_unwind(&args),
     };
 
     match target {
