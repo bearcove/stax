@@ -30,11 +30,13 @@ use crate::ServerState;
 /// `staxd-client` on a dedicated OS thread with its own
 /// current-thread tokio runtime and finalises the run when it
 /// exits.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_attach(
     server: ServerState,
     run_id: RunId,
     pid: u32,
     frequency_hz: u32,
+    dwarf_unwind: bool,
     daemon_socket: String,
     time_limit: Option<Duration>,
 ) {
@@ -42,9 +44,17 @@ pub fn spawn_attach(
     server.set_recording_stop_flag(run_id, stop_flag.clone());
 
     spawn_on_dedicated_runtime(move || async move {
-        let result =
-            run_attach(server.clone(), run_id, pid, frequency_hz, daemon_socket, time_limit, stop_flag)
-                .await;
+        let result = run_attach(
+            server.clone(),
+            run_id,
+            pid,
+            frequency_hz,
+            dwarf_unwind,
+            daemon_socket,
+            time_limit,
+            stop_flag,
+        )
+        .await;
         finalize(&server, run_id, result);
     });
 }
@@ -88,11 +98,13 @@ fn finalize(server: &ServerState, run_id: RunId, result: eyre::Result<StopReason
     server.finalize_run(run_id, reason);
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_attach(
     server: ServerState,
     run_id: RunId,
     pid: u32,
     frequency_hz: u32,
+    dwarf_unwind: bool,
     daemon_socket: String,
     time_limit: Option<Duration>,
     stop_flag: Arc<AtomicBool>,
@@ -102,6 +114,7 @@ async fn run_attach(
         run_id = run_id.0,
         pid,
         frequency_hz,
+        dwarf_unwind,
         "recording lifecycle starting"
     );
 
@@ -117,6 +130,9 @@ async fn run_attach(
     // a deployment follow-up).
     #[cfg(target_os = "macos")]
     let result: eyre::Result<()> = {
+        // DWARF unwinding is Linux-only (kperf already walks full
+        // user stacks); accept the flag and ignore it here.
+        let _ = dwarf_unwind;
         let opts = staxd_client::RemoteOptions {
             daemon_socket,
             pid,
@@ -146,14 +162,15 @@ async fn run_attach(
 
     #[cfg(target_os = "linux")]
     let result: eyre::Result<()> = {
-        // Opt-in for now: `STAX_DWARF_UNWIND=1` flips `.eh_frame`
-        // userspace unwinding (needed for `-fomit-frame-pointer`
-        // libraries like libc/OpenSSL/most Rust release builds where
-        // the kernel's FP-based CALLCHAIN truncates). The full
-        // RunConfig flag is a small follow-up — env var keeps the
-        // wire schema unchanged while the feature beds in.
-        let dwarf_unwind = std::env::var_os("STAX_DWARF_UNWIND")
-            .is_some_and(|v| !v.is_empty() && v != "0");
+        // `.eh_frame` userspace unwinding (needed for
+        // `-fomit-frame-pointer` libraries like libc/OpenSSL/most
+        // Rust release builds where the kernel's FP-based CALLCHAIN
+        // truncates) is requested via `stax record --dwarf-unwind`.
+        // `STAX_DWARF_UNWIND=1` stays as an escape hatch for runs
+        // started by a client that can't set the flag.
+        let dwarf_unwind = dwarf_unwind
+            || std::env::var_os("STAX_DWARF_UNWIND")
+                .is_some_and(|v| !v.is_empty() && v != "0");
         let opts = stax_linux_capture::RecordOptions {
             pid,
             frequency_hz,

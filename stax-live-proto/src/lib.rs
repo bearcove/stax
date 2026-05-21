@@ -834,6 +834,11 @@ pub struct RunConfig {
     /// PET sampling frequency the recorder requested, Hz. Surfaced in
     /// `RunSummary` so the UI can label samples.
     pub frequency_hz: u32,
+    /// Linux only: replay user stacks via `.eh_frame` DWARF unwinding
+    /// rather than the kernel's frame-pointer walk, so call chains
+    /// stay complete through `-fomit-frame-pointer` code. Ignored on
+    /// macOS (kperf already walks full stacks).
+    pub dwarf_unwind: bool,
 }
 
 /// Errors the server-side run-control plane can surface to a client.

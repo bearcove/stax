@@ -379,6 +379,7 @@ impl ServerState {
                 run_id = id.0,
                 label = %config.label,
                 frequency_hz = config.frequency_hz,
+                dwarf_unwind = config.dwarf_unwind,
                 "run started"
             );
             Ok(id)
@@ -450,6 +451,7 @@ impl RunControl for ServerState {
         time_limit_secs: Option<u64>,
     ) -> Result<RunId, RunControlError> {
         let frequency_hz = config.frequency_hz;
+        let dwarf_unwind = config.dwarf_unwind;
         let time_limit = time_limit_secs.map(Duration::from_secs);
         let run_id = self.begin_run(config)?;
         recorder::spawn_attach(
@@ -457,6 +459,7 @@ impl RunControl for ServerState {
             run_id,
             pid,
             frequency_hz,
+            dwarf_unwind,
             daemon_socket,
             time_limit,
         );

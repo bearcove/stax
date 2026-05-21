@@ -165,6 +165,14 @@ pub struct RecordArgs {
     #[facet(args::named, default = "/var/run/staxd.sock")]
     pub daemon_socket: String,
 
+    /// Linux only: replay user stacks via `.eh_frame` DWARF unwinding
+    /// instead of the kernel's frame-pointer walk. Needed for full
+    /// call chains through `-fomit-frame-pointer` code (libc, OpenSSL,
+    /// most Rust release builds). Costs a per-sample register + 8 KiB
+    /// stack copy. No-op on macOS.
+    #[facet(args::named, default)]
+    pub dwarf_unwind: bool,
+
     /// Command to launch and profile. Use `--` to keep the target's
     /// flags from being interpreted by stax:
     ///
