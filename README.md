@@ -14,7 +14,18 @@ doesn't, but it also has more moving pieces:
   - a non-prileged (same-user) helper to obtain the task port, read/write inferior memory etc.
   
 ![A screenshot of stax showing a flamegraph on top, top-N functions bottom-left, and annotated disassembly bottom-right](https://github.com/user-attachments/assets/929b4b42-cdd9-4e35-8a91-ee7b029e94e2)
-  
+
+## Documentation
+
+- **Guide, concepts & reference**: <https://stax.bearcove.eu> — installing the
+  daemons, recording and inspecting runs, platform support, stack unwinding
+  (frame pointers vs. unwind tables), and programmatic usage.
+- **Agent manual**: [AGENTS.md](AGENTS.md) — driving stax from an AI agent.
+
+The site sources live in `docs/` and are built with
+[dodeca](https://github.com/bearcove/dodeca) (`ddc serve` locally, deployed to
+GitHub Pages on push to `main`).
+
 ## License
 
 Licensed under either of

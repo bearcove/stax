@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <rect width="64" height="64" rx="14" fill="#1c1409"/>
+  <!-- a flamegraph: the root frame at the bottom, narrowing upward -->
+  <rect x="9"  y="45" width="46" height="8" rx="2" fill="#ef4444"/>
+  <rect x="9"  y="34" width="27" height="8" rx="2" fill="#f97316"/>
+  <rect x="39" y="34" width="16" height="8" rx="2" fill="#f97316"/>
+  <rect x="9"  y="23" width="14" height="8" rx="2" fill="#f59e0b"/>
+  <rect x="26" y="23" width="10" height="8" rx="2" fill="#f59e0b"/>
+  <rect x="13" y="12" width="9"  height="8" rx="2" fill="#fbbf24"/>
+</svg>
