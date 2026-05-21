@@ -14,7 +14,7 @@ defaults to.
 | `STAX_SERVER_SOCKET`      | `stax`, `stax-server`    | *(see [socket resolution](#stax-server-socket))* |
 | `STAX_SERVER_WS_BIND`     | `stax-server`            | `127.0.0.1:8080`                          |
 | `STAX_CODESIGN_IDENTITY`  | `cargo xtask install`    | auto-detected                             |
-| `STAX_DWARF_UNWIND`       | recorder (Linux)         | *(unset → auto-detect)*                   |
+| `STAX_DWARF_UNWIND`       | `stax` (Linux)           | *(unset → on for x86-64)*                 |
 | `DEBUGINFOD_URLS`         | recorder (Linux)         | *(unset → debuginfod disabled)*           |
 | `XDG_RUNTIME_DIR`         | `stax`, `stax-server`    | *(unset → falls back to `/tmp`)*          |
 | `XDG_CACHE_HOME`          | recorder (Linux)         | *(unset → `~/.cache`)*                    |
@@ -69,18 +69,17 @@ Set it to `-` only when you explicitly want **ad-hoc** signing. See
 
 ## `STAX_DWARF_UNWIND`
 
-**Linux only.** Controls `.eh_frame` DWARF unwinding of user stacks (x86-64).
+**Linux only.** Controls `.eh_frame` DWARF unwinding of user stacks on
+x86-64, where it is **on by default** — the system `libc` is built
+`-fomit-frame-pointer`, so the kernel's stack walk truncates for any sample
+landing in it.
 
-By default stax auto-detects — it enables DWARF unwinding when the target
-binary omits frame pointers. The override:
+- `STAX_DWARF_UNWIND=0` (or `off`/`false`/`no`) — force it **off**. Same as
+  the [`--no-dwarf-unwind`](@/reference/cli.md#stax-record) flag.
+- `STAX_DWARF_UNWIND=1` (or `on`/`true`) — force it **on**.
 
-- `STAX_DWARF_UNWIND=0` — force DWARF unwinding **off**, even for a
-  frame-pointer-less binary.
-- The [`--dwarf-unwind`](@/reference/cli.md#stax-record) flag forces it
-  **on**.
-
-No effect on macOS or on aarch64. See
-[Stack Unwinding](@/concepts/stack-unwinding.md).
+Read by the `stax` CLI when it builds the run config. No effect on macOS or
+on aarch64. See [Stack Unwinding](@/concepts/stack-unwinding.md).
 
 ## `DEBUGINFOD_URLS`
 

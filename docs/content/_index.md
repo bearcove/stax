@@ -80,6 +80,6 @@ nothing depends on it.
 - [Getting Started](@/guide/getting-started.md) — install the daemons and verify
 - [Recording a Run](@/guide/recording.md) — launch a target or attach to a PID
 - [Architecture](@/concepts/architecture.md) — `stax`, `stax-server`, `staxd`
-- [Stack Unwinding](@/concepts/stack-unwinding.md) — why your build needs frame pointers
+- [Stack Unwinding](@/concepts/stack-unwinding.md) — frame pointers, DWARF, and what your build needs
 - [CLI Reference](@/reference/cli.md) — every subcommand and flag
 - [GitHub](https://github.com/bearcove/stax) — source and issues

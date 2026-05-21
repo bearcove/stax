@@ -128,12 +128,14 @@ The `staxd` broker is also what unlocks **wakeup attribution** and
 
 ### Linux: frame-pointer-less binary, truncated stacks
 
-If a flamegraph is suspiciously flat on x86-64 Linux, the target was likely
-built `-fomit-frame-pointer`. stax auto-detects this and switches on DWARF
-unwinding; force it if the heuristic missed:
+If a flamegraph is suspiciously flat on x86-64 Linux, check whether DWARF
+unwinding got turned off — a stray `--no-dwarf-unwind` or
+`STAX_DWARF_UNWIND=0`. It is on by default precisely because
+`-fomit-frame-pointer` builds (most C/C++ `-O2`, many Rust release builds)
+would otherwise truncate; drop the override and re-record:
 
 ```bash
-stax record --dwarf-unwind -- ./mybench
+stax record -- ./mybench   # DWARF unwinding is the default
 ```
 
 See [Stack Unwinding](@/concepts/stack-unwinding.md).

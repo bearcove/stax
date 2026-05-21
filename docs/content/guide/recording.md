@@ -90,19 +90,19 @@ stax record --pid $(pgrep -n myserver) --time-limit 30
 Attach to an existing process instead of launching one. Mutually exclusive
 with a launch command.
 
-### `--dwarf-unwind`
+### `--no-dwarf-unwind`
 
-**Linux only.** Force `.eh_frame` DWARF unwinding of user stacks instead of
-relying on the kernel's frame-pointer walk.
+**Linux only.** Turn off `.eh_frame` DWARF unwinding of user stacks and fall
+back to the kernel's frame-pointer walk.
 
-By default stax **auto-detects**: it inspects the target executable and turns
-DWARF unwinding on when the binary omits frame pointers (most C/C++ `-O2`
-builds, many Rust release builds), where the kernel's stack walk would
-otherwise truncate. Pass `--dwarf-unwind` to force it on regardless; set
-`STAX_DWARF_UNWIND=0` to force it off.
+On x86-64 Linux, DWARF unwinding is **on by default**: the system `libc` is
+built `-fomit-frame-pointer`, so the kernel's stack walk truncates for any
+sample landing in `libc` — which covers most malloc/IO/syscall-heavy
+workloads, whatever your own binary was built with. `--no-dwarf-unwind` (or
+`STAX_DWARF_UNWIND=0`) opts out, saving a per-sample register + 8 KiB stack
+copy.
 
-It costs a per-sample register + 8 KiB stack copy, and is x86-64 only
-(aarch64 keeps a frame pointer by ABI). No-op on macOS. See
+x86-64 only (aarch64 keeps a frame pointer by ABI); no-op on macOS. See
 [Stack Unwinding](@/concepts/stack-unwinding.md).
 
 ### `--daemon-socket <PATH>`

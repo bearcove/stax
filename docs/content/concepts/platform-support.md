@@ -92,8 +92,9 @@ kernel's ring buffers, and drains and parses `PERF_RECORD_*` records.
 - **Stripped binaries.** Linux ships most system libraries stripped; stax
   recovers their symbols from local separate-debug files and **debuginfod** —
   see [Symbolication](@/concepts/symbolication.md).
-- **DWARF unwinding.** When the target omits frame pointers, stax can replay
-  the unwind in userspace against `.eh_frame` — see
+- **DWARF unwinding.** On x86-64, stax replays the unwind in userspace
+  against `.eh_frame` by default — the system `libc` omits frame pointers, so
+  the kernel walk truncates without it. See
   [Stack Unwinding](@/concepts/stack-unwinding.md).
 
 ### Two recording modes

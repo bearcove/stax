@@ -40,7 +40,7 @@ stax record [OPTIONS] [-- COMMAND…]
 | `-F, --frequency <HZ>`    | `u32`           | `900`                  | sampling frequency, in hertz                                    |
 | `-l, --time-limit <SECS>` | `u64`           | *(none — unlimited)*   | stop after this many seconds                                    |
 | `-p, --pid <PID>`         | `u32`           | *(none)*               | attach to an existing process instead of launching one          |
-| `--dwarf-unwind`          | `bool`          | `false` (auto-detect)  | Linux x86-64: force `.eh_frame` DWARF unwinding of user stacks   |
+| `--no-dwarf-unwind`       | `bool`          | `false`                | Linux x86-64: disable `.eh_frame` DWARF unwinding of user stacks |
 | `--daemon-socket <PATH>`  | `String`        | `/var/run/staxd.sock`  | local socket of the privileged `staxd` daemon                   |
 | `[-- COMMAND…]`           | positional      | *(none)*               | command to launch and profile; use `--` to protect its flags    |
 
@@ -48,9 +48,10 @@ You must supply **either** `--pid` **or** a launch command — not both, not
 neither. `stax record --pid 1 -- ./foo` and a bare `stax record` are both
 errors.
 
-`--dwarf-unwind` is Linux x86-64 only (no-op on macOS and aarch64). Without
-it, stax auto-detects: it enables DWARF unwinding when the target omits frame
-pointers. The flag forces it on; `STAX_DWARF_UNWIND=0` forces it off. See
+On x86-64 Linux, `.eh_frame` DWARF unwinding is **on by default** — the
+system `libc` is built `-fomit-frame-pointer`, so the kernel's stack walk
+truncates for any sample landing in it. `--no-dwarf-unwind` turns it off (so
+does `STAX_DWARF_UNWIND=0`); it is a no-op on macOS and aarch64. See
 [Stack Unwinding](@/concepts/stack-unwinding.md).
 
 `--daemon-socket` defaults to `/var/run/staxd.sock`; on Linux that resolves

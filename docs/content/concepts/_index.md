@@ -16,5 +16,5 @@ number looks off, you know where to look.
 - [Symbolication](@/concepts/symbolication.md) — turning raw addresses into names: symbol tables, debuginfod, the dyld shared cache
 
 If you only read one, read [Stack Unwinding](@/concepts/stack-unwinding.md) —
-a build without frame pointers can produce a profile with no call stacks, and
-that surprises people.
+on macOS a build without frame pointers produces a profile with no call
+stacks, and that surprises people.

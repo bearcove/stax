@@ -53,9 +53,9 @@ afterwards**, off the hot path.
 
 ## What stax does
 
-stax uses **frame pointers by default, on both platforms** — and on x86-64
-Linux it can additionally fall back to **`.eh_frame` DWARF unwinding** for
-code that was built without them.
+stax uses **frame pointers** wherever they are present, and on x86-64 Linux
+additionally runs **`.eh_frame` DWARF unwinding** — on by default — to
+recover the chains that frame-pointer-less code would otherwise truncate.
 
 ### macOS — frame pointers, in-kernel
 
@@ -68,7 +68,7 @@ This is reliable on **Apple Silicon** because Apple's ARM64 ABI *requires* a
 chained frame pointer in `x29` — system libraries and well-behaved code
 already have it.
 
-### Linux — frame pointers, with a DWARF fallback
+### Linux — frame pointers, plus DWARF unwinding
 
 By default the kernel walks the frame-pointer chain (`PERF_SAMPLE_CALLCHAIN`)
 and the sample arrives with the call chain attached. On **aarch64** that is
@@ -82,21 +82,20 @@ snapshot of the thread's stack; stax replays the unwind against each loaded
 image's `.eh_frame` CFI — recovering the full chain through
 frame-pointer-less code that the kernel walker would truncate.
 
-**stax decides automatically.** Before a recording starts it inspects the
-target executable's `.text`: if fewer than half the functions open with the
-frame-pointer prologue (`push %rbp; mov %rsp,%rbp`), the binary was built
-`-fomit-frame-pointer` and DWARF unwinding is switched on. You can override
-the decision:
+**On by default.** Every mainstream x86-64 Linux distribution ships `libc`
+built `-fomit-frame-pointer`, so the kernel's frame-pointer walk truncates
+the moment a sample lands in `libc` — which covers most malloc/IO/syscall-
+heavy workloads, whatever your own binary was built with. DWARF unwinding is
+therefore on by default on x86-64 Linux. Opt out when you don't need it:
 
 ```bash
-stax record --dwarf-unwind -- ./mybench   # force it on
-STAX_DWARF_UNWIND=0 stax record -- ./mybench   # force it off
+stax record --no-dwarf-unwind -- ./mybench     # off for this run
+STAX_DWARF_UNWIND=0 stax record -- ./mybench   # same, via the environment
 ```
 
-DWARF unwinding costs a per-sample register + stack copy, so stax only pays
-it when the auto-detector (or you) says the kernel walker would otherwise
-come back truncated. It is **x86-64 Linux only** — `--dwarf-unwind` is a
-no-op on macOS and on aarch64.
+DWARF unwinding costs a per-sample register + 8 KiB stack copy. It is
+**x86-64 Linux only** — `--no-dwarf-unwind` is a no-op on macOS and on
+aarch64, where the frame-pointer chain already suffices.
 
 ## Build with frame pointers anyway
 
