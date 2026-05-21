@@ -30,8 +30,8 @@ each platform can actually see.
 ## macOS
 
 On macOS, stax uses Apple's private **`kperf`** and **`kdebug`**
-frameworks — the same machinery *Instruments.app* is built on. That is what
-lets stax see things `samply` cannot.
+frameworks — the low-level interfaces the OS exposes for periodic sampling
+and scheduler tracing.
 
 - **The PET sampler.** `kperf`'s *periodic event timer* fires on every
   thread at the configured frequency. `staxd` arms it; the kernel walks the

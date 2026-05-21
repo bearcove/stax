@@ -37,8 +37,7 @@ see [Environment Variables](@/reference/environment-variables.md).
 ## What the UI shows
 
 The browser client connects to the WebSocket and subscribes to the
-`Profiler` service. It mirrors the three-pane layout of a profiler like
-*Instruments*:
+`Profiler` service. It lays out three panels:
 
 - **Flamegraph** — the on-CPU call tree, the same data as
   [`stax flame`](@/guide/inspecting-a-run.md#stax-flame), rendered as a

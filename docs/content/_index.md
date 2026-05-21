@@ -22,16 +22,15 @@ stax flame -d 6                   # on-CPU flamegraph, as a tree
 stax annotate 'mycrate::hot_fn'   # per-instruction sample counts
 ```
 
-stax is a live version of *Instruments.app*: on-CPU and off-CPU stacks as
-flamegraphs, top-N functions, per-thread breakdowns, and annotated
-disassembly — all queryable *while the recording is still running*, from a
-terminal, a browser, or an AI agent.
+stax records on-CPU and off-CPU stacks and turns them into flamegraphs,
+top-N functions, per-thread breakdowns, and annotated disassembly — all
+queryable *while the recording is still running*.
 
-It started as a fork of [`not-perf`](https://github.com/koute/not-perf) with
-macOS bits borrowed from [`samply`](https://github.com/mstange/samply), and is
-now very much its own codebase. On macOS it uses the private `kperf`/`kdebug`
-frameworks, so it sees things `samply` can't — at the cost of a privileged
-helper daemon.
+Every view is a plain CLI subcommand: text output, meaningful exit codes, no
+GUI required. That puts stax exactly where a graphical profiler can't go —
+over an SSH session to a remote machine, inside a CI job, or driven
+end-to-end by an AI agent. There is a browser UI when you want one, but
+nothing depends on it.
 
 ## Choose your path
 
