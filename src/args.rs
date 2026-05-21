@@ -165,11 +165,14 @@ pub struct RecordArgs {
     #[facet(args::named, default = "/var/run/staxd.sock")]
     pub daemon_socket: String,
 
-    /// Linux only: replay user stacks via `.eh_frame` DWARF unwinding
-    /// instead of the kernel's frame-pointer walk. Needed for full
-    /// call chains through `-fomit-frame-pointer` code (libc, OpenSSL,
-    /// most Rust release builds). Costs a per-sample register + 8 KiB
-    /// stack copy. No-op on macOS.
+    /// Linux only: force `.eh_frame` DWARF unwinding of user stacks
+    /// instead of the kernel's frame-pointer walk. Without this flag,
+    /// stax auto-detects: it inspects the target executable and turns
+    /// DWARF unwinding on when the binary omits frame pointers (most
+    /// C/C++ `-O2`, many Rust release builds), where the kernel's
+    /// `CALLCHAIN` would otherwise truncate. Pass the flag to force it
+    /// on regardless; set `STAX_DWARF_UNWIND=0` to force it off. Costs
+    /// a per-sample register + 8 KiB stack copy. No-op on macOS.
     #[facet(args::named, default)]
     pub dwarf_unwind: bool,
 

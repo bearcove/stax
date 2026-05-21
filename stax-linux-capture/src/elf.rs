@@ -160,6 +160,79 @@ pub fn scan(bytes: &[u8]) -> Option<ElfImage> {
     })
 }
 
+/// x86_64 frame-pointer prologue: `push %rbp` (`55`) immediately
+/// followed by `mov %rsp,%rbp` (`48 89 e5`). A `-fno-omit-frame-pointer`
+/// build opens (almost) every function with this; an
+/// `-fomit-frame-pointer` build essentially never does — a function
+/// there may still `push %rbp` to *save* the callee-saved register,
+/// but it won't follow with the `mov`, so the 4-byte pair is the
+/// unambiguous tell.
+const FP_PROLOGUE: [u8; 4] = [0x55, 0x48, 0x89, 0xe5];
+/// x86_64 CET landing pad `endbr64`. When a function is an indirect-
+/// branch target the compiler emits this first; the FP prologue (if
+/// any) follows it.
+const ENDBR64: [u8; 4] = [0xf3, 0x0f, 0x1e, 0xfa];
+
+/// How many inspected `.text` functions opened with a frame-pointer
+/// prologue, out of how many we could read. Produced by
+/// [`frame_pointer_stats`] and consumed by the `--dwarf-unwind` auto
+/// mode (`stax_linux_capture::scan_frame_pointers`).
+#[derive(Clone, Copy, Debug)]
+pub struct FramePointerStats {
+    /// Functions whose first bytes we successfully inspected.
+    pub scanned: usize,
+    /// Of those, how many opened with `push %rbp; mov %rsp,%rbp`.
+    pub with_prologue: usize,
+}
+
+impl FramePointerStats {
+    /// `true` when the binary looks built `-fomit-frame-pointer`:
+    /// fewer than half the inspected functions keep a frame pointer.
+    /// (Real builds are ~all-or-nothing — the compiler flag is
+    /// per-translation-unit — so the 50% line has a wide margin.)
+    pub fn omits_frame_pointers(&self) -> bool {
+        self.with_prologue * 2 < self.scanned
+    }
+}
+
+/// Inspect the function prologues in `text` for every symbol that
+/// falls inside it. `None` when there isn't enough to decide — no
+/// `.text`, or fewer than 8 inspectable functions (a stripped or tiny
+/// binary, where a handful of hand-written asm stubs could skew any
+/// ratio).
+pub fn frame_pointer_stats(
+    symbols: &[MachOSymbol],
+    text: &SectionSlice,
+) -> Option<FramePointerStats> {
+    let mut scanned = 0usize;
+    let mut with_prologue = 0usize;
+    for sym in symbols {
+        // Only symbols inside `.text` are functions with a prologue
+        // to read (`.dynsym` also names PLT stubs, data, …).
+        if sym.start_svma < text.svma.start || sym.start_svma >= text.svma.end {
+            continue;
+        }
+        let off = (sym.start_svma - text.svma.start) as usize;
+        // 8 bytes covers an optional `endbr64` (4) + the prologue (4).
+        let win = match text.bytes.get(off..off + 8) {
+            Some(w) => w,
+            None => continue,
+        };
+        scanned += 1;
+        let body = if win[..4] == ENDBR64 { &win[4..8] } else { &win[..4] };
+        if body == FP_PROLOGUE {
+            with_prologue += 1;
+        }
+    }
+    if scanned < 8 {
+        return None;
+    }
+    Some(FramePointerStats {
+        scanned,
+        with_prologue,
+    })
+}
+
 /// Pull one section's `(svma, bytes)` out of an ELF, or `None` if it
 /// isn't present / has no on-disk data (e.g. `SHT_NOBITS`).
 fn read_section(file: &ElfFile64, name: &[u8]) -> Option<SectionSlice> {
@@ -442,4 +515,81 @@ pub fn debuginfod_fetch(
     }
     let _ = std::fs::write(&miss_path, b"");
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a synthetic `.text` of `n` functions, each 16 bytes,
+    /// where the first `fp` of them open with `endbr64` + the
+    /// frame-pointer prologue and the rest open with `endbr64` + a
+    /// non-prologue instruction. Returns the section + one symbol per
+    /// function.
+    fn synth(n: usize, fp: usize) -> (Vec<MachOSymbol>, SectionSlice) {
+        const STRIDE: u64 = 16;
+        const BASE: u64 = 0x1000;
+        let mut bytes = Vec::new();
+        let mut symbols = Vec::new();
+        for i in 0..n {
+            let mut func = Vec::with_capacity(STRIDE as usize);
+            func.extend_from_slice(&ENDBR64);
+            if i < fp {
+                func.extend_from_slice(&FP_PROLOGUE);
+            } else {
+                // `sub $0x18,%rsp` — a typical omit-FP prologue.
+                func.extend_from_slice(&[0x48, 0x83, 0xec, 0x18]);
+            }
+            func.resize(STRIDE as usize, 0x90); // pad with NOPs
+            let start = BASE + i as u64 * STRIDE;
+            symbols.push(MachOSymbol {
+                start_svma: start,
+                end_svma: start + STRIDE,
+                name: format!("fn{i}").into_bytes(),
+            });
+            bytes.extend_from_slice(&func);
+        }
+        let text = SectionSlice {
+            svma: BASE..BASE + bytes.len() as u64,
+            bytes,
+        };
+        (symbols, text)
+    }
+
+    #[test]
+    fn detects_frame_pointer_build() {
+        let (syms, text) = synth(40, 40); // every function keeps FP
+        let stats = frame_pointer_stats(&syms, &text).expect("enough functions");
+        assert_eq!(stats.scanned, 40);
+        assert_eq!(stats.with_prologue, 40);
+        assert!(!stats.omits_frame_pointers());
+    }
+
+    #[test]
+    fn detects_omit_frame_pointer_build() {
+        let (syms, text) = synth(40, 0); // no function keeps FP
+        let stats = frame_pointer_stats(&syms, &text).expect("enough functions");
+        assert_eq!(stats.with_prologue, 0);
+        assert!(stats.omits_frame_pointers());
+    }
+
+    #[test]
+    fn too_few_functions_is_undecidable() {
+        let (syms, text) = synth(5, 5);
+        assert!(frame_pointer_stats(&syms, &text).is_none());
+    }
+
+    #[test]
+    fn symbols_outside_text_are_ignored() {
+        // A `.dynsym`-style entry pointing into `.plt` (before `.text`)
+        // must not be counted as a scanned function.
+        let (mut syms, text) = synth(20, 20);
+        syms.push(MachOSymbol {
+            start_svma: 0x10, // well below the .text base
+            end_svma: 0x20,
+            name: b"plt_stub".to_vec(),
+        });
+        let stats = frame_pointer_stats(&syms, &text).expect("enough functions");
+        assert_eq!(stats.scanned, 20);
+    }
 }
