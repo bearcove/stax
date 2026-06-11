@@ -30,6 +30,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::time::{Duration, Instant};
 
+/// Per-call timeout: a half-dead connection (e.g. server dropped us for
+/// missing keepalive pongs) must never wedge the worker — time out,
+/// drop the client, reconnect on a later poll.
+const CALL_TIMEOUT: Duration = Duration::from_secs(3);
+
 pub use stax_live_proto::TargetSpan;
 use stax_live_proto::{TargetIngestClient, TargetSpanBatch};
 
@@ -90,7 +95,14 @@ fn worker_sender() -> &'static SyncSender<TargetSpanBatch> {
 }
 
 fn worker(rx: Receiver<TargetSpanBatch>) {
-    let runtime = match tokio::runtime::Builder::new_current_thread()
+    // Multi-thread runtime (one background worker) so vox keepalive
+    // pongs are answered while this thread is parked in recv_timeout —
+    // stax-server pings every 5s and drops links that miss pongs for
+    // 30s, which a current-thread runtime (driven only inside block_on)
+    // cannot answer in time.
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .thread_name("stax-target-io")
         .enable_all()
         .build()
     {
@@ -114,19 +126,31 @@ fn worker(rx: Receiver<TargetSpanBatch>) {
                     client = connect().await;
                 }
                 let active = match client.as_ref() {
-                    Some(live) => match live.should_report(pid).await {
-                        Ok(active) => active,
-                        Err(e) => {
-                            tracing::debug!(
-                                "stax-target: gate poll failed, dropping connection: {e}"
-                            );
-                            client = None;
-                            false
+                    Some(live) => {
+                        match tokio::time::timeout(CALL_TIMEOUT, live.should_report(pid)).await {
+                            Ok(Ok(active)) => active,
+                            Ok(Err(e)) => {
+                                tracing::debug!(
+                                    "stax-target: gate poll failed, dropping connection: {e}"
+                                );
+                                client = None;
+                                false
+                            }
+                            Err(_) => {
+                                tracing::debug!(
+                                    "stax-target: gate poll timed out, dropping connection"
+                                );
+                                client = None;
+                                false
+                            }
                         }
-                    },
+                    }
                     None => false,
                 };
-                REPORTING_ACTIVE.store(active, Ordering::Relaxed);
+                let was = REPORTING_ACTIVE.swap(active, Ordering::Relaxed);
+                if was != active {
+                    tracing::debug!(active, "stax-target: capture gate flipped");
+                }
             });
         }
         // Pump batches until the next poll is due.
@@ -139,9 +163,16 @@ fn worker(rx: Receiver<TargetSpanBatch>) {
                 let Some(live) = client.as_ref() else {
                     return;
                 };
-                if let Err(e) = live.ingest(batch).await {
-                    tracing::debug!("stax-target: ingest failed, dropping connection: {e}");
-                    client = None;
+                match tokio::time::timeout(CALL_TIMEOUT, live.ingest(batch)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        tracing::debug!("stax-target: ingest failed, dropping connection: {e}");
+                        client = None;
+                    }
+                    Err(_) => {
+                        tracing::debug!("stax-target: ingest timed out, dropping connection");
+                        client = None;
+                    }
                 }
             }),
             Err(RecvTimeoutError::Timeout) => {}
