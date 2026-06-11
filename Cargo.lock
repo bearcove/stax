@@ -2779,6 +2779,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "stax-target"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "stax-live-proto",
+ "tokio",
+ "tracing",
+ "vox",
+]
+
+[[package]]
 name = "stax-target-images"
 version = "0.1.0"
 dependencies = [

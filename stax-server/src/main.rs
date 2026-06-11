@@ -12,6 +12,7 @@
 //! `stax-shade` companion process has been deleted.
 
 mod recorder;
+mod target_ingest;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,9 +24,11 @@ use stax_live::source::SourceResolver;
 use stax_live::{Aggregator, BinaryRegistry, LiveServer};
 use stax_live_proto::{
     DiagnosticsSnapshot, ProfilerDispatcher, RunConfig, RunControl, RunControlDispatcher,
-    RunControlError, RunId, RunState, RunSummary, ServerStatus, StopReason, WaitCondition,
-    WaitOutcome,
+    RunControlError, RunId, RunState, RunSummary, ServerStatus, StopReason, TargetIngestDispatcher,
+    WaitCondition, WaitOutcome,
 };
+
+use crate::target_ingest::{TargetIngestService, TargetLaneRegistry};
 use vox::VoxListener;
 
 const DEFAULT_SOCK_NAME: &str = "stax-server.sock";
@@ -111,6 +114,12 @@ fn build_factory(server: ServerState) -> impl vox::ConnectionAcceptor + 'static 
                 }
                 "Profiler" => {
                     connection.handle_with(ProfilerDispatcher::new(server.profiler()));
+                    Ok(())
+                }
+                "TargetIngest" => {
+                    connection.handle_with(TargetIngestDispatcher::new(TargetIngestService::new(
+                        server.clone(),
+                    )));
                     Ok(())
                 }
                 other => {
@@ -201,6 +210,9 @@ pub(crate) struct ServerState {
     paused: Arc<AtomicBool>,
     started_at_unix_ns: u64,
     next_run_id: Arc<AtomicU64>,
+    /// Synthetic-lane bookkeeping for `TargetIngest` (pseudo-tids +
+    /// span-name symbols). See `target_ingest`.
+    target_lanes: Arc<Mutex<TargetLaneRegistry>>,
 }
 
 struct Inner {
@@ -227,6 +239,7 @@ impl ServerState {
 
             started_at_unix_ns: now_unix_ns(),
             next_run_id: Arc::new(AtomicU64::new(1)),
+            target_lanes: Arc::new(Mutex::new(TargetLaneRegistry::default())),
         }
     }
 
@@ -279,6 +292,15 @@ impl ServerState {
 
     pub(crate) fn bump_revision(&self) {
         self.revision.fetch_add(1, Ordering::Release);
+    }
+
+    pub(crate) fn target_lanes(&self) -> &Arc<Mutex<TargetLaneRegistry>> {
+        &self.target_lanes
+    }
+
+    /// PID of the active run's target, if a run is active and attached.
+    pub(crate) fn active_target_pid(&self) -> Option<u32> {
+        self.inner.lock().active.as_ref()?.target_pid
     }
 
     /// Record an in-process target-attached event. Sets the

@@ -581,6 +581,49 @@ pub struct CfgUpdate {
     pub edges: Vec<CfgEdge>,
 }
 
+/// One execution span reported by an instrumented TARGET process —
+/// e.g. a GPU kernel's execution window captured via Metal 4 timestamp
+/// counters. Timestamps are absolute mach-derived nanoseconds, the same
+/// clock domain as sampled stacks (Apple Silicon GPU timestamps share
+/// mach_absolute_time's epoch and 24MHz rate), so spans land on the
+/// recording timeline with no correlation step.
+#[derive(Clone, Debug, Facet)]
+pub struct TargetSpan {
+    /// Symbolic name for the work (e.g. the Metal kernel function name).
+    /// Becomes a synthetic symbol — top/flame/annotate group by it.
+    pub name: String,
+    pub start_ns: u64,
+    pub end_ns: u64,
+}
+
+/// A batch of target-reported spans for one execution lane.
+///
+/// A lane is a GPU queue (or any other off-CPU executor) and maps onto a
+/// SYNTHETIC THREAD in the existing aggregator model: the server
+/// allocates a high pseudo-tid per (pid, lane), names it `lane`, and
+/// synthesizes PET samples across each span at the sampling period —
+/// exactly what the sampler would have produced had the lane been a
+/// thread executing functions named after the spans. Every existing view
+/// (top, flamegraph, timeline, threads) includes the lane with correct
+/// duration weighting; no span-specific views exist.
+#[derive(Clone, Debug, Facet)]
+pub struct TargetSpanBatch {
+    /// Reporting process id — spans are dropped unless this matches the
+    /// active run's target.
+    pub pid: u32,
+    /// Execution lane name, e.g. "GPU tq1s".
+    pub lane: String,
+    pub spans: Vec<TargetSpan>,
+}
+
+/// Target-facing ingest surface: the thing a profiled app latches onto.
+/// Fire-and-forget; the target keeps running whether or not a recording
+/// is active (the server drops batches with no matching run).
+#[vox::service]
+pub trait TargetIngest {
+    async fn ingest(&self, batch: TargetSpanBatch);
+}
+
 #[vox::service]
 pub trait Profiler {
     /// Snapshot of the top-N functions, ranked by `sort`. `params`
@@ -913,5 +956,6 @@ pub fn all_services() -> Vec<&'static vox::session::ServiceDescriptor> {
     vec![
         profiler_service_descriptor(),
         run_control_service_descriptor(),
+        target_ingest_service_descriptor(),
     ]
 }
