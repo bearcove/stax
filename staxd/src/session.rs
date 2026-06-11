@@ -173,7 +173,6 @@ fn setup_kdebug(config: &SessionConfig) -> Result<(), RecordError> {
 
 const SEND_QUEUE_CAPACITY: usize = 256;
 const SEND_FLUSH_BUDGET: Duration = Duration::from_secs(2);
-const SLOW_SEND_WAIT: Duration = Duration::from_millis(10);
 const MIN_DRAIN_READ_BATCH_RECORDS: usize = 4_096;
 const MAX_DRAIN_READ_BATCH_RECORDS: usize = 16_384;
 const IDLE_SPIN_READS: u32 = 8;
@@ -511,7 +510,6 @@ fn drain_kdebug_loop(
             } else if consecutive_empty_reads <= IDLE_YIELD_READS {
                 thread::yield_now();
             } else {
-                let wait_started = Instant::now();
                 match kdebug::wait_for_buffer(KDEBUG_BUFWAIT_TIMEOUT) {
                     Ok(true) => {}
                     Ok(false) => {}

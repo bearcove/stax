@@ -68,14 +68,10 @@ pub async fn main() -> Result<()> {
     let _ = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o666));
 
     // Inline accept loop instead of `vox::serve_listener` so we can
-    // pass `.non_resumable()` to the session builder. Default for
-    // `SessionTransportAcceptorBuilder` is resumable, which means
-    // when the client process exits the session goes into recovery
-    // mode and the per-channel `Tx<KdBufBatch>::send().await` keeps
-    // succeeding into a void instead of returning Err — the daemon
-    // never notices the client is gone and ktrace ownership leaks
-    // until something else evicts it. For Unix-socket IPC the peer
-    // *is* a process; non_resumable is the right default for us.
+    // configure channel capacity and keepalive. For Unix-socket IPC the
+    // peer is a process; when it exits, sends must fail and the daemon
+    // must tear down ktrace ownership. Vox 0.9 removed resumable
+    // sessions, so that is now the default stack-wide behavior.
     let serve = tokio::spawn(async move {
         loop {
             let link = match listener.accept().await {
@@ -94,7 +90,6 @@ pub async fn main() -> Result<()> {
                         "staxd",
                         "staxd-records",
                     ))
-                    .non_resumable()
                     // Detect dead peers without flagging legit ones.
                     // The recorder fires a giant pile of synchronous
                     // BinaryLoaded events at session start (~3500 dyld

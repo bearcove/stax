@@ -118,7 +118,7 @@ async fn run_attach(
         "recording lifecycle starting"
     );
 
-    let mut sink = LiveOnlySink::new(Some(Box::new(ServerLiveSink {
+    let sink = LiveOnlySink::new(Some(Box::new(ServerLiveSink {
         server: server.clone(),
         run_id,
     })));

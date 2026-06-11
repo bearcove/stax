@@ -8,14 +8,14 @@ rust-version = "1.91"
 libc = "0.2"
 log = "0.4"
 tracing = "0.1"
-facet = { version = "0.46" }
-figue = { version = "2.0" }
+facet = { version = "0.50.0-rc.0" }
+figue = { version = "5.0.0-rc.0" }
 eyre = "0.6"
 async-trait = "0.1"
 futures = { version = "0.3", default-features = false, features = ["executor"] }
 stax-live-proto = { path = "stax-live-proto" }
 stax-vox-observe = { path = "stax-vox-observe" }
-vox = "0.7"
+vox = "0.9.0-rc.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 stax-mac-capture = { version = "0.1", path = "stax-mac-capture" }

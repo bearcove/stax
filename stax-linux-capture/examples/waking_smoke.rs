@@ -12,17 +12,20 @@
 //! many off-CPU intervals got a non-None `waker_tid`. With the broker
 //! brokering sched_waking, the attributed count should be > 0.
 
-#![cfg(target_os = "linux")]
-
+#[cfg(target_os = "linux")]
 use std::sync::atomic::AtomicBool;
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 use stax_linux_capture::{
-    BinaryLoadedEvent, BinaryUnloadedEvent, RecordOptions, SampleEvent, SampleSink, ThreadNameEvent,
-    WakeupEvent,
+    BinaryLoadedEvent, BinaryUnloadedEvent, RecordOptions, SampleEvent, SampleSink,
+    ThreadNameEvent, WakeupEvent,
 };
+#[cfg(target_os = "linux")]
 use stax_mac_capture::sample_sink::{CpuIntervalEvent, CpuIntervalKind};
 
+#[cfg(target_os = "linux")]
 #[derive(Default)]
 struct WakingSums {
     samples: u64,
@@ -32,6 +35,7 @@ struct WakingSums {
     off_cpu_with_waker: u64,
 }
 
+#[cfg(target_os = "linux")]
 impl SampleSink for WakingSums {
     fn on_sample(&mut self, _ev: SampleEvent<'_>) {
         self.samples += 1;
@@ -55,6 +59,7 @@ impl SampleSink for WakingSums {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn main() -> eyre::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -127,3 +132,6 @@ fn main() -> eyre::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(not(target_os = "linux"))]
+fn main() {}

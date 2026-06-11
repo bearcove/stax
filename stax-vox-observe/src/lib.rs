@@ -356,20 +356,6 @@ fn format_channel_debug_block(debug: Option<vox::ChannelDebugContext>) -> String
     )
 }
 
-fn format_channel_debug_inline(debug: Option<vox::ChannelDebugContext>) -> String {
-    let Some(debug) = debug else {
-        return "debug=none".to_owned();
-    };
-    format!(
-        "type={} label={} service={} method={} source={}",
-        display_opt_str(debug.type_name),
-        display_opt_str(debug.label),
-        display_opt_str(debug.service),
-        display_opt_str(debug.method),
-        format_source_location(debug.source_location)
-    )
-}
-
 fn display_opt_str(value: Option<&'static str>) -> &'static str {
     value.unwrap_or("-")
 }
@@ -393,10 +379,6 @@ fn format_channel_ids(ids: &[vox::ChannelId]) -> String {
     }
     out.push(']');
     out
-}
-
-fn empty_as_dash(value: &str) -> &str {
-    if value.is_empty() { "-" } else { value }
 }
 
 fn instant_age(instant: Option<Instant>, now: Instant) -> String {
@@ -496,16 +478,6 @@ impl VoxObserverLogger {
         self.pid = Some(pid);
         self
     }
-}
-
-fn channel_detail(surface: &'static str, channel: vox::ChannelEventContext) -> String {
-    format!(
-        "surface={} connection_id={:?} channel_id={:?} {}",
-        surface,
-        channel.connection_id,
-        channel.channel_id,
-        format_channel_debug_inline(channel.debug)
-    )
 }
 
 impl vox::VoxObserver for VoxObserverLogger {
