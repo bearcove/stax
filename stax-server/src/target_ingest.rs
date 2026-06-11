@@ -70,15 +70,21 @@ impl TargetIngestService {
         Self { server }
     }
 
-    /// Synthetic tid for a lane, allocating + naming it on first sight.
+    /// Synthetic tid for a lane, allocating on first sight. The lane
+    /// NAME is re-armed on every batch: the aggregator resets on each
+    /// new run, which would orphan a name set only once.
     fn lane_tid(&self, pid: u32, lane: &str) -> u32 {
-        let mut lanes = self.server.target_lanes().lock();
-        if let Some(&tid) = lanes.lane_tids.get(&(pid, lane.to_owned())) {
-            return tid;
-        }
-        let tid = SYNTH_TID_BASE + lanes.lane_tids.len() as u32;
-        lanes.lane_tids.insert((pid, lane.to_owned()), tid);
-        drop(lanes);
+        let tid = {
+            let mut lanes = self.server.target_lanes().lock();
+            match lanes.lane_tids.get(&(pid, lane.to_owned())) {
+                Some(&tid) => tid,
+                None => {
+                    let tid = SYNTH_TID_BASE + lanes.lane_tids.len() as u32;
+                    lanes.lane_tids.insert((pid, lane.to_owned()), tid);
+                    tid
+                }
+            }
+        };
         self.server
             .aggregator()
             .write()
@@ -177,5 +183,9 @@ impl TargetIngest for TargetIngestService {
             synthesized,
             "target spans ingested"
         );
+    }
+
+    async fn should_report(&self, pid: u32) -> bool {
+        self.server.active_target_pid() == Some(pid)
     }
 }

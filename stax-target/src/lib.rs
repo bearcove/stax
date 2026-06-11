@@ -1,24 +1,34 @@
 //! Target-side latch for stax.
 //!
-//! A profiled app links this crate and calls [`report`] with execution
-//! spans from lanes the CPU sampler cannot see — GPU command queues,
-//! accelerators. When a stax recording of this process is active, the
-//! spans land on the recording timeline as a synthetic thread next to
-//! the real ones (see `stax-server`'s `TargetIngest`); when no server
-//! or no recording is around, reporting is a cheap no-op.
+//! A profiled app links this crate to put execution lanes the CPU
+//! sampler cannot see — GPU command queues, accelerators — on a live
+//! stax recording's timeline (see `stax-server`'s `TargetIngest`: spans
+//! become a synthetic thread with named frames in the existing views).
 //!
-//! Fire-and-forget by design: a background worker owns the connection,
-//! batches are dropped (never block the caller) when the queue is full
-//! or the server is away, and reconnection happens lazily per batch.
+//! The contract has two halves:
+//!
+//! - **Capture gating (polling)** — the background worker polls the
+//!   server (~1s) with `should_report(pid)`; the answer drives
+//!   [`reporting_active`], which the app reads (one relaxed atomic
+//!   load) wherever it decides whether to pay its span-capture cost.
+//!   Attach (`stax record --pid`) turns capture on within one poll
+//!   period; stop/detach turns it off the same way. No server, no
+//!   socket, server restart — all degrade to "off" and recover on a
+//!   later poll.
+//! - **Data ([`report`])** — fire-and-forget batches, bounded queue,
+//!   drop-newest. The server is the authority: it drops batches whose
+//!   pid doesn't match the active run's target. Lossy by design.
 //!
 //! Span timestamps are absolute mach-derived nanoseconds — on Apple
 //! platforms `mach_absolute_time` converted to ns (Apple Silicon GPU
-//! timestamps share that timebase), which is the same clock domain the
-//! sampler records in.
+//! timestamps share that timebase), the same clock domain the sampler
+//! records in, so no correlation step exists anywhere.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
-use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError};
+use std::time::{Duration, Instant};
 
 pub use stax_live_proto::TargetSpan;
 use stax_live_proto::{TargetIngestClient, TargetSpanBatch};
@@ -28,8 +38,26 @@ use stax_live_proto::{TargetIngestClient, TargetSpanBatch};
 /// not ledger data).
 const QUEUE_DEPTH: usize = 64;
 
+/// Capture-gate poll period. Attach/detach latency is bounded by this.
+const POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Whether the app's pid is currently being recorded.
+static REPORTING_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Capture gate: `true` while a stax recording of this process is
+/// active. One relaxed atomic load — safe to read on hot paths. The
+/// first call arms the background worker (and thus the polling), so
+/// apps need no explicit init: read the gate where capture is decided.
+pub fn reporting_active() -> bool {
+    let _ = worker_sender();
+    REPORTING_ACTIVE.load(Ordering::Relaxed)
+}
+
 /// Report one lane's spans. Cheap and non-blocking; safe to call from
 /// hot paths. `lane` names the synthetic thread (e.g. "GPU tq1s").
+/// Batches sent while no recording is active are dropped server-side
+/// (and capture should be gated on [`reporting_active`] anyway, so the
+/// steady-state idle cost is nil).
 pub fn report(lane: &str, spans: Vec<TargetSpan>) {
     if spans.is_empty() {
         return;
@@ -73,21 +101,52 @@ fn worker(rx: Receiver<TargetSpanBatch>) {
             return;
         }
     };
+    let pid = std::process::id();
     let mut client: Option<TargetIngestClient> = None;
-    while let Ok(batch) = rx.recv() {
-        runtime.block_on(async {
-            if client.is_none() {
-                client = connect().await;
-            }
-            let Some(live) = client.as_ref() else {
-                // No server right now; drop the batch, retry on the next.
-                return;
-            };
-            if let Err(e) = live.ingest(batch).await {
-                tracing::debug!("stax-target: ingest failed, dropping connection: {e}");
-                client = None;
-            }
-        });
+    let mut next_poll = Instant::now();
+    loop {
+        // Poll the capture gate when due.
+        let now = Instant::now();
+        if now >= next_poll {
+            next_poll = now + POLL_INTERVAL;
+            runtime.block_on(async {
+                if client.is_none() {
+                    client = connect().await;
+                }
+                let active = match client.as_ref() {
+                    Some(live) => match live.should_report(pid).await {
+                        Ok(active) => active,
+                        Err(e) => {
+                            tracing::debug!(
+                                "stax-target: gate poll failed, dropping connection: {e}"
+                            );
+                            client = None;
+                            false
+                        }
+                    },
+                    None => false,
+                };
+                REPORTING_ACTIVE.store(active, Ordering::Relaxed);
+            });
+        }
+        // Pump batches until the next poll is due.
+        let wait = next_poll.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(wait) {
+            Ok(batch) => runtime.block_on(async {
+                if client.is_none() {
+                    client = connect().await;
+                }
+                let Some(live) = client.as_ref() else {
+                    return;
+                };
+                if let Err(e) = live.ingest(batch).await {
+                    tracing::debug!("stax-target: ingest failed, dropping connection: {e}");
+                    client = None;
+                }
+            }),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return,
+        }
     }
 }
 
@@ -108,7 +167,7 @@ async fn connect() -> Option<TargetIngestClient> {
 
 /// Same resolution order as the stax CLI: explicit override, XDG
 /// runtime dir, per-uid /tmp fallback. `None` when no socket exists
-/// (server not running) — reporting is then a no-op.
+/// (server not running) — polling then costs one `stat` per period.
 fn stax_server_socket() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("STAX_SERVER_SOCKET") {
         let p = PathBuf::from(p);

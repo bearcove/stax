@@ -622,6 +622,13 @@ pub struct TargetSpanBatch {
 #[vox::service]
 pub trait TargetIngest {
     async fn ingest(&self, batch: TargetSpanBatch);
+
+    /// Capture gate, polled by targets (~1s): `true` iff an active run
+    /// is recording `pid`. Targets use this to switch span capture on
+    /// when a recording attaches and off (dropping the per-span capture
+    /// cost) when it stops or detaches — the polling half of the
+    /// target-latch contract.
+    async fn should_report(&self, pid: u32) -> bool;
 }
 
 #[vox::service]
