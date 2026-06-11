@@ -189,3 +189,85 @@ impl TargetIngest for TargetIngestService {
         self.server.active_target_pid() == Some(pid)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use stax_live_proto::{TargetIngest as _, TargetSpan, TargetSpanBatch};
+
+    use super::*;
+
+    /// The whole latch path server-side: pid gate, synthetic thread
+    /// (named lane), synthetic symbol resolution, and duration-weighted
+    /// sample synthesis into the EXISTING aggregator — no span-specific
+    /// storage anywhere.
+    #[tokio::test]
+    async fn ingest_lands_spans_as_synthetic_thread_with_named_symbols() {
+        let server = ServerState::new_for_tests();
+        let service = TargetIngestService::new(server.clone());
+
+        // No active run: gate closed.
+        assert!(!service.should_report(42).await);
+        service
+            .ingest(TargetSpanBatch {
+                pid: 42,
+                lane: "GPU test".to_owned(),
+                spans: vec![span("kernel_a", 1_000_000, 4_000_000)],
+            })
+            .await;
+        assert!(server.aggregator().read().session_start_ns().is_none());
+
+        // Active run targeting pid 42: gate open, spans land.
+        server.set_active_run_for_tests(42);
+        assert!(service.should_report(42).await);
+        assert!(!service.should_report(43).await);
+        service
+            .ingest(TargetSpanBatch {
+                pid: 42,
+                lane: "GPU test".to_owned(),
+                spans: vec![
+                    span("kernel_a", 1_000_000, 4_000_000), // 3ms -> 3 samples
+                    span("kernel_b", 4_000_000, 4_500_000), // 0.5ms -> 1 sample
+                ],
+            })
+            .await;
+        // Wrong pid still drops.
+        service
+            .ingest(TargetSpanBatch {
+                pid: 43,
+                lane: "GPU other".to_owned(),
+                spans: vec![span("kernel_c", 1_000_000, 9_000_000)],
+            })
+            .await;
+
+        let aggregator = server.aggregator().read();
+        let tid = SYNTH_TID_BASE;
+        assert_eq!(aggregator.thread_name(tid), Some("GPU test"));
+        assert_eq!(aggregator.session_start_ns(), Some(1_000_000));
+        assert_eq!(aggregator.last_event_ns(), Some(4_000_000));
+
+        // Span names resolve as symbols through the ordinary registry.
+        let binaries = server.binaries().read();
+        let a = binaries
+            .lookup_symbol(SYNTH_BINARY_BASE_AVMA)
+            .expect("kernel_a resolves");
+        assert_eq!(a.function_name, "kernel_a");
+        let b = binaries
+            .lookup_symbol(SYNTH_BINARY_BASE_AVMA + SYNTH_SYMBOL_STRIDE)
+            .expect("kernel_b resolves");
+        assert_eq!(b.function_name, "kernel_b");
+        assert!(
+            binaries
+                .lookup_symbol(SYNTH_BINARY_BASE_AVMA + 2 * SYNTH_SYMBOL_STRIDE)
+                .is_none(),
+            "dropped wrong-pid span must not register symbols"
+        );
+    }
+
+    fn span(name: &str, start_ns: u64, end_ns: u64) -> TargetSpan {
+        TargetSpan {
+            name: name.to_owned(),
+            start_ns,
+            end_ns,
+        }
+    }
+}

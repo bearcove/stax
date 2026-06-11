@@ -224,6 +224,11 @@ struct Inner {
 }
 
 impl ServerState {
+    #[cfg(test)]
+    pub(crate) fn new_for_tests() -> Self {
+        Self::new(PathBuf::from("/dev/null"))
+    }
+
     fn new(_socket_path: PathBuf) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
@@ -301,6 +306,22 @@ impl ServerState {
     /// PID of the active run's target, if a run is active and attached.
     pub(crate) fn active_target_pid(&self) -> Option<u32> {
         self.inner.lock().active.as_ref()?.target_pid
+    }
+
+    /// Install a fake active run for unit tests of pid-gated surfaces.
+    #[cfg(test)]
+    pub(crate) fn set_active_run_for_tests(&self, target_pid: u32) {
+        self.inner.lock().active = Some(RunSummary {
+            id: RunId(1),
+            state: RunState::Recording,
+            stop_reason: None,
+            started_at_unix_ns: 1,
+            stopped_at_unix_ns: None,
+            target_pid: Some(target_pid),
+            label: "test".to_owned(),
+            pet_samples: 0,
+            off_cpu_intervals: 0,
+        });
     }
 
     /// Record an in-process target-attached event. Sets the
