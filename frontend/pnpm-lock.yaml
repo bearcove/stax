@@ -4,13 +4,17 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+overrides:
+  '@bearcove/phon-engine': link:/Users/amos/phon/typescript/packages/phon-engine
+  '@bearcove/phon-schema': link:/Users/amos/phon/typescript/packages/phon-schema
+
 importers:
 
   .:
     dependencies:
       '@bearcove/phon-schema':
-        specifier: 0.2.0-rc.0
-        version: 0.2.0-rc.0
+        specifier: link:/Users/amos/phon/typescript/packages/phon-schema
+        version: link:../../phon/typescript/packages/phon-schema
       '@bearcove/vox-core':
         specifier: 0.9.0-rc.0
         version: 0.9.0-rc.0
@@ -127,12 +131,6 @@ packages:
   '@babel/types@7.29.0':
     resolution: {integrity: sha512-LwdZHpScM4Qz8Xw2iKSzS+cfglZzJGvofQICy7W7v4caru4EaAmyUuO6BGrbyQ2mYV11W0U8j5mBhd14dd3B0A==}
     engines: {node: '>=6.9.0'}
-
-  '@bearcove/phon-engine@0.2.0-rc.0':
-    resolution: {integrity: sha512-Os+VaRe7QdmDaYlVeS+OLiaouOAF/Y2bZGiSo+EcXzqC1se09w/aKCFc5LnJYn+104jQ3rLqZKQdyKc+6kzIkg==}
-
-  '@bearcove/phon-schema@0.2.0-rc.0':
-    resolution: {integrity: sha512-YivXOWBa5X2Lo3EjYR0WFbvnjfMHSDmirGocjc00WTWw/QTKnpbgQAnYtXU5uV3SySl6O+SsXmmfMxqc2Apl9Q==}
 
   '@bearcove/vox-core@0.9.0-rc.0':
     resolution: {integrity: sha512-9G+tImXJF1hx0Du7FlBprdpI2cnFLy5LMin5dfG7wRCFkawC1BUTsCL3GxVYFtAf3UBk1tHv2rQL2fCsUG/vmQ==}
@@ -299,10 +297,6 @@ packages:
 
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
-
-  '@noble/hashes@2.2.0':
-    resolution: {integrity: sha512-IYqDGiTXab6FniAgnSdZwgWbomxpy9FtYvLKs7wCUs2a8RkITG+DFGO1DM9cr+E3/RgADRpFjrKVaJ1z6sjtEg==}
-    engines: {node: '>= 20.19.0'}
 
   '@rolldown/pluginutils@1.0.0-beta.27':
     resolution: {integrity: sha512-+d0F4MKMCbeVUJwG96uQ4SgAznZNSq93I3V+9NHA4OpvqG8mRCpGdKmK8l/dl02h2CCDHwW2FqilnTyDcAnqjA==}
@@ -757,18 +751,10 @@ snapshots:
       '@babel/helper-string-parser': 7.27.1
       '@babel/helper-validator-identifier': 7.28.5
 
-  '@bearcove/phon-engine@0.2.0-rc.0':
-    dependencies:
-      '@bearcove/phon-schema': 0.2.0-rc.0
-
-  '@bearcove/phon-schema@0.2.0-rc.0':
-    dependencies:
-      '@noble/hashes': 2.2.0
-
   '@bearcove/vox-core@0.9.0-rc.0':
     dependencies:
-      '@bearcove/phon-engine': 0.2.0-rc.0
-      '@bearcove/phon-schema': 0.2.0-rc.0
+      '@bearcove/phon-engine': link:../../phon/typescript/packages/phon-engine
+      '@bearcove/phon-schema': link:../../phon/typescript/packages/phon-schema
       '@bearcove/vox-wire': 0.9.0-rc.0
 
   '@bearcove/vox-tcp@0.9.0-rc.0':
@@ -777,8 +763,8 @@ snapshots:
 
   '@bearcove/vox-wire@0.9.0-rc.0':
     dependencies:
-      '@bearcove/phon-engine': 0.2.0-rc.0
-      '@bearcove/phon-schema': 0.2.0-rc.0
+      '@bearcove/phon-engine': link:../../phon/typescript/packages/phon-engine
+      '@bearcove/phon-schema': link:../../phon/typescript/packages/phon-schema
 
   '@bearcove/vox-ws@0.9.0-rc.0':
     dependencies:
@@ -872,8 +858,6 @@ snapshots:
     dependencies:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.5.5
-
-  '@noble/hashes@2.2.0': {}
 
   '@rolldown/pluginutils@1.0.0-beta.27': {}
 

@@ -216,6 +216,7 @@ pub fn classify_offcpu(function_name: Option<&str>) -> OffCpuReason {
         || name == "__ulock_wait"
         || name == "__ulock_wait2"
         || name == "__workq_kernreturn"
+        || name == "start_wqthread"
         || name == "_pthread_cond_wait"
         || name == "_pthread_cond_timedwait"
         || name == "_dispatch_workloop_worker_thread"
@@ -241,6 +242,7 @@ pub fn classify_offcpu(function_name: Option<&str>) -> OffCpuReason {
     // -- Semaphores ----------------------------------------------------
     if name == "__semwait_signal"
         || name == "__semwait_signal_nocancel"
+        || name == "semaphore_wait_signal_trap"
         || name == "semaphore_wait_trap"
         || name == "semaphore_timedwait_trap"
         || name == "_dispatch_semaphore_wait"
@@ -346,6 +348,7 @@ mod tests {
             classify_offcpu(Some("__workq_kernreturn")),
             OffCpuReason::Idle
         );
+        assert_eq!(classify_offcpu(Some("start_wqthread")), OffCpuReason::Idle);
         assert_eq!(classify_offcpu(Some("__ulock_wait")), OffCpuReason::Idle);
     }
 
@@ -369,6 +372,14 @@ mod tests {
         );
         assert_eq!(classify_offcpu(Some("kevent_id")), OffCpuReason::Readiness);
         assert_eq!(classify_offcpu(Some("poll")), OffCpuReason::Readiness);
+    }
+
+    #[test]
+    fn semaphore_trap_spelling() {
+        assert_eq!(
+            classify_offcpu(Some("semaphore_wait_signal_trap")),
+            OffCpuReason::SemaphoreWait
+        );
     }
 
     #[test]

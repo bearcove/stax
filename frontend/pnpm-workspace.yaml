@@ -2,6 +2,9 @@
 # bundler requires. pnpm 11 gates build scripts behind this allowlist.
 allowBuilds:
   esbuild: true
+overrides:
+  '@bearcove/phon-engine': link:/Users/amos/phon/typescript/packages/phon-engine
+  '@bearcove/phon-schema': link:/Users/amos/phon/typescript/packages/phon-schema
 minimumReleaseAgeExclude:
   - '@bearcove/phon-engine@0.2.0-rc.0'
   - '@bearcove/phon-schema@0.2.0-rc.0'

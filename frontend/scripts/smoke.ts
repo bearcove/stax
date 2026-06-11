@@ -6,6 +6,8 @@
 //   node --experimental-strip-types scripts/smoke.ts [ws-url]
 import { connectProfiler } from "../src/generated/profiler.generated.ts";
 import type {
+  AnnotatedLine,
+  AnnotatedView,
   ViewParams,
   TopSort,
 } from "../src/generated/profiler.generated.ts";
@@ -67,15 +69,30 @@ console.log(
 );
 if (named.length === 0) die("no top entry is symbolized");
 
-// 4. disassembly with cost annotation + structured tokens. Pick a
-// *user-space* symbol: kernel frames (high-half addrs, now surfaced as
-// off-CPU leaves) have no on-disk text to disassemble — expected.
+// 4. disassembly with cost annotation + structured tokens. Try
+// *user-space* symbols until one actually maps to text bytes: kernel
+// frames and some system/stripped images have no on-disk text to
+// disassemble — expected.
 const KERNEL = 0xffff_0000_0000_0000n;
-const target = named.find((e) => e.address < KERNEL);
-if (!target) die("no user-space symbol in top to annotate");
-const ann = await client.annotated(target.address, params);
-const withTokens = ann.lines.filter((l) => l.tokens.length > 0);
-const withCost = ann.lines.filter((l) => l.self_on_cpu_ns > 0n);
+const candidates = named.filter((e) => e.address < KERNEL);
+if (candidates.length === 0) die("no user-space symbol in top to annotate");
+let ann: AnnotatedView | null = null;
+let withTokens: AnnotatedLine[] = [];
+let withCost: AnnotatedLine[] = [];
+for (const target of candidates) {
+  const candidate = await client.annotated(target.address, params);
+  const candidateTokens = candidate.lines.filter((l) => l.tokens.length > 0);
+  const candidateCost = candidate.lines.filter((l) => l.self_on_cpu_ns > 0n);
+  if (candidate.lines.length > 0 && candidateTokens.length > 0 && candidateCost.length > 0) {
+    ann = candidate;
+    withTokens = candidateTokens;
+    withCost = candidateCost;
+    break;
+  }
+}
+if (!ann) {
+  die(`no annotated user-space symbol among ${candidates.length} top entries`);
+}
 console.log(
   `annotated ${ann.function_name}: lines=${ann.lines.length} tokenized=${withTokens.length} cost-annotated=${withCost.length}`,
 );
