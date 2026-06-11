@@ -270,4 +270,57 @@ mod tests {
             end_ns,
         }
     }
+
+    /// Same assertions as above, but through the REAL wire: a local
+    /// vox acceptor with the production routing factory, and a real
+    /// `TargetIngestClient` like stax-target's worker uses. Guards the
+    /// dispatch path (service routing + method dispatch + facet codec),
+    /// not just the service impl.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ingest_over_local_socket_lands_spans() {
+        use stax_live_proto::TargetIngestClient;
+
+        let server = ServerState::new_for_tests();
+        server.set_active_run_for_tests(4242);
+        let socket = std::env::temp_dir().join(format!(
+            "stax-target-ingest-test-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let acceptor = vox::transport::local::LocalLinkAcceptor::bind(
+            socket.to_string_lossy().into_owned(),
+        )
+        .expect("bind test socket");
+        crate::spawn_accept_loop_local(server.clone(), acceptor);
+
+        let url = format!("local://{}", socket.display());
+        let client: TargetIngestClient = vox::connect(&url).await.expect("connect");
+        assert!(client.should_report(4242).await.expect("should_report"));
+        client
+            .ingest(TargetSpanBatch {
+                pid: 4242,
+                lane: "GPU wire".to_owned(),
+                spans: vec![span("wire_kernel", 10_000_000, 16_000_000)],
+            })
+            .await
+            .expect("ingest");
+
+        // ingest is fire-and-forget at the service level; give the
+        // dispatcher a beat to run.
+        for _ in 0..50 {
+            if server
+                .aggregator()
+                .read()
+                .thread_name(SYNTH_TID_BASE)
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let aggregator = server.aggregator().read();
+        assert_eq!(aggregator.thread_name(SYNTH_TID_BASE), Some("GPU wire"));
+        assert_eq!(aggregator.session_start_ns(), Some(10_000_000));
+        let _ = std::fs::remove_file(&socket);
+    }
 }

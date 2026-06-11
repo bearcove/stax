@@ -61,21 +61,7 @@ async fn main() -> eyre::Result<()> {
     let ws_local = ws_listener.local_addr()?;
     tracing::info!("stax-server listening on ws://{ws_local}");
 
-    let local_loop = tokio::spawn({
-        let server = server.clone();
-        async move {
-            loop {
-                let link = match local_listener.accept().await {
-                    Ok(l) => l,
-                    Err(e) => {
-                        tracing::warn!("stax-server: local accept failed: {e}");
-                        continue;
-                    }
-                };
-                spawn_session_local(server.clone(), link);
-            }
-        }
-    });
+    let local_loop = spawn_accept_loop_local(server.clone(), local_listener);
     let ws_loop = tokio::spawn({
         let server = server.clone();
         async move {
@@ -123,6 +109,26 @@ fn build_factory(server: ServerState) -> impl vox::ConnectionRouter + 'static {
             }
         },
     )
+}
+
+/// Accept loop for the local socket, factored so tests can stand up the
+/// production routing (`build_factory`) on a scratch socket.
+pub(crate) fn spawn_accept_loop_local(
+    server: ServerState,
+    listener: vox::transport::local::LocalLinkAcceptor,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let link = match listener.accept().await {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::warn!("stax-server: local accept failed: {e}");
+                    continue;
+                }
+            };
+            spawn_session_local(server.clone(), link);
+        }
+    })
 }
 
 fn spawn_session_local(server: ServerState, link: vox::transport::local::LocalLink) {
@@ -566,6 +572,8 @@ fn init_logging() {
 
     // macOS: fan out to os_log (Console.app / `log stream`). Linux:
     // plain stderr — journald captures it when run under systemd.
+    // `STAX_SERVER_STDERR_LOG=1` adds a stderr layer on macOS too, for
+    // dev-server runs where os_log is inconvenient to tail.
     #[cfg(target_os = "macos")]
     tracing_subscriber::registry()
         .with(filter)
@@ -573,6 +581,11 @@ fn init_logging() {
             "eu.bearcove.stax-server",
             "default",
         ))
+        .with(
+            std::env::var("STAX_SERVER_STDERR_LOG")
+                .is_ok()
+                .then(|| tracing_subscriber::fmt::layer().with_writer(std::io::stderr)),
+        )
         .init();
 
     #[cfg(not(target_os = "macos"))]
