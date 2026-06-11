@@ -7,10 +7,10 @@ use figue as args;
 use stax_core::args::{
     AnnotateArgs, Cli, Command, FlameArgs, RecordArgs, ThreadsArgs, TopArgs, WaitArgs,
 };
-#[cfg(target_os = "macos")]
-use stax_core::cmd_setup_mac;
 #[cfg(target_os = "linux")]
 use stax_core::cmd_setup_linux;
+#[cfg(target_os = "macos")]
+use stax_core::cmd_setup_mac;
 use stax_live_proto::{
     DiagnosticsSnapshot, FlameNode, FlamegraphUpdate, LiveFilter, OffCpuBreakdown, ProfilerClient,
     RunControlClient, RunSummary, ServerStatus, StopReason, ThreadsUpdate, TopSort, ViewParams,
@@ -295,7 +295,12 @@ async fn run_record_launch(
     let launched = std::sync::Arc::new(launched);
 
     let run_id = match client
-        .start_attach(target_pid, config, args.daemon_socket.clone(), args.time_limit)
+        .start_attach(
+            target_pid,
+            config,
+            args.daemon_socket.clone(),
+            args.time_limit,
+        )
         .await
     {
         Ok(id) => id,
@@ -321,9 +326,7 @@ async fn run_record_launch(
             loop {
                 tick.tick().await;
                 let mut status = 0;
-                let r = unsafe {
-                    libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG)
-                };
+                let r = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
                 if r == pid as libc::pid_t {
                     return Some(status);
                 }
@@ -361,13 +364,18 @@ async fn run_record_launch_linux(
     let mut argv = Vec::with_capacity(1 + rest.len());
     argv.push(program.clone());
     argv.extend(rest);
-    let mut launched = launch_linux::fork_suspended(&argv)
-        .map_err(|e| format!("fork {program}: {e}"))?;
+    let mut launched =
+        launch_linux::fork_suspended(&argv).map_err(|e| format!("fork {program}: {e}"))?;
     let target_pid = launched.pid;
     eprintln!("stax: forked {program} (pid {target_pid}, paused)");
 
     let run_id = match client
-        .start_attach(target_pid, config, args.daemon_socket.clone(), args.time_limit)
+        .start_attach(
+            target_pid,
+            config,
+            args.daemon_socket.clone(),
+            args.time_limit,
+        )
         .await
     {
         Ok(id) => id,
@@ -812,7 +820,6 @@ fn print_threads(update: &ThreadsUpdate, limit: u32) {
         println!("…{} more threads", threads.len() - take);
     }
 }
-
 
 /// Pick the largest field of the off-CPU breakdown so the user can
 /// see at a glance whether a thread was idle vs. blocked vs. doing

@@ -655,5 +655,8 @@ fn load_image(path: &str) -> Option<Arc<CodeImage>> {
             })
         })
         .collect();
-    Some(Arc::new(CodeImage { bytes, load_headers }))
+    Some(Arc::new(CodeImage {
+        bytes,
+        load_headers,
+    }))
 }

@@ -155,7 +155,11 @@ pub enum PerfSessionError {
     NotPrivileged { detail: String },
     /// `perf_event_open` failed on a specific CPU for a reason other
     /// than privilege (ENODEV, EMFILE, …).
-    PerfEventOpen { cpu: u32, errno: i32, detail: String },
+    PerfEventOpen {
+        cpu: u32,
+        errno: i32,
+        detail: String,
+    },
     /// `/proc/<pid>` does not exist — the target is gone.
     NoSuchTarget(u32),
     /// The connection's peer uid is not allowed to profile the target.

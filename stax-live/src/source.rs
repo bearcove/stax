@@ -130,7 +130,10 @@ impl SourceResolver {
             }
             self.line_tables.insert(binary_path.to_owned(), table);
         }
-        self.line_tables.get(binary_path)?.as_ref()?.find_location(svma)
+        self.line_tables
+            .get(binary_path)?
+            .as_ref()?
+            .find_location(svma)
     }
 
     /// Highlighted snippet for `(file, line_1based)`. Returns an empty

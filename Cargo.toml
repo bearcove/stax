@@ -55,3 +55,17 @@ members = [
   "staxd",
   "staxd-client",
 ]
+
+[patch.crates-io]
+vox = { path = "../vox/rust/vox" }
+vox-codegen = { path = "../vox/rust/vox-codegen" }
+vox-core = { path = "../vox/rust/vox-core" }
+vox-fdpass = { path = "../vox/rust/vox-fdpass" }
+vox-macros-core = { path = "../vox/rust/vox-macros-core" }
+vox-macros-parse = { path = "../vox/rust/vox-macros-parse" }
+vox-phon = { path = "../vox/rust/vox-phon" }
+vox-schema = { path = "../vox/rust/vox-schema" }
+vox-service-macros = { path = "../vox/rust/vox-macros" }
+vox-stream = { path = "../vox/rust/vox-stream" }
+vox-types = { path = "../vox/rust/vox-types" }
+vox-websocket = { path = "../vox/rust/vox-websocket" }

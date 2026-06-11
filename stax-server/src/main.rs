@@ -102,26 +102,20 @@ async fn main() -> eyre::Result<()> {
     Ok(())
 }
 
-fn build_factory(server: ServerState) -> impl vox::ConnectionAcceptor + 'static {
-    vox::acceptor_fn(
-        move |request: &vox::ConnectionRequest,
-              connection: vox::PendingConnection|
-              -> Result<(), vox::Metadata> {
+fn build_factory(server: ServerState) -> impl vox::ConnectionRouter + 'static {
+    vox::router_fn(
+        move |request: &vox::ConnectionRequest| -> Result<vox::ConnectionRoute, vox::Metadata> {
             match request.service() {
-                "RunControl" => {
-                    connection.handle_with(RunControlDispatcher::new(server.clone()));
-                    Ok(())
-                }
-                "Profiler" => {
-                    connection.handle_with(ProfilerDispatcher::new(server.profiler()));
-                    Ok(())
-                }
-                "TargetIngest" => {
-                    connection.handle_with(TargetIngestDispatcher::new(TargetIngestService::new(
-                        server.clone(),
-                    )));
-                    Ok(())
-                }
+                "Noop" => Ok(vox::ConnectionRoute::handle(())),
+                "RunControl" => Ok(vox::ConnectionRoute::handle(RunControlDispatcher::new(
+                    server.clone(),
+                ))),
+                "Profiler" => Ok(vox::ConnectionRoute::handle(ProfilerDispatcher::new(
+                    server.profiler(),
+                ))),
+                "TargetIngest" => Ok(vox::ConnectionRoute::handle(TargetIngestDispatcher::new(
+                    TargetIngestService::new(server.clone()),
+                ))),
                 other => {
                     tracing::warn!("stax-server: rejecting unknown service {other:?}");
                     Err(vox::Metadata::default())

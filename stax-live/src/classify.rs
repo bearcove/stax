@@ -38,31 +38,70 @@ fn glibc_core(name: &str) -> &str {
 /// `IoRead` (dominant; the breakdown can't see direction here).
 fn classify_linux_kernel(core: &str) -> Option<OffCpuReason> {
     Some(match core {
-        "futex_wait_queue" | "futex_wait" | "futex_wait_setup" | "do_futex"
-        | "futex_do_wait" | "mutex_lock" | "mutex_lock_slowpath"
-        | "rwsem_down_read_slowpath" | "rwsem_down_write_slowpath" | "down_read"
-        | "down_write" | "down" | "down_common" | "rt_mutex_slowlock"
+        "futex_wait_queue"
+        | "futex_wait"
+        | "futex_wait_setup"
+        | "do_futex"
+        | "futex_do_wait"
+        | "mutex_lock"
+        | "mutex_lock_slowpath"
+        | "rwsem_down_read_slowpath"
+        | "rwsem_down_write_slowpath"
+        | "down_read"
+        | "down_write"
+        | "down"
+        | "down_common"
+        | "rt_mutex_slowlock"
         | "rt_mutex_slowlock_block" => OffCpuReason::LockWait,
-        "hrtimer_nanosleep" | "do_nanosleep" | "schedule_hrtimeout_range"
+        "hrtimer_nanosleep"
+        | "do_nanosleep"
+        | "schedule_hrtimeout_range"
         | "schedule_hrtimeout_range_clock" => OffCpuReason::Sleep,
-        "do_select" | "core_sys_select" | "do_sys_poll" | "do_poll"
-        | "do_epoll_wait" | "ep_poll" | "do_epoll_pwait"
+        "do_select"
+        | "core_sys_select"
+        | "do_sys_poll"
+        | "do_poll"
+        | "do_epoll_wait"
+        | "ep_poll"
+        | "do_epoll_pwait"
         | "poll_schedule_timeout" => OffCpuReason::Readiness,
-        "pipe_read" | "tcp_recvmsg" | "tcp_recvmsg_locked" | "sock_recvmsg"
-        | "sys_recvmsg" | "unix_stream_read_generic" | "unix_dgram_recvmsg"
-        | "inet_recvmsg" | "skb_wait_for_more_packets" | "skb_recv_datagram"
-        | "io_schedule" | "bit_wait_io" | "folio_wait_bit_common" | "lock_page"
+        "pipe_read"
+        | "tcp_recvmsg"
+        | "tcp_recvmsg_locked"
+        | "sock_recvmsg"
+        | "sys_recvmsg"
+        | "unix_stream_read_generic"
+        | "unix_dgram_recvmsg"
+        | "inet_recvmsg"
+        | "skb_wait_for_more_packets"
+        | "skb_recv_datagram"
+        | "io_schedule"
+        | "bit_wait_io"
+        | "folio_wait_bit_common"
+        | "lock_page"
         | "wait_on_page_bit" => OffCpuReason::IoRead,
-        "pipe_write" | "tcp_sendmsg" | "tcp_sendmsg_locked" | "sock_sendmsg"
-        | "sys_sendmsg" | "sk_stream_wait_memory" => OffCpuReason::IoWrite,
-        "inet_csk_accept" | "inet_csk_wait_for_connect" | "inet_wait_for_connect"
+        "pipe_write"
+        | "tcp_sendmsg"
+        | "tcp_sendmsg_locked"
+        | "sock_sendmsg"
+        | "sys_sendmsg"
+        | "sk_stream_wait_memory" => OffCpuReason::IoWrite,
+        "inet_csk_accept"
+        | "inet_csk_wait_for_connect"
+        | "inet_wait_for_connect"
         | "inet_stream_connect" => OffCpuReason::ConnectionSetup,
-        "wait_for_completion" | "wait_for_completion_state"
-        | "wait_for_completion_timeout" | "pipe_wait" | "do_wait"
-        | "do_sigtimedwait" | "sigsuspend" | "worker_thread" | "kthread"
-        | "rescuer_thread" | "smpboot_thread_fn" | "kthread_worker_fn" => {
-            OffCpuReason::Idle
-        }
+        "wait_for_completion"
+        | "wait_for_completion_state"
+        | "wait_for_completion_timeout"
+        | "pipe_wait"
+        | "do_wait"
+        | "do_sigtimedwait"
+        | "sigsuspend"
+        | "worker_thread"
+        | "kthread"
+        | "rescuer_thread"
+        | "smpboot_thread_fn"
+        | "kthread_worker_fn" => OffCpuReason::Idle,
         _ => return None,
     })
 }
@@ -77,46 +116,63 @@ fn classify_linux_kernel(core: &str) -> Option<OffCpuReason> {
 fn classify_linux(core: &str) -> Option<OffCpuReason> {
     Some(match core {
         // Condition variables / futex park == "waiting for work".
-        "pthread_cond_wait" | "pthread_cond_timedwait" | "pthread_cond_wait64"
-        | "futex_wait" | "futex_abstimed_wait" | "futex_abstimed_wait_common"
-        | "futex_abstimed_wait_common64" | "futex_abstimed_wait_cancelable" => {
-            OffCpuReason::Idle
-        }
+        "pthread_cond_wait"
+        | "pthread_cond_timedwait"
+        | "pthread_cond_wait64"
+        | "futex_wait"
+        | "futex_abstimed_wait"
+        | "futex_abstimed_wait_common"
+        | "futex_abstimed_wait_common64"
+        | "futex_abstimed_wait_cancelable" => OffCpuReason::Idle,
         // Mutex / rwlock contention — the off-CPU you want to chase.
-        "lll_lock_wait" | "lll_lock_wait_private" | "pthread_mutex_lock"
-        | "pthread_mutex_timedlock" | "pthread_mutex_clocklock"
-        | "pthread_rwlock_rdlock" | "pthread_rwlock_wrlock"
-        | "pthread_rwlock_timedrdlock" | "pthread_rwlock_timedwrlock" => {
-            OffCpuReason::LockWait
-        }
+        "lll_lock_wait"
+        | "lll_lock_wait_private"
+        | "pthread_mutex_lock"
+        | "pthread_mutex_timedlock"
+        | "pthread_mutex_clocklock"
+        | "pthread_rwlock_rdlock"
+        | "pthread_rwlock_wrlock"
+        | "pthread_rwlock_timedrdlock"
+        | "pthread_rwlock_timedwrlock" => OffCpuReason::LockWait,
         // POSIX semaphores.
-        "sem_wait" | "sem_timedwait" | "sem_clockwait" | "new_sem_wait"
-        | "new_sem_wait_slow" | "new_sem_wait_slow64" => OffCpuReason::SemaphoreWait,
+        "sem_wait"
+        | "sem_timedwait"
+        | "sem_clockwait"
+        | "new_sem_wait"
+        | "new_sem_wait_slow"
+        | "new_sem_wait_slow64" => OffCpuReason::SemaphoreWait,
         // fd readiness multiplexing.
-        "epoll_wait" | "epoll_pwait" | "epoll_pwait2" | "epoll_wait_nocancel"
-        | "poll" | "ppoll" | "ppoll64" | "poll_nocancel" | "select"
-        | "pselect" | "pselect6" | "pselect32" | "select_nocancel" => {
-            OffCpuReason::Readiness
-        }
+        "epoll_wait"
+        | "epoll_pwait"
+        | "epoll_pwait2"
+        | "epoll_wait_nocancel"
+        | "poll"
+        | "ppoll"
+        | "ppoll64"
+        | "poll_nocancel"
+        | "select"
+        | "pselect"
+        | "pselect6"
+        | "pselect32"
+        | "select_nocancel" => OffCpuReason::Readiness,
         // Explicit sleeps.
-        "nanosleep" | "nanosleep64" | "nanosleep_nocancel" | "clock_nanosleep"
-        | "clock_nanosleep64" | "clock_nanosleep_time64" | "usleep" | "sleep" => {
-            OffCpuReason::Sleep
-        }
+        "nanosleep"
+        | "nanosleep64"
+        | "nanosleep_nocancel"
+        | "clock_nanosleep"
+        | "clock_nanosleep64"
+        | "clock_nanosleep_time64"
+        | "usleep"
+        | "sleep" => OffCpuReason::Sleep,
         // Blocking reads.
-        "read" | "read_nocancel" | "pread" | "pread64" | "preadv" | "preadv64"
-        | "readv" | "recv" | "recvfrom" | "recvmsg" | "recvmmsg" => {
-            OffCpuReason::IoRead
-        }
+        "read" | "read_nocancel" | "pread" | "pread64" | "preadv" | "preadv64" | "readv"
+        | "recv" | "recvfrom" | "recvmsg" | "recvmmsg" => OffCpuReason::IoRead,
         // Blocking writes.
-        "write" | "write_nocancel" | "pwrite" | "pwrite64" | "pwritev"
-        | "pwritev64" | "writev" | "send" | "sendto" | "sendmsg" | "sendmmsg" => {
-            OffCpuReason::IoWrite
-        }
+        "write" | "write_nocancel" | "pwrite" | "pwrite64" | "pwritev" | "pwritev64" | "writev"
+        | "send" | "sendto" | "sendmsg" | "sendmmsg" => OffCpuReason::IoWrite,
         // Connection / fd setup that can block.
-        "connect" | "connect_nocancel" | "accept" | "accept4" | "open"
-        | "open64" | "openat" | "openat64" | "open_nocancel"
-        | "openat_nocancel" => OffCpuReason::ConnectionSetup,
+        "connect" | "connect_nocancel" | "accept" | "accept4" | "open" | "open64" | "openat"
+        | "openat64" | "open_nocancel" | "openat_nocancel" => OffCpuReason::ConnectionSetup,
         _ => return None,
     })
 }
@@ -377,19 +433,13 @@ mod tests {
             classify_offcpu(Some("__new_sem_wait_slow64")),
             OffCpuReason::SemaphoreWait
         );
-        assert_eq!(
-            classify_offcpu(Some("epoll_wait")),
-            OffCpuReason::Readiness
-        );
+        assert_eq!(classify_offcpu(Some("epoll_wait")), OffCpuReason::Readiness);
         assert_eq!(
             classify_offcpu(Some("__GI___clock_nanosleep")),
             OffCpuReason::Sleep
         );
         // io split via decorated glibc names.
-        assert_eq!(
-            classify_offcpu(Some("__libc_recv")),
-            OffCpuReason::IoRead
-        );
+        assert_eq!(classify_offcpu(Some("__libc_recv")), OffCpuReason::IoRead);
         assert_eq!(classify_offcpu(Some("__sendmsg")), OffCpuReason::IoWrite);
         assert_eq!(
             classify_offcpu(Some("accept4")),

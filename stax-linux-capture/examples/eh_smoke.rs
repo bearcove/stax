@@ -17,8 +17,8 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use stax_linux_capture::{
-    BinaryLoadedEvent, BinaryUnloadedEvent, RecordOptions, SampleEvent, SampleSink, ThreadNameEvent,
-    WakeupEvent,
+    BinaryLoadedEvent, BinaryUnloadedEvent, RecordOptions, SampleEvent, SampleSink,
+    ThreadNameEvent, WakeupEvent,
 };
 use stax_mac_capture::sample_sink::CpuIntervalEvent;
 
@@ -73,9 +73,9 @@ fn main() -> eyre::Result<()> {
         )
         .init();
 
-    let prog = std::env::args().nth(1).ok_or_else(|| {
-        eyre::eyre!("usage: eh_smoke <path-to-test-binary>")
-    })?;
+    let prog = std::env::args()
+        .nth(1)
+        .ok_or_else(|| eyre::eyre!("usage: eh_smoke <path-to-test-binary>"))?;
     let secs: u64 = std::env::args()
         .nth(2)
         .and_then(|s| s.parse().ok())
@@ -83,7 +83,11 @@ fn main() -> eyre::Result<()> {
 
     println!("=== run #1: dwarf_unwind=false (kernel CALLCHAIN only) ===");
     let off = run_once(&prog, false, secs)?;
-    let off_mean = if off.samples == 0 { 0 } else { off.sum_depth / off.samples };
+    let off_mean = if off.samples == 0 {
+        0
+    } else {
+        off.sum_depth / off.samples
+    };
     println!(
         "  samples={} max_depth={} mean_depth={}",
         off.samples, off.max_depth, off_mean
@@ -91,7 +95,11 @@ fn main() -> eyre::Result<()> {
 
     println!("=== run #2: dwarf_unwind=true  (.eh_frame replay) ===");
     let on = run_once(&prog, true, secs)?;
-    let on_mean = if on.samples == 0 { 0 } else { on.sum_depth / on.samples };
+    let on_mean = if on.samples == 0 {
+        0
+    } else {
+        on.sum_depth / on.samples
+    };
     println!(
         "  samples={} max_depth={} mean_depth={}",
         on.samples, on.max_depth, on_mean

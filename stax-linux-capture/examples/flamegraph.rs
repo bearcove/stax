@@ -18,8 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use stax_linux_capture::{
-    BinaryLoadedEvent, BinaryUnloadedEvent, RecordOptions, SampleEvent, SampleSink,
-    ThreadNameEvent,
+    BinaryLoadedEvent, BinaryUnloadedEvent, RecordOptions, SampleEvent, SampleSink, ThreadNameEvent,
 };
 
 struct Image {
@@ -138,7 +137,10 @@ fn main() {
         duration: Some(Duration::from_secs(3)),
         kernel_stacks: true,
     };
-    println!("profiling pid {} for 3s @ {}Hz…", opts.pid, opts.frequency_hz);
+    println!(
+        "profiling pid {} for 3s @ {}Hz…",
+        opts.pid, opts.frequency_hz
+    );
 
     let mut f = Folder::default();
     let never = AtomicBool::new(false);
@@ -195,6 +197,9 @@ fn main() {
          symbolization or thread attribution is wrong"
     );
     let svg_len = std::fs::metadata(svg_path).map(|m| m.len()).unwrap_or(0);
-    assert!(svg_len > 4096, "flamegraph SVG looks empty ({svg_len} bytes)");
+    assert!(
+        svg_len > 4096,
+        "flamegraph SVG looks empty ({svg_len} bytes)"
+    );
     println!("\nOK: usable flamegraph profiler works on Linux ({svg_len} byte SVG).");
 }

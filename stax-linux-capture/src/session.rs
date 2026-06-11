@@ -13,13 +13,13 @@ use stax_mac_capture::{
 use staxd_proto::WakingFieldOffsets;
 use tracing::{debug, info, warn};
 
-use crate::sys::{
-    PERF_CONTEXT_KERNEL, PERF_CONTEXT_MAX, PERF_CONTEXT_USER, PerfRing, PerfRingKind, PmuGroup,
-    PmuKind, online_cpus, open_cpu, open_cpu_pmu_siblings, open_cpu_switch, open_cpu_waking,
-    read_sched_waking_tracepoint,
-};
 #[cfg(target_arch = "x86_64")]
 use crate::sys::PERF_SAMPLE_REGS_ABI_64;
+use crate::sys::{
+    online_cpus, open_cpu, open_cpu_pmu_siblings, open_cpu_switch, open_cpu_waking,
+    read_sched_waking_tracepoint, PerfRing, PerfRingKind, PmuGroup, PmuKind, PERF_CONTEXT_KERNEL,
+    PERF_CONTEXT_MAX, PERF_CONTEXT_USER,
+};
 use crate::{RecordOptions, RecordSummary};
 
 // perf_event.h record types we handle.
@@ -288,7 +288,11 @@ impl Session<'_> {
                 let ip = c.u64().unwrap_or(0);
                 let stack_size = c.u64().unwrap_or(0) as usize;
                 let stack = c.bytes(stack_size);
-                let dyn_size = if stack_size != 0 { c.u64().unwrap_or(0) as usize } else { 0 };
+                let dyn_size = if stack_size != 0 {
+                    c.u64().unwrap_or(0) as usize
+                } else {
+                    0
+                };
                 if let (Some(stack), Some(uw)) = (stack, self.dwarf.as_mut()) {
                     let filled = dyn_size.min(stack.len());
                     if filled >= 16 && ip != 0 && sp != 0 {
@@ -369,8 +373,7 @@ impl Session<'_> {
         // stack" model). Skip in-kernel samples with no user frames so
         // we don't clobber a good stack with an empty one.
         if !user.is_empty() {
-            self.last_user_stack
-                .insert(tid, user.into_boxed_slice());
+            self.last_user_stack.insert(tid, user.into_boxed_slice());
         }
     }
 
@@ -447,8 +450,7 @@ impl Session<'_> {
                         waker_user_stack,
                     },
                 });
-                self.summary.off_cpu_intervals =
-                    self.summary.off_cpu_intervals.saturating_add(1);
+                self.summary.off_cpu_intervals = self.summary.off_cpu_intervals.saturating_add(1);
             }
         }
     }
@@ -573,8 +575,7 @@ impl Session<'_> {
                         waker_user_stack: None,
                     },
                 });
-                self.summary.off_cpu_intervals =
-                    self.summary.off_cpu_intervals.saturating_add(1);
+                self.summary.off_cpu_intervals = self.summary.off_cpu_intervals.saturating_add(1);
             }
         }
     }

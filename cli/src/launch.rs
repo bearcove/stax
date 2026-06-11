@@ -82,8 +82,7 @@ impl Launched {
     /// running, or start_attach failing after spawn).
     pub fn terminate(&self) {
         let mut status = 0;
-        let r =
-            unsafe { libc::waitpid(self.pid as libc::pid_t, &mut status, libc::WNOHANG) };
+        let r = unsafe { libc::waitpid(self.pid as libc::pid_t, &mut status, libc::WNOHANG) };
         if r == self.pid as libc::pid_t {
             return;
         }
@@ -131,10 +130,7 @@ pub fn posix_spawn_suspended(
         .map(|s| CString::new(s.as_str()))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "argv has NUL"))?;
-    let mut argv_p: Vec<*mut c_char> = argv_c
-        .iter()
-        .map(|c| c.as_ptr() as *mut c_char)
-        .collect();
+    let mut argv_p: Vec<*mut c_char> = argv_c.iter().map(|c| c.as_ptr() as *mut c_char).collect();
     argv_p.push(ptr::null_mut());
 
     let (master_fd, slave_fd) = open_pty(terminal_size)?;
@@ -142,7 +138,10 @@ pub fn posix_spawn_suspended(
     let mut attr: libc::posix_spawnattr_t = ptr::null_mut();
     let r = unsafe { libc::posix_spawnattr_init(&mut attr) };
     if r != 0 {
-        unsafe { libc::close(master_fd); libc::close(slave_fd) };
+        unsafe {
+            libc::close(master_fd);
+            libc::close(slave_fd)
+        };
         return Err(std::io::Error::from_raw_os_error(r));
     }
     let flags = libc::POSIX_SPAWN_START_SUSPENDED | libc::POSIX_SPAWN_SETSIGDEF;
@@ -357,11 +356,7 @@ impl PtyPump {
                         let mut off = 0;
                         while off < n {
                             let w = unsafe {
-                                libc::write(
-                                    writer_master,
-                                    buf[off..n].as_ptr().cast(),
-                                    n - off,
-                                )
+                                libc::write(writer_master, buf[off..n].as_ptr().cast(), n - off)
                             };
                             if w <= 0 {
                                 let err = std::io::Error::last_os_error();

@@ -79,7 +79,11 @@ fn spans_to_tokens(text: &str, mut spans: Vec<Span>) -> Vec<Token> {
 
     // Sort by start, then by pattern_index descending so the higher-
     // priority span comes first when ranges overlap.
-    spans.sort_by(|a, b| a.start.cmp(&b.start).then(b.pattern_index.cmp(&a.pattern_index)));
+    spans.sort_by(|a, b| {
+        a.start
+            .cmp(&b.start)
+            .then(b.pattern_index.cmp(&a.pattern_index))
+    });
 
     // Walk left-to-right, keeping a cursor into `text`. For each span:
     // emit a Plain run for any uncovered bytes before it; emit the

@@ -11,9 +11,9 @@ use parking_lot::RwLock;
 
 use stax_live_proto::{
     AnnotatedLine, AnnotatedView, CfgUpdate, FlameNode, FlamegraphUpdate, IntervalEntry,
-    IntervalListUpdate, LiveFilter, NeighborsUpdate, PetSampleEntry, PetSampleListUpdate,
-    Profiler, ThreadInfo, ThreadsUpdate, TimelineBucket, TimelineUpdate, TopEntry, TopSort,
-    TopUpdate, ViewParams,
+    IntervalListUpdate, LiveFilter, NeighborsUpdate, PetSampleEntry, PetSampleListUpdate, Profiler,
+    ThreadInfo, ThreadsUpdate, TimelineBucket, TimelineUpdate, TopEntry, TopSort, TopUpdate,
+    ViewParams,
 };
 
 use crate::aggregator::{Aggregation, EventCtx, OffCpuBreakdown, PmcAccum, StackNode};

@@ -9,7 +9,7 @@ use std::io::Read;
 use std::ops::Range;
 
 use object::read::elf::{ElfFile64, FileHeader, ProgramHeader};
-use object::{Object, ObjectSection, ObjectSymbol, ObjectKind};
+use object::{Object, ObjectKind, ObjectSection, ObjectSymbol};
 use stax_mac_capture::proc_maps::MachOSymbol;
 
 /// One executable `PT_LOAD` segment: enough to map a file offset back
@@ -249,12 +249,7 @@ pub fn load_separate_debug_by_build_id(build_id_full: &[u8]) -> Option<Vec<MachO
         return None;
     }
     let hex = hex_lower(build_id_full);
-    let path = format!(
-        "{}/{}/{}.debug",
-        DEBUG_BUILD_ID_ROOT,
-        &hex[..2],
-        &hex[2..]
-    );
+    let path = format!("{}/{}/{}.debug", DEBUG_BUILD_ID_ROOT, &hex[..2], &hex[2..]);
     let bytes = std::fs::read(&path).ok()?;
     let file: ElfFile64 = ElfFile64::parse(&*bytes).ok()?;
     Some(extract_symbols(&file))
@@ -306,7 +301,9 @@ impl DebuginfodConfig {
                 if p.extension().and_then(|e| e.to_str()) != Some("urls") {
                     continue;
                 }
-                let Ok(s) = std::fs::read_to_string(&p) else { continue };
+                let Ok(s) = std::fs::read_to_string(&p) else {
+                    continue;
+                };
                 for line in s.lines() {
                     let line = line.trim();
                     if line.is_empty() || line.starts_with('#') {
@@ -329,7 +326,9 @@ impl DebuginfodConfig {
         // matches so a future opt-in is mechanical).
         let cache_root = std::env::var_os("XDG_CACHE_HOME")
             .map(std::path::PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache")))
+            .or_else(|| {
+                std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache"))
+            })
             .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
         let cache_dir = cache_root.join("stax").join("debuginfod");
 
@@ -343,7 +342,9 @@ impl DebuginfodConfig {
     /// Cache path for a given build-id hex. The shape mirrors
     /// `/usr/lib/debug/.build-id/`.
     fn cache_path(&self, hex: &str, suffix: &str) -> std::path::PathBuf {
-        self.cache_dir.join(&hex[..2]).join(format!("{}{suffix}", &hex[2..]))
+        self.cache_dir
+            .join(&hex[..2])
+            .join(format!("{}{suffix}", &hex[2..]))
     }
 }
 
@@ -361,10 +362,7 @@ impl DebuginfodConfig {
 /// Per-request timeout comes from [`DebuginfodConfig::timeout`]; on
 /// most programs the per-process image loads happen at process start
 /// so the latency is paid once, up front.
-pub fn debuginfod_fetch(
-    cfg: &DebuginfodConfig,
-    build_id_full: &[u8],
-) -> Option<Vec<MachOSymbol>> {
+pub fn debuginfod_fetch(cfg: &DebuginfodConfig, build_id_full: &[u8]) -> Option<Vec<MachOSymbol>> {
     if cfg.urls.is_empty() || build_id_full.len() < 2 {
         return None;
     }
@@ -389,10 +387,7 @@ pub fn debuginfod_fetch(
         .user_agent(concat!("stax/", env!("CARGO_PKG_VERSION")))
         .build();
     for base in &cfg.urls {
-        let url = format!(
-            "{}/buildid/{hex}/debuginfo",
-            base.trim_end_matches('/')
-        );
+        let url = format!("{}/buildid/{hex}/debuginfo", base.trim_end_matches('/'));
         let resp = match agent.get(&url).call() {
             Ok(r) => r,
             Err(e) => {

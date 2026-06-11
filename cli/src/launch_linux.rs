@@ -52,8 +52,7 @@ impl LinuxLaunched {
             return Ok(()); // already resumed
         }
         let byte: u8 = 1;
-        let n =
-            unsafe { libc::write(self.go_write, &byte as *const u8 as *const _, 1) };
+        let n = unsafe { libc::write(self.go_write, &byte as *const u8 as *const _, 1) };
         // Closing also unblocks the child (EOF), so we keep going
         // even if the write was short — the child sees the pipe go
         // away and falls through to exec.
@@ -69,8 +68,7 @@ impl LinuxLaunched {
     /// exited — `waitpid` with `WNOHANG` short-circuits.
     pub fn terminate(&self) {
         let mut status = 0;
-        let r =
-            unsafe { libc::waitpid(self.pid as libc::pid_t, &mut status, libc::WNOHANG) };
+        let r = unsafe { libc::waitpid(self.pid as libc::pid_t, &mut status, libc::WNOHANG) };
         if r == self.pid as libc::pid_t {
             return;
         }
@@ -109,8 +107,7 @@ pub fn fork_suspended(argv: &[String]) -> io::Result<LinuxLaunched> {
         .map(|s| CString::new(s.as_str()))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "argv has NUL"))?;
-    let mut argv_p: Vec<*const libc::c_char> =
-        argv_c.iter().map(|c| c.as_ptr()).collect();
+    let mut argv_p: Vec<*const libc::c_char> = argv_c.iter().map(|c| c.as_ptr()).collect();
     argv_p.push(ptr::null());
 
     // CLOEXEC on both ends: read_end vanishes on exec (the whole
@@ -157,7 +154,10 @@ pub fn fork_suspended(argv: &[String]) -> io::Result<LinuxLaunched> {
         // execvp searches PATH for argv[0]. The read_end is CLOEXEC, so
         // it disappears as part of execve's atomic fd cleanup.
         unsafe {
-            libc::execvp(program.as_ptr(), argv_p.as_ptr() as *const *const libc::c_char);
+            libc::execvp(
+                program.as_ptr(),
+                argv_p.as_ptr() as *const *const libc::c_char,
+            );
         }
         // execvp only returns on error.
         let errno = unsafe { *libc::__errno_location() };
@@ -198,8 +198,7 @@ mod tests {
     fn child_pauses_until_resume() {
         // Use a target whose comm differs from ours so the transition
         // is unambiguous. `/usr/bin/true` is `true`.
-        let mut launched =
-            fork_suspended(&["/usr/bin/true".to_string()]).expect("fork");
+        let mut launched = fork_suspended(&["/usr/bin/true".to_string()]).expect("fork");
         let pid = launched.pid;
 
         // Child should be alive but pre-exec. `comm` is the executable
@@ -207,10 +206,7 @@ mod tests {
         // until exec). We assert it's NOT "true" yet.
         std::thread::sleep(std::time::Duration::from_millis(50));
         let pre = read_comm(pid).expect("child must exist pre-resume");
-        assert_ne!(
-            pre, "true",
-            "child execvp'd before resume() (comm={pre})"
-        );
+        assert_ne!(pre, "true", "child execvp'd before resume() (comm={pre})");
 
         launched.resume().expect("resume");
 
@@ -237,8 +233,7 @@ mod tests {
     /// child stuck — the closing of `go_write` is the EOF signal.
     #[test]
     fn drop_unblocks_child() {
-        let launched =
-            fork_suspended(&["/usr/bin/true".to_string()]).expect("fork");
+        let launched = fork_suspended(&["/usr/bin/true".to_string()]).expect("fork");
         let pid = launched.pid;
         drop(launched);
 

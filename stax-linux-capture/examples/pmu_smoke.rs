@@ -120,11 +120,7 @@ fn main() {
             // Linux portable counters report retired vs. total cycles,
             // so IPC = instructions / cycles is meaningful.
             let ipc_x1000 = (sink.instructions * 1000) / sink.cycles;
-            println!(
-                "  IPC ≈ {}.{:03}",
-                ipc_x1000 / 1000,
-                ipc_x1000 % 1000
-            );
+            println!("  IPC ≈ {}.{:03}", ipc_x1000 / 1000, ipc_x1000 % 1000);
         }
     }
 }

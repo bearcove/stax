@@ -173,7 +173,6 @@ impl ImageScanner {
             );
         }
     }
-
 }
 
 /// Try the on-disk Mach-O at `path` first; fall back to the

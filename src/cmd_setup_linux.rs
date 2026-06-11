@@ -132,7 +132,8 @@ Press Enter to continue, or Ctrl-C to cancel."#,
     fs::set_permissions(BINARY_INSTALL_PATH, fs::Permissions::from_mode(0o755))?;
 
     println!(":: writing systemd unit -> {UNIT_PATH}");
-    fs::write(UNIT_PATH, STAXD_SYSTEMD_UNIT).map_err(|err| format!("writing {UNIT_PATH}: {err}"))?;
+    fs::write(UNIT_PATH, STAXD_SYSTEMD_UNIT)
+        .map_err(|err| format!("writing {UNIT_PATH}: {err}"))?;
     fs::set_permissions(UNIT_PATH, fs::Permissions::from_mode(0o644))?;
 
     println!(":: systemctl daemon-reload");

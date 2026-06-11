@@ -16,7 +16,7 @@ use std::sync::atomic::AtomicBool;
 use eyre::Context;
 use staxd_proto::{PerfSessionConfig, StaxdLinuxClient};
 
-use crate::sys::{PerfRing, PerfRingKind, PmuGroup, PmuKind, PmuMember, ring_from_fd};
+use crate::sys::{ring_from_fd, PerfRing, PerfRingKind, PmuGroup, PmuKind, PmuMember};
 use crate::{RecordOptions, RecordSummary};
 
 /// Connect to the privileged staxd at `daemon_socket`, ask it to
@@ -83,9 +83,9 @@ pub async fn record_via_daemon(
     // reply), so the daemon is out of the picture from here.
     let mut rings: Vec<PerfRing> = Vec::with_capacity(session.sampling.len());
     for (cpu, fd) in session.sampling.into_iter().enumerate() {
-        let owned = fd
-            .into_owned_fd()
-            .ok_or_else(|| eyre::eyre!("staxd sent a sampling Fd with no descriptor (cpu {cpu})"))?;
+        let owned = fd.into_owned_fd().ok_or_else(|| {
+            eyre::eyre!("staxd sent a sampling Fd with no descriptor (cpu {cpu})")
+        })?;
         rings.push(
             ring_from_fd(owned, PerfRingKind::Sampling)
                 .with_context(|| format!("mmap sampling ring cpu {cpu}"))?,
@@ -142,11 +142,9 @@ pub async fn record_via_daemon(
             let mut siblings = Vec::with_capacity(per_cpu);
             for slot in 0..per_cpu {
                 let id = id_iter.next().unwrap();
-                let fd = fd_iter
-                    .next()
-                    .unwrap()
-                    .into_owned_fd()
-                    .ok_or_else(|| eyre::eyre!("staxd sent a PMU Fd with no descriptor (cpu {cpu})"))?;
+                let fd = fd_iter.next().unwrap().into_owned_fd().ok_or_else(|| {
+                    eyre::eyre!("staxd sent a PMU Fd with no descriptor (cpu {cpu})")
+                })?;
                 let kind = KINDS[slot];
                 pmu.id_to_kind.insert(id, kind);
                 siblings.push(PmuMember { kind, id, fd });

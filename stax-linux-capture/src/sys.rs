@@ -12,7 +12,7 @@ use std::io;
 use std::mem;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::ptr;
-use std::sync::atomic::{Ordering, fence};
+use std::sync::atomic::{fence, Ordering};
 
 use perf_event_open_sys as pe;
 use staxd_proto::WakingFieldOffsets;
@@ -138,8 +138,8 @@ fn sampling_attr(
         | pe::bindings::PERF_SAMPLE_CALLCHAIN) as u64;
     #[cfg(target_arch = "x86_64")]
     if dwarf_unwind {
-        sample_type |= (pe::bindings::PERF_SAMPLE_REGS_USER
-            | pe::bindings::PERF_SAMPLE_STACK_USER) as u64;
+        sample_type |=
+            (pe::bindings::PERF_SAMPLE_REGS_USER | pe::bindings::PERF_SAMPLE_STACK_USER) as u64;
         attr.sample_regs_user = DWARF_USER_REGS_MASK;
         attr.sample_stack_user = DWARF_USER_STACK_SIZE;
     }
@@ -238,10 +238,7 @@ fn map_ring(fd: RawFd, kind: PerfRingKind) -> io::Result<PerfRing> {
 /// event for `attr` (system-wide: `pid = -1`, `cpu = N`, no group,
 /// cloexec) and hand back the owned descriptor. No mmap — the caller
 /// (or, across the staxd fd broker, the unprivileged peer) maps it.
-fn perf_event_open_cpu(
-    attr: &mut pe::bindings::perf_event_attr,
-    cpu: u32,
-) -> io::Result<OwnedFd> {
+fn perf_event_open_cpu(attr: &mut pe::bindings::perf_event_attr, cpu: u32) -> io::Result<OwnedFd> {
     // SAFETY: FFI; attr is a valid initialized struct, fd args follow
     // the perf_event_open contract (pid=-1, cpu=N, no group, cloexec).
     let fd = unsafe {
@@ -284,7 +281,10 @@ pub fn open_cpu_fd(
     kernel_stacks: bool,
     dwarf_unwind: bool,
 ) -> io::Result<OwnedFd> {
-    perf_event_open_cpu(&mut sampling_attr(freq_hz, kernel_stacks, dwarf_unwind), cpu)
+    perf_event_open_cpu(
+        &mut sampling_attr(freq_hz, kernel_stacks, dwarf_unwind),
+        cpu,
+    )
 }
 
 /// `perf_event_open` one **context-switch** (off-CPU) event on `cpu`,
@@ -337,11 +337,7 @@ pub fn open_cpu_waking_fd(
 /// Open + mmap one waking ring on `cpu` (in-process fallback when
 /// the host's `perf_event_paranoid` permits it and tracefs is
 /// readable; the broker is the locked-down-host path).
-pub fn open_cpu_waking(
-    cpu: u32,
-    tracepoint_id: u64,
-    kernel_stacks: bool,
-) -> io::Result<PerfRing> {
+pub fn open_cpu_waking(cpu: u32, tracepoint_id: u64, kernel_stacks: bool) -> io::Result<PerfRing> {
     open_ring(
         &mut waking_attr(tracepoint_id, kernel_stacks),
         cpu,
@@ -464,8 +460,7 @@ impl PerfRing {
         // sampling ring is — PMU siblings attach to it), all siblings
         // start together. Harmless no-op when there is no group.
         // SAFETY: ioctl on our own perf fd.
-        let rc =
-            unsafe { pe::ioctls::ENABLE(self.fd, pe::bindings::PERF_IOC_FLAG_GROUP) };
+        let rc = unsafe { pe::ioctls::ENABLE(self.fd, pe::bindings::PERF_IOC_FLAG_GROUP) };
         if rc < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -643,7 +638,11 @@ pub fn open_cpu_pmu_siblings(
             pe::bindings::PERF_TYPE_HARDWARE,
             pe::bindings::PERF_COUNT_HW_INSTRUCTIONS as u64,
         ),
-        (PmuKind::L1dMisses, pe::bindings::PERF_TYPE_HW_CACHE, l1d_read_miss),
+        (
+            PmuKind::L1dMisses,
+            pe::bindings::PERF_TYPE_HW_CACHE,
+            l1d_read_miss,
+        ),
         (
             PmuKind::BranchMisses,
             pe::bindings::PERF_TYPE_HARDWARE,
@@ -662,8 +661,7 @@ pub fn open_cpu_pmu_siblings(
         // block matches; same kernel/HV exclusion as the leader's
         // callchain mask so the group is permissible (the kernel
         // refuses to group events with incompatible exclude flags).
-        attr.read_format =
-            (pe::bindings::PERF_FORMAT_GROUP | pe::bindings::PERF_FORMAT_ID) as u64;
+        attr.read_format = (pe::bindings::PERF_FORMAT_GROUP | pe::bindings::PERF_FORMAT_ID) as u64;
         attr.set_disabled(1);
         attr.set_exclude_kernel(if kernel_stacks { 0 } else { 1 });
         attr.set_exclude_hv(1);

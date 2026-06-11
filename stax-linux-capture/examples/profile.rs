@@ -14,8 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use stax_linux_capture::{
-    BinaryLoadedEvent, BinaryUnloadedEvent, RecordOptions, SampleEvent, SampleSink,
-    ThreadNameEvent,
+    BinaryLoadedEvent, BinaryUnloadedEvent, RecordOptions, SampleEvent, SampleSink, ThreadNameEvent,
 };
 
 struct Image {
@@ -43,10 +42,7 @@ impl Collector {
             if pc >= img.base_avma && pc < img.base_avma + img.vmsize.max(1) {
                 let svma = pc.wrapping_sub(img.base_avma).wrapping_add(img.text_svma);
                 // binary search the sorted symbol table
-                let idx = img
-                    .symbols
-                    .partition_point(|s| s.0 <= svma)
-                    .wrapping_sub(1);
+                let idx = img.symbols.partition_point(|s| s.0 <= svma).wrapping_sub(1);
                 if let Some((s, e, name)) = img.symbols.get(idx) {
                     if svma >= *s && svma < *e {
                         let short = img.path.rsplit('/').next().unwrap_or(&img.path);
@@ -123,7 +119,9 @@ fn main() {
             let mut x: u64 = 1;
             while !w_stop.load(Ordering::Relaxed) {
                 for _ in 0..200_000 {
-                    x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    x = x
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
                 }
                 w_acc.fetch_add(x & 1, Ordering::Relaxed);
             }
@@ -136,7 +134,10 @@ fn main() {
         duration: Some(Duration::from_secs(2)),
         kernel_stacks: true,
     };
-    println!("profiling self (pid {}) for 2s @ {}Hz…", opts.pid, opts.frequency_hz);
+    println!(
+        "profiling self (pid {}) for 2s @ {}Hz…",
+        opts.pid, opts.frequency_hz
+    );
 
     let mut col = Collector::default();
     let never = AtomicBool::new(false);
@@ -166,8 +167,14 @@ fn main() {
         println!("{n:6}  {name}");
     }
 
-    assert!(summary.samples > 0, "captured zero samples — capture broken");
-    assert!(col.user_frames > 0, "no user stack frames — callchain broken");
+    assert!(
+        summary.samples > 0,
+        "captured zero samples — capture broken"
+    );
+    assert!(
+        col.user_frames > 0,
+        "no user stack frames — callchain broken"
+    );
     assert!(summary.binaries > 0, "no images — MMAP2/ELF path broken");
     println!("\nOK: capture + symbolization spine works on Linux.");
 }
