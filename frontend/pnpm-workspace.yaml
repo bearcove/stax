@@ -3,8 +3,9 @@
 allowBuilds:
   esbuild: true
 minimumReleaseAgeExclude:
-  - '@bearcove/vox-core@0.5.1'
-  - '@bearcove/vox-postcard@0.5.1'
-  - '@bearcove/vox-tcp@0.5.1'
-  - '@bearcove/vox-wire@0.5.1'
-  - '@bearcove/vox-ws@0.5.1'
+  - '@bearcove/phon-engine@0.2.0-rc.0'
+  - '@bearcove/phon-schema@0.2.0-rc.0'
+  - '@bearcove/vox-core@0.9.0-rc.0'
+  - '@bearcove/vox-tcp@0.9.0-rc.0'
+  - '@bearcove/vox-wire@0.9.0-rc.0'
+  - '@bearcove/vox-ws@0.9.0-rc.0'

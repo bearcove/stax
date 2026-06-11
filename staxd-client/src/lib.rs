@@ -12,7 +12,7 @@
 #![cfg(target_os = "macos")]
 
 use std::sync::{
-    Arc, OnceLock,
+    Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
@@ -319,7 +319,6 @@ where
         // should_stop / duration even on idle targets; no work
         // happens here.
         let recv_timeout = Duration::from_millis(50);
-        let recv_started = Instant::now();
         let batch_sref = match tokio::time::timeout(recv_timeout, rx.recv()).await {
             Ok(Ok(Some(value))) => value,
             Ok(Ok(None)) => {
@@ -333,10 +332,8 @@ where
             Err(_) => continue,
         };
 
-        let batch_handle_started = Instant::now();
         let client_received_mach_ticks = mach_ticks_now();
         let client_received_unix_ns = unix_ns_now();
-        let sref_map_started = Instant::now();
         let _ = batch_sref.map(|batch| {
             if !seen_first_batch {
                 seen_first_batch = true;
@@ -376,7 +373,6 @@ where
             }
             total_drained += batch.records.len() as u64;
             let records = Arc::new(batch.records);
-            let scanner_enqueue_started = Instant::now();
             scanner_queue.enqueue_batch(ProbeScannerBatch {
                 records: records.clone(),
                 timing: KperfProbeTriggerTiming {
@@ -389,7 +385,6 @@ where
                 },
             });
 
-            let parser_enqueue_started = Instant::now();
             parser_queue.enqueue_records(records);
 
         });
@@ -421,7 +416,7 @@ where
             warn!("staxd-client: daemon returned error: {e:?}");
             let _ = scanner_handle.join();
             let _ = join_worker_with_deadline(worker_handle, abort_worker_backlog).await;
-            return Err(Error::Rpc(e));
+            return Err(Error::Rpc(*e));
         }
         Err(e) => {
             let _ = scanner_handle.join();
@@ -1038,26 +1033,4 @@ fn unix_ns_now() -> u64 {
 #[inline]
 fn mach_ticks_now() -> u64 {
     unsafe { mach_absolute_time() }
-}
-
-fn elapsed_ticks_to_ns(later: u64, earlier: u64) -> u64 {
-    if later <= earlier {
-        return 0;
-    }
-    let (numer, denom) = mach_timebase_numer_denom();
-    (((later - earlier) as u128) * u128::from(numer) / u128::from(denom)).min(u128::from(u64::MAX))
-        as u64
-}
-
-fn mach_timebase_numer_denom() -> (u32, u32) {
-    static TIMEBASE: OnceLock<(u32, u32)> = OnceLock::new();
-    *TIMEBASE.get_or_init(|| {
-        let mut info = mach2::mach_time::mach_timebase_info { numer: 0, denom: 0 };
-        let rc = unsafe { mach2::mach_time::mach_timebase_info(&mut info) };
-        if rc == 0 && info.numer != 0 && info.denom != 0 {
-            (info.numer, info.denom)
-        } else {
-            (1, 1)
-        }
-    })
 }

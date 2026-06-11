@@ -8,5 +8,5 @@ description = "Dev-only entrypoints (cargo xtask install, ...)."
 
 [dependencies]
 stax-live-proto = { path = "../stax-live-proto" }
-vox-codegen = "0.7"
+vox-codegen = "0.9.0-rc.0"
 libc = "0.2"

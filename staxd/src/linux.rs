@@ -83,19 +83,18 @@ pub async fn main() -> Result<()> {
             .with_context(|| format!("removing stale socket {}", socket_path.display()))?;
     }
 
-    let listener = vox::transport::local::LocalLinkAcceptor::bind(
-        socket_path.to_string_lossy().into_owned(),
-    )
-    .with_context(|| format!("binding {}", socket_path.display()))?;
+    let listener =
+        vox::transport::local::LocalLinkAcceptor::bind(socket_path.to_string_lossy().into_owned())
+            .with_context(|| format!("binding {}", socket_path.display()))?;
     // Permissive perms for hand-running; the systemd deployment can
     // tighten ownership/perms on the socket directory.
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o666));
     info!("staxd listening on local://{}", socket_path.display());
 
-    // Inline accept loop (mirrors macOS) so we can pass
-    // `.non_resumable()`: the peer is a process; when it exits the
-    // session should end, not enter resumable recovery.
+    // Inline accept loop (mirrors macOS): the peer is a process; when
+    // it exits the session should end. Vox 0.9 removed resumable
+    // sessions, so this is the default stack-wide behavior now.
     let serve = tokio::spawn(async move {
         loop {
             let link = match listener.accept().await {
@@ -112,7 +111,6 @@ pub async fn main() -> Result<()> {
                         "staxd",
                         "staxd-linux",
                     ))
-                    .non_resumable()
                     .keepalive(vox::SessionKeepaliveConfig {
                         ping_interval: Duration::from_secs(5),
                         pong_timeout: Duration::from_secs(30),
@@ -263,11 +261,8 @@ impl StaxdLinux for LinuxStaxd {
                     let mut fds: Vec<vox::Fd> = Vec::with_capacity(cpus.len());
                     let mut failed = false;
                     for &cpu in &cpus {
-                        match stax_linux_capture::open_cpu_waking_fd(
-                            cpu,
-                            id,
-                            config.kernel_stacks,
-                        ) {
+                        match stax_linux_capture::open_cpu_waking_fd(cpu, id, config.kernel_stacks)
+                        {
                             Ok(fd) => fds.push(vox::Fd::new(fd)),
                             Err(e) => {
                                 warn!(%e, cpu, "sched_waking open failed; wakeup attribution disabled");
@@ -276,7 +271,11 @@ impl StaxdLinux for LinuxStaxd {
                             }
                         }
                     }
-                    if failed { (Vec::new(), None) } else { (fds, Some(offsets)) }
+                    if failed {
+                        (Vec::new(), None)
+                    } else {
+                        (fds, Some(offsets))
+                    }
                 }
                 Err(e) => {
                     warn!(%e, "reading sched_waking tracepoint id/format failed; wakeups disabled");

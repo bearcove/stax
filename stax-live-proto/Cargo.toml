@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 description = "Schema for the stax live RPC service. Lightweight crate consumed by both the runtime (stax-live) and the codegen (xtask)."
 
 [dependencies]
-facet = { version = "0.46", features = ["camino", "reflect"] }
-vox = { version = "0.7", default-features = false, features = [
+facet = { version = "0.50.0-rc.0", features = ["camino", "reflect"] }
+vox = { version = "0.9.0-rc.0", default-features = false, features = [
   "runtime",
 ] }

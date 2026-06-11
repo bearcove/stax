@@ -103,7 +103,7 @@ fn build_factory(server: ServerState) -> impl vox::ConnectionAcceptor + 'static 
     vox::acceptor_fn(
         move |request: &vox::ConnectionRequest,
               connection: vox::PendingConnection|
-              -> Result<(), vox::Metadata<'static>> {
+              -> Result<(), vox::Metadata> {
             match request.service() {
                 "RunControl" => {
                     connection.handle_with(RunControlDispatcher::new(server.clone()));
@@ -115,7 +115,7 @@ fn build_factory(server: ServerState) -> impl vox::ConnectionAcceptor + 'static 
                 }
                 other => {
                     tracing::warn!("stax-server: rejecting unknown service {other:?}");
-                    Err(vec![])
+                    Err(vox::Metadata::default())
                 }
             }
         },
@@ -129,7 +129,6 @@ fn spawn_session_local(server: ServerState, link: vox::transport::local::LocalLi
         let result = vox::acceptor_on(link)
             .channel_capacity(STAX_SERVER_CHANNEL_CAPACITY)
             .observer(observer)
-            .non_resumable()
             .keepalive(vox::SessionKeepaliveConfig {
                 ping_interval: std::time::Duration::from_secs(5),
                 pong_timeout: std::time::Duration::from_secs(30),
@@ -285,12 +284,7 @@ impl ServerState {
     /// Record an in-process target-attached event. Sets the
     /// `RunSummary::target_pid` and registers the pid with the
     /// binary registry. `task_port` is `0` on the staxd path.
-    pub(crate) fn apply_target_attached_in_process(
-        &self,
-        run_id: RunId,
-        pid: u32,
-        task_port: u64,
-    ) {
+    pub(crate) fn apply_target_attached_in_process(&self, run_id: RunId, pid: u32, task_port: u64) {
         {
             let mut inner = self.inner.lock();
             let Some(active) = inner.active.as_mut() else {
