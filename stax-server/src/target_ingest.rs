@@ -10,14 +10,12 @@
 //! - each `(pid, lane)` becomes a **synthetic thread**: a pseudo-tid in
 //!   a high range no real thread occupies, named after the lane, so the
 //!   threads/timeline views show "GPU tq1s" next to real threads;
-//! - each distinct span name becomes a **synthetic symbol** inside a
-//!   synthetic binary at a base address no real image occupies, so
-//!   top/flame group and label by kernel name;
-//! - each span is decomposed into **synthesized PET samples** at
-//!   `SYNTH_PERIOD_NS` across `[start, end)` — exactly the evidence the
-//!   sampler would have produced had the lane been a thread executing a
-//!   function with the span's name. Duration weighting in every view
-//!   follows for free.
+//! - each lane and each distinct span name becomes a **synthetic
+//!   symbol** inside a synthetic binary at a base address no real image
+//!   occupies, so flame can render `lane -> span name`;
+//! - each span records one sample marker plus one attributed synthetic
+//!   execution interval over `[start, end)`. The sample count is the
+//!   span count; the credited time is the exact sum of span durations.
 //!
 //! Timestamps arrive as absolute mach-derived nanoseconds (Apple
 //! Silicon GPU timestamps share mach_absolute_time's epoch and rate),
@@ -25,7 +23,7 @@
 
 use std::collections::HashMap;
 
-use stax_live::{LiveSymbolOwned, LoadedBinary, PmuSample};
+use stax_live::{IntervalKind, LiveSymbolOwned, LoadedBinary, PmuSample};
 use stax_live_proto::{TargetIngest, TargetSpanBatch};
 
 use crate::ServerState;
@@ -43,26 +41,31 @@ const SYNTH_BINARY_BASE_AVMA: u64 = 0xFFFF_0000_0000;
 /// Each span name owns one 16-byte synthetic "function".
 const SYNTH_SYMBOL_STRIDE: u64 = 16;
 
-/// Synthesized-sample period: one sample per millisecond of span time.
-/// Matches the order of magnitude of the real PET timer so lane weights
-/// are comparable with CPU threads in top/flame.
-const SYNTH_PERIOD_NS: u64 = 1_000_000;
-
-/// Cap on samples synthesized from one span — a misreported span (e.g.
-/// a stuck end timestamp) must not flood the aggregator.
-const SYNTH_SAMPLES_PER_SPAN_CAP: u64 = 16_384;
-
 #[derive(Default)]
 pub(crate) struct TargetLaneRegistry {
     /// (pid, lane) → synthetic tid.
     lane_tids: HashMap<(u32, String), u32>,
-    /// span name → synthetic symbol AVMA.
-    symbol_addrs: HashMap<String, u64>,
+    /// lane/span symbol → synthetic symbol AVMA.
+    symbol_addrs: HashMap<SyntheticSymbolKey, u64>,
 }
 
 #[derive(Clone)]
 pub(crate) struct TargetIngestService {
     server: ServerState,
+}
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+enum SyntheticSymbolKey {
+    Lane(String),
+    Span(String),
+}
+
+impl SyntheticSymbolKey {
+    fn display_name(&self) -> &str {
+        match self {
+            Self::Lane(name) | Self::Span(name) => name,
+        }
+    }
 }
 
 impl TargetIngestService {
@@ -94,24 +97,24 @@ impl TargetIngestService {
 
     /// Synthetic symbol address for a span name, (re)publishing the
     /// synthetic binary when a new name appears.
-    fn symbol_addr(&self, name: &str) -> u64 {
+    fn symbol_addr(&self, key: SyntheticSymbolKey) -> u64 {
         let mut lanes = self.server.target_lanes().lock();
-        if let Some(&addr) = lanes.symbol_addrs.get(name) {
+        if let Some(&addr) = lanes.symbol_addrs.get(&key) {
             return addr;
         }
         let index = lanes.symbol_addrs.len() as u64;
         let addr = SYNTH_BINARY_BASE_AVMA + index * SYNTH_SYMBOL_STRIDE;
-        lanes.symbol_addrs.insert(name.to_owned(), addr);
+        lanes.symbol_addrs.insert(key, addr);
         // Republish the synthetic binary with the full symbol list;
         // `BinaryRegistry::insert` replaces by base AVMA. New names are
         // rare (one per distinct kernel), so the rebuild is cold.
         let mut symbols: Vec<LiveSymbolOwned> = lanes
             .symbol_addrs
             .iter()
-            .map(|(name, &addr)| LiveSymbolOwned {
+            .map(|(key, &addr)| LiveSymbolOwned {
                 start_svma: addr - SYNTH_BINARY_BASE_AVMA,
                 end_svma: addr - SYNTH_BINARY_BASE_AVMA + SYNTH_SYMBOL_STRIDE,
-                name: name.as_bytes().to_vec(),
+                name: key.display_name().as_bytes().to_vec(),
             })
             .collect();
         symbols.sort_by_key(|s| s.start_svma);
@@ -145,23 +148,25 @@ impl TargetIngest for TargetIngestService {
             return;
         }
         let tid = self.lane_tid(batch.pid, &batch.lane);
-        let mut synthesized = 0u64;
+        let lane_addr = self.symbol_addr(SyntheticSymbolKey::Lane(batch.lane.clone()));
+        let mut events = Vec::new();
         for span in &batch.spans {
             if span.end_ns <= span.start_ns {
                 continue;
             }
-            let addr = self.symbol_addr(&span.name);
-            let duration = span.end_ns - span.start_ns;
-            let samples = (duration / SYNTH_PERIOD_NS)
-                .max(1)
-                .min(SYNTH_SAMPLES_PER_SPAN_CAP);
+            let span_addr = self.symbol_addr(SyntheticSymbolKey::Span(span.name.clone()));
+            events.push((span.start_ns, span.end_ns, [span_addr, lane_addr]));
+        }
+        events.sort_by_key(|(start_ns, end_ns, _)| (*start_ns, *end_ns));
+        let mut total_duration_ns = 0u64;
+        if !events.is_empty() {
             let mut aggregator = self.server.aggregator().write();
-            for k in 0..samples {
-                let ts = span.start_ns + k * SYNTH_PERIOD_NS;
+            for (start_ns, end_ns, stack) in &events {
+                total_duration_ns = total_duration_ns.saturating_add(*end_ns - *start_ns);
                 aggregator.record_pet_sample(
                     tid,
-                    ts,
-                    &[addr],
+                    *start_ns,
+                    stack,
                     &[],
                     PmuSample {
                         cycles: 0,
@@ -170,17 +175,25 @@ impl TargetIngest for TargetIngestService {
                         branch_mispreds: 0,
                     },
                 );
+                aggregator.record_interval(
+                    tid,
+                    *start_ns,
+                    *end_ns,
+                    IntervalKind::SyntheticSpan {
+                        stack: stack.to_vec().into_boxed_slice(),
+                    },
+                );
             }
-            synthesized += samples;
         }
-        if synthesized > 0 {
+        if !events.is_empty() {
             self.server.bump_revision();
         }
         tracing::debug!(
             pid = batch.pid,
             lane = %batch.lane,
             spans = batch.spans.len(),
-            synthesized,
+            recorded_spans = events.len(),
+            total_duration_ns,
             "target spans ingested"
         );
     }
@@ -192,14 +205,17 @@ impl TargetIngest for TargetIngestService {
 
 #[cfg(test)]
 mod tests {
-    use stax_live_proto::{TargetIngest as _, TargetSpan, TargetSpanBatch};
+    use stax_live_proto::{
+        FlameNode, LiveFilter, Profiler as _, TargetIngest as _, TargetSpan, TargetSpanBatch,
+        TopSort, ViewParams,
+    };
 
     use super::*;
 
     /// The whole latch path server-side: pid gate, synthetic thread
     /// (named lane), synthetic symbol resolution, and duration-weighted
-    /// sample synthesis into the EXISTING aggregator — no span-specific
-    /// storage anywhere.
+    /// synthetic intervals in the EXISTING aggregator — no separate
+    /// span-specific view.
     #[tokio::test]
     async fn ingest_lands_spans_as_synthetic_thread_with_named_symbols() {
         let server = ServerState::new_for_tests();
@@ -225,8 +241,8 @@ mod tests {
                 pid: 42,
                 lane: "GPU test".to_owned(),
                 spans: vec![
-                    span("kernel_a", 1_000_000, 4_000_000), // 3ms -> 3 samples
-                    span("kernel_b", 4_000_000, 4_500_000), // 0.5ms -> 1 sample
+                    span("kernel_a", 1_000_000, 4_000_000), // 3ms -> 1 span
+                    span("kernel_b", 4_000_000, 4_500_000), // 0.5ms -> 1 span
                 ],
             })
             .await;
@@ -243,24 +259,72 @@ mod tests {
         let tid = SYNTH_TID_BASE;
         assert_eq!(aggregator.thread_name(tid), Some("GPU test"));
         assert_eq!(aggregator.session_start_ns(), Some(1_000_000));
-        assert_eq!(aggregator.last_event_ns(), Some(4_000_000));
+        assert_eq!(aggregator.last_event_ns(), Some(4_500_000));
+        drop(aggregator);
 
-        // Span names resolve as symbols through the ordinary registry.
+        // Lane and span names resolve as symbols through the ordinary registry.
         let binaries = server.binaries().read();
-        let a = binaries
+        let lane = binaries
             .lookup_symbol(SYNTH_BINARY_BASE_AVMA)
+            .expect("lane resolves");
+        assert_eq!(lane.function_name, "GPU test");
+        let a = binaries
+            .lookup_symbol(SYNTH_BINARY_BASE_AVMA + SYNTH_SYMBOL_STRIDE)
             .expect("kernel_a resolves");
         assert_eq!(a.function_name, "kernel_a");
         let b = binaries
-            .lookup_symbol(SYNTH_BINARY_BASE_AVMA + SYNTH_SYMBOL_STRIDE)
+            .lookup_symbol(SYNTH_BINARY_BASE_AVMA + 2 * SYNTH_SYMBOL_STRIDE)
             .expect("kernel_b resolves");
         assert_eq!(b.function_name, "kernel_b");
         assert!(
             binaries
-                .lookup_symbol(SYNTH_BINARY_BASE_AVMA + 2 * SYNTH_SYMBOL_STRIDE)
+                .lookup_symbol(SYNTH_BINARY_BASE_AVMA + 3 * SYNTH_SYMBOL_STRIDE)
                 .is_none(),
             "dropped wrong-pid span must not register symbols"
         );
+        drop(binaries);
+
+        let profiler = server.profiler();
+        let top = profiler
+            .top(10, TopSort::BySelf, view_params(Some(tid)))
+            .await;
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0].function_name.as_deref(), Some("kernel_a"));
+        assert_eq!(top[0].self_on_cpu_ns, 3_000_000);
+        assert_eq!(top[0].self_pet_samples, 1);
+        assert_eq!(top[1].function_name.as_deref(), Some("kernel_b"));
+        assert_eq!(top[1].self_on_cpu_ns, 500_000);
+        assert_eq!(top[1].self_pet_samples, 1);
+
+        let flame = profiler.flamegraph(view_params(Some(tid))).await;
+        assert_eq!(flame.total_on_cpu_ns, 3_500_000);
+        assert_eq!(flame.root.pet_samples, 2);
+        assert_eq!(flame.root.children.len(), 1);
+        let lane = &flame.root.children[0];
+        assert_eq!(flame_node_name(lane, &flame.strings), Some("GPU test"));
+        assert_eq!(lane.on_cpu_ns, 3_500_000);
+        assert_eq!(lane.pet_samples, 2);
+        assert_eq!(lane.children.len(), 2);
+        assert_eq!(
+            flame_node_name(&lane.children[0], &flame.strings),
+            Some("kernel_a")
+        );
+        assert_eq!(lane.children[0].on_cpu_ns, 3_000_000);
+        assert_eq!(
+            flame_node_name(&lane.children[1], &flame.strings),
+            Some("kernel_b")
+        );
+        assert_eq!(lane.children[1].on_cpu_ns, 500_000);
+
+        let threads = profiler.threads().await;
+        let thread = threads
+            .threads
+            .iter()
+            .find(|thread| thread.tid == tid)
+            .expect("synthetic thread row");
+        assert_eq!(thread.name.as_deref(), Some("GPU test"));
+        assert_eq!(thread.on_cpu_ns, 3_500_000);
+        assert_eq!(thread.pet_samples, 2);
     }
 
     fn span(name: &str, start_ns: u64, end_ns: u64) -> TargetSpan {
@@ -269,6 +333,22 @@ mod tests {
             start_ns,
             end_ns,
         }
+    }
+
+    fn view_params(tid: Option<u32>) -> ViewParams {
+        ViewParams {
+            tid,
+            filter: LiveFilter {
+                time_range: None,
+                exclude_symbols: Vec::new(),
+            },
+        }
+    }
+
+    fn flame_node_name<'a>(node: &FlameNode, strings: &'a [String]) -> Option<&'a str> {
+        node.function_name
+            .and_then(|index| strings.get(index as usize))
+            .map(String::as_str)
     }
 
     /// Same assertions as above, but through the REAL wire: a local
@@ -287,10 +367,9 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_file(&socket);
-        let acceptor = vox::transport::local::LocalLinkAcceptor::bind(
-            socket.to_string_lossy().into_owned(),
-        )
-        .expect("bind test socket");
+        let acceptor =
+            vox::transport::local::LocalLinkAcceptor::bind(socket.to_string_lossy().into_owned())
+                .expect("bind test socket");
         crate::spawn_accept_loop_local(server.clone(), acceptor);
 
         let url = format!("local://{}", socket.display());
@@ -321,6 +400,15 @@ mod tests {
         let aggregator = server.aggregator().read();
         assert_eq!(aggregator.thread_name(SYNTH_TID_BASE), Some("GPU wire"));
         assert_eq!(aggregator.session_start_ns(), Some(10_000_000));
+        drop(aggregator);
+        let profiler = server.profiler();
+        let top = profiler
+            .top(10, TopSort::BySelf, view_params(Some(SYNTH_TID_BASE)))
+            .await;
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].function_name.as_deref(), Some("wire_kernel"));
+        assert_eq!(top[0].self_on_cpu_ns, 6_000_000);
+        assert_eq!(top[0].self_pet_samples, 1);
         let _ = std::fs::remove_file(&socket);
     }
 }

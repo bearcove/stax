@@ -30,8 +30,9 @@ The app links the **`stax-target`** crate and does two things:
 
 Server-side (`TargetIngest`), each `(pid, lane)` becomes a **synthetic
 thread** — a pseudo-tid at/above `0xFFF0_0000` — and each distinct span
-name becomes a synthetic symbol, so kernel names render like function
-names.
+name becomes a synthetic symbol. Each reported span records one sample
+marker plus one attributed synthetic execution interval, so kernel names
+render like function names in `top`, `flame`, and the web UI timeline.
 
 ## A worked example: bee's `hx`
 
@@ -40,25 +41,25 @@ them as the `"GPU tq1s"` lane (`bee/rust/helix-metal4/src/stax.rs`):
 
 ```bash
 stax record -- ./target/release/hx run --cfg configs/production.jsonc …
-stax threads -n 2000 | grep -i gpu
-#  on-CPU ms off-CPU ms  samples  blocked  tid         name
-#       0.00       0.00     6300        -  4293918722  GPU tq1s
+stax threads | grep -i gpu
 ```
 
-6300 ingested kernel spans from one ASR run. The `samples` column counts
-spans for synthetic lanes; on/off-CPU are zero by construction.
+In the verified 2026-06-12 `hx` run, this lane had 6300 ingested kernel
+spans. For synthetic lanes, the `samples` column is the span count, and
+the `on-CPU ms` column is lane active time synthesized from the reported
+span durations.
 
 ## Reading the results
 
-- **`stax threads -n <big>`** — existence + span count. Synthetic lanes
-  sort last (zero on-CPU), so the default cutoff hides them: pass a large
-  `-n`.
+- **`stax threads`** — existence + span count. Synthetic tids live
+  at/above `0xFFF0_0000`; pass `-n 0` if you want every thread row.
 - **Web UI timeline** (`ws://127.0.0.1:8080`, see
   [The Web UI](@/guide/web-ui.md)) — the lane drawn against the real
   threads, spans named per kernel.
 - **`stax top --tid <synthetic>` / `stax flame --tid <synthetic>`** —
-  currently return nothing: the CLI tree views aggregate PET samples only.
-  Treat the web UI as the per-kernel view for now.
+  per-kernel aggregation. `top` reports total span duration in the `ms`
+  column and span count in the `samples` column. `flame` renders
+  `(all) -> lane -> span name`.
 
 ## Interpreting a GPU-bound target
 

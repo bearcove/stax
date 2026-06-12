@@ -541,7 +541,10 @@ fn build_threads_update(
     threads.sort_by(|a, b| {
         let a_total = a.on_cpu_ns.saturating_add(off_cpu_total_proto(&a.off_cpu));
         let b_total = b.on_cpu_ns.saturating_add(off_cpu_total_proto(&b.off_cpu));
-        b_total.cmp(&a_total)
+        b_total
+            .cmp(&a_total)
+            .then_with(|| b.pet_samples.cmp(&a.pet_samples))
+            .then_with(|| a.tid.cmp(&b.tid))
     });
     ThreadsUpdate { threads }
 }
@@ -628,6 +631,7 @@ fn build_intervals_update(
         // streams together cover both axes.
         let (stack, waker_tid, waker_user_stack) = match &raw.kind {
             IntervalKind::OnCpu => continue,
+            IntervalKind::SyntheticSpan { .. } => continue,
             IntervalKind::OffCpu {
                 stack,
                 waker_tid,
@@ -769,6 +773,7 @@ fn make_predicate<'a>(
             } => {
                 let stack: Vec<u64> = match &interval.kind {
                     IntervalKind::OnCpu => Vec::new(),
+                    IntervalKind::SyntheticSpan { stack } => stack.iter().copied().collect(),
                     IntervalKind::OffCpu { stack, .. } => stack.iter().copied().collect(),
                 };
                 (interval.start_ns, Box::new(stack.into_iter()), binaries)
@@ -880,6 +885,20 @@ fn group_top_entries(
 
     let mut out: Vec<TopEntry> = groups
         .into_values()
+        .filter(|g| match sort {
+            TopSort::BySelf => {
+                g.self_on_cpu_ns > 0
+                    || g.self_off_cpu.total_ns() > 0
+                    || g.self_pet_samples > 0
+                    || g.self_off_cpu_intervals > 0
+            }
+            TopSort::ByTotal => {
+                g.total_on_cpu_ns > 0
+                    || g.total_off_cpu.total_ns() > 0
+                    || g.total_pet_samples > 0
+                    || g.total_off_cpu_intervals > 0
+            }
+        })
         .map(|g| TopEntry {
             address: g.address,
             function_name: g.function_name,
@@ -970,7 +989,10 @@ fn build_timeline_update(aggregator: &Arc<RwLock<Aggregator>>, tid: Option<u32>)
         if int_end <= int_start {
             continue;
         }
-        let on_cpu = matches!(interval.kind, IntervalKind::OnCpu);
+        let on_cpu = matches!(
+            interval.kind,
+            IntervalKind::OnCpu | IntervalKind::SyntheticSpan { .. }
+        );
         // Distribute the interval's duration across the buckets it
         // overlaps. For each overlapping bucket [b_start, b_end), the
         // share is min(int_end, b_end) - max(int_start, b_start).

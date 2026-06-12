@@ -8,6 +8,9 @@
 //!   only samples on-CPU threads). Source of stack identity.
 //! - `intervals`: SCHED-derived (start, end, kind) tuples telling us
 //!   exactly when the thread was on or off a CPU. Source of *time*.
+//!   Target-reported synthetic lanes also land here as attributed
+//!   execution spans: they are not scheduler records, but they carry
+//!   the same "this stack was active over this time range" shape.
 //!
 //! Aggregation walks both streams together. Each on-CPU interval's
 //! duration is distributed evenly across the PET samples that fell
@@ -164,6 +167,12 @@ pub struct RawInterval {
 
 pub enum IntervalKind {
     OnCpu,
+    SyntheticSpan {
+        /// Stack for one target-reported execution span, leaf-first.
+        /// Used for GPU / accelerator lanes where the target already
+        /// knows the exact work item and duration.
+        stack: Box<[u64]>,
+    },
     OffCpu {
         /// Stack at the moment the thread blocked, leaf-first. Empty
         /// when no PET stack had been captured for the thread before
@@ -550,6 +559,23 @@ impl Aggregator {
                                 &s.pmc,
                             );
                         }
+                    }
+                    IntervalKind::SyntheticSpan { stack } => {
+                        if !predicate(EventCtx::Interval {
+                            tid,
+                            interval,
+                            binaries,
+                        }) {
+                            continue;
+                        }
+                        total_on_cpu_ns = total_on_cpu_ns.saturating_add(duration);
+                        credit_on_cpu_to_tree(
+                            &mut flame_root,
+                            &mut by_address,
+                            stack,
+                            duration,
+                            &PmuSample::default(),
+                        );
                     }
                     IntervalKind::OffCpu {
                         stack,

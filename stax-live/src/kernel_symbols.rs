@@ -598,10 +598,31 @@ mod tests {
                 .any(|range| range.module == "com.apple.kernel")
         );
 
+        let expected = symbols
+            .iter()
+            .find(|function| {
+                function.name.is_some()
+                    && ranges.iter().any(|range| {
+                        range.module == function.module
+                            && function.address >= range.start
+                            && function.address < range.end
+                    })
+            })
+            .expect("parsed at least one named function inside a text range")
+            .clone();
+        let expected_name = stax_demangle::demangle_str(
+            expected
+                .name
+                .as_deref()
+                .expect("filtered to named functions"),
+        )
+        .name;
+
         let symbols = KernelSymbols::from_parts(ranges, symbols);
-        if let Some(resolved) = symbols.lookup(0xfffffe000b670a3c) {
-            assert_eq!(resolved.module, "com.apple.kec.pthread");
-            assert_eq!(resolved.function_name, "psynch_cvcontinue");
-        }
+        let resolved = symbols
+            .lookup(expected.address)
+            .expect("parsed function resolves by exact address");
+        assert_eq!(resolved.module, expected.module);
+        assert_eq!(resolved.function_name, expected_name);
     }
 }

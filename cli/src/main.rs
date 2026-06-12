@@ -789,7 +789,14 @@ async fn run_threads(args: ThreadsArgs) -> Result<(), Box<dyn Error>> {
 
 fn print_threads(update: &ThreadsUpdate, limit: u32) {
     let mut threads: Vec<&stax_live_proto::ThreadInfo> = update.threads.iter().collect();
-    threads.sort_by(|a, b| b.on_cpu_ns.cmp(&a.on_cpu_ns));
+    threads.sort_by(|a, b| {
+        let a_total = a.on_cpu_ns.saturating_add(off_cpu_total_ns(&a.off_cpu));
+        let b_total = b.on_cpu_ns.saturating_add(off_cpu_total_ns(&b.off_cpu));
+        b_total
+            .cmp(&a_total)
+            .then_with(|| b.pet_samples.cmp(&a.pet_samples))
+            .then_with(|| a.tid.cmp(&b.tid))
+    });
     if threads.is_empty() {
         println!("(no thread samples yet — is a recording in progress?)");
         return;

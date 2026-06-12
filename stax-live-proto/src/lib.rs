@@ -601,11 +601,10 @@ pub struct TargetSpan {
 /// A lane is a GPU queue (or any other off-CPU executor) and maps onto a
 /// SYNTHETIC THREAD in the existing aggregator model: the server
 /// allocates a high pseudo-tid per (pid, lane), names it `lane`, and
-/// synthesizes PET samples across each span at the sampling period —
-/// exactly what the sampler would have produced had the lane been a
-/// thread executing functions named after the spans. Every existing view
-/// (top, flamegraph, timeline, threads) includes the lane with correct
-/// duration weighting; no span-specific views exist.
+/// records each reported span as one sample marker plus one attributed
+/// synthetic execution interval. Every existing view (top, flamegraph,
+/// timeline, threads) includes the lane with exact duration weighting
+/// and span counts; no span-specific views exist.
 #[derive(Clone, Debug, Facet)]
 pub struct TargetSpanBatch {
     /// Reporting process id — spans are dropped unless this matches the
