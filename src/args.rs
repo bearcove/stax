@@ -91,6 +91,43 @@ pub struct CompareArgs {
     #[facet(args::named, default)]
     pub json: bool,
 
+    /// Fail if candidate total active time increases by more than this many ms.
+    #[facet(args::named, default)]
+    pub fail_active_delta_ms: Option<f64>,
+
+    /// Fail if candidate target time increases by more than this many ms.
+    #[facet(args::named, default)]
+    pub fail_target_delta_ms: Option<f64>,
+
+    /// Fail if candidate off-CPU time increases by more than this many ms.
+    #[facet(args::named, default)]
+    pub fail_off_cpu_delta_ms: Option<f64>,
+
+    /// Fail if candidate target time increases by more than this percent
+    /// relative to the baseline.
+    #[facet(args::named, default)]
+    pub fail_target_delta_pct: Option<f64>,
+
+    /// Fail if candidate unlinked-origin count increases by more than this.
+    #[facet(args::named, default)]
+    pub fail_unlinked_origins_delta: Option<u64>,
+
+    /// Fail if candidate missing-origin count increases by more than this.
+    #[facet(args::named, default)]
+    pub fail_missing_origins_delta: Option<u64>,
+
+    /// Fail if candidate bad-duration drop count increases by more than this.
+    #[facet(args::named, default)]
+    pub fail_bad_duration_drops_delta: Option<u64>,
+
+    /// Fail if candidate target-side queue-drop count increases by more than this.
+    #[facet(args::named, default)]
+    pub fail_target_queue_drops_delta: Option<u64>,
+
+    /// Fail if candidate worker-disconnect drop count increases by more than this.
+    #[facet(args::named, default)]
+    pub fail_worker_disconnect_drops_delta: Option<u64>,
+
     /// Baseline archive directory, v2 manifest.json, or legacy v1 archive.json.
     #[facet(args::positional)]
     pub baseline: String,

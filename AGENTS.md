@@ -286,7 +286,7 @@ just check-live              # cargo check -p stax-live --all-targets
 just check-server            # cargo check -p stax-server --all-targets
 just check-mac-kperf-parse   # macOS: check kperf parser/timestamp pipeline
 just test-cli-target-lanes   # stable CLI synthetic-lane regression
-just test-cli-compare-json   # stable stax compare --json report regression
+just test-cli-compare-json   # stable stax compare --json/threshold regression
 just test-server-target-ingest # TargetIngest -> Profiler target-span regression
 just test-mac-kperf-timebase # macOS: mach tick -> ns clock-domain regression
 just docs                    # ddc build
@@ -479,7 +479,7 @@ stax diagnose --run 1
 This shorthand has the same server-memory lifetime and the same active-run
 refusal as `select-run`.
 
-### `stax compare [--json] <BASELINE> <CANDIDATE>`
+### `stax compare [--json] [thresholds…] <BASELINE> <CANDIDATE>`
 
 Compare two saved archives without touching `stax-server` state.
 
@@ -492,7 +492,14 @@ PET samples, on/off-CPU interval time, target time, target span counts,
 origin-link counts, ingest drops, and the top target lanes by duration.
 Pass `--json` for a facet-json report with named baseline/candidate/delta
 fields for each metric and target-lane delta; use that in CI or benchmark
-notes instead of scraping the human table.
+notes instead of scraping the human table. CI can fail the command directly
+with threshold flags such as `--fail-target-delta-ms`,
+`--fail-target-delta-pct`, `--fail-active-delta-ms`,
+`--fail-off-cpu-delta-ms`, `--fail-unlinked-origins-delta`,
+`--fail-missing-origins-delta`, `--fail-bad-duration-drops-delta`,
+`--fail-target-queue-drops-delta`, and
+`--fail-worker-disconnect-drops-delta`. Threshold failures are printed in
+the human output and included as `threshold_failures` in JSON.
 Legacy v1 `archive.json` inputs are accepted for comparison. Use `stax open`
 when you want to inspect one archive through `threads`, `top`, `flame`, or
 `diagnose`; use `compare` for quick before/after notes.

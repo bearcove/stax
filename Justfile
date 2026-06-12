@@ -44,8 +44,8 @@ test-cli-target-lanes:
     cargo nextest run -p stax --all-targets -E 'test(threads_output_keeps_target_lanes_past_limit)'
 
 test-cli-compare-json:
-    cargo nextest list -p stax --all-targets -E 'test(compare_report_serializes_machine_readable_deltas)'
-    cargo nextest run -p stax --all-targets -E 'test(compare_report_serializes_machine_readable_deltas)'
+    cargo nextest list -p stax --all-targets -E 'test(compare_report_)'
+    cargo nextest run -p stax --all-targets -E 'test(compare_report_)'
 
 test-server-target-ingest:
     cargo nextest list -p stax-server --all-targets -E 'test(ingest_links_spans_to_origin_cpu_stack)'
@@ -119,6 +119,6 @@ archive-smoke:
     STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- diagnose --run 1
     STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- compare "$archive" "$archive"
     compare_json="$(mktemp "${TMPDIR:-/tmp}/stax-compare.XXXXXX")"
-    STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- compare --json "$archive" "$archive" > "$compare_json"
-    ruby -rjson -e 'j=JSON.parse(File.read(ARGV[0])); abort "missing target delta" unless j.dig("metrics","target_time","delta_ns") == 0; abort "missing lanes" unless j.fetch("top_target_lanes").any?' "$compare_json"
+    STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- compare --json --fail-target-delta-ms 0 --fail-unlinked-origins-delta 0 "$archive" "$archive" > "$compare_json"
+    ruby -rjson -e 'j=JSON.parse(File.read(ARGV[0])); abort "missing target delta" unless j.dig("metrics","target_time","delta_ns") == 0; abort "missing lanes" unless j.fetch("top_target_lanes").any?; abort "unexpected failures" unless j.fetch("threshold_failures").empty?' "$compare_json"
     rm -f "$compare_json"

@@ -214,6 +214,11 @@ Compare two saved archives without loading either one into `stax-server`.
 ```bash
 stax compare /tmp/before.staxdir /tmp/after.staxdir
 stax compare --json /tmp/before.staxdir /tmp/after.staxdir > /tmp/stax-compare.json
+stax compare \
+  --fail-target-delta-ms 25 \
+  --fail-target-delta-pct 10 \
+  --fail-unlinked-origins-delta 0 \
+  /tmp/before.staxdir /tmp/after.staxdir
 ```
 
 The command reads each archive's typed manifest/chunks directly and prints
@@ -221,6 +226,9 @@ deltas for PET samples, on/off-CPU interval time, target time, target span
 counts, origin-link counts, ingest drops, and the top target lanes by
 duration. The default is a human table; `--json` prints a facet-json report
 with named baseline/candidate/delta fields for scripts and benchmark notes.
+Threshold flags make the command fail directly when a candidate regresses
+past your limit, and JSON output includes the same decision in
+`threshold_failures`.
 Legacy v1 `archive.json` inputs are accepted too. Use it for quick
 before/after checks and regression notes; use `stax open` when you want to
 inspect one archive through `threads`, `top`, `flame`, `diagnose`, or the web

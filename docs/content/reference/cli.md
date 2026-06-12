@@ -181,17 +181,28 @@ Compare two saved run archives without touching `stax-server` state.
 stax compare [OPTIONS] <BASELINE> <CANDIDATE>
 ```
 
-| flag / arg    | type                | default | meaning                                               |
-|---------------|---------------------|---------|-------------------------------------------------------|
-| `--json`      | `bool`              | `false` | print a machine-readable facet-json report            |
-| `<BASELINE>`  | positional `String` | *(required)* | baseline archive directory, v2 manifest, or legacy v1 `archive.json` |
-| `<CANDIDATE>` | positional `String` | *(required)* | candidate archive directory, v2 manifest, or legacy v1 `archive.json` |
+| flag / arg                                 | type                | default | meaning                                               |
+|--------------------------------------------|---------------------|---------|-------------------------------------------------------|
+| `--json`                                   | `bool`              | `false` | print a machine-readable facet-json report            |
+| `--fail-active-delta-ms <MS>`              | `f64`               | *(none)* | fail if candidate active time increases past this     |
+| `--fail-target-delta-ms <MS>`              | `f64`               | *(none)* | fail if candidate target time increases past this     |
+| `--fail-off-cpu-delta-ms <MS>`             | `f64`               | *(none)* | fail if candidate off-CPU time increases past this    |
+| `--fail-target-delta-pct <PCT>`            | `f64`               | *(none)* | fail if candidate target time increases past this percent |
+| `--fail-unlinked-origins-delta <COUNT>`    | `u64`               | *(none)* | fail if unlinked-origin count increases past this     |
+| `--fail-missing-origins-delta <COUNT>`     | `u64`               | *(none)* | fail if missing-origin count increases past this      |
+| `--fail-bad-duration-drops-delta <COUNT>`  | `u64`               | *(none)* | fail if bad-duration drops increase past this         |
+| `--fail-target-queue-drops-delta <COUNT>`  | `u64`               | *(none)* | fail if target-side queue drops increase past this    |
+| `--fail-worker-disconnect-drops-delta <COUNT>` | `u64`          | *(none)* | fail if worker-disconnect drops increase past this    |
+| `<BASELINE>`                               | positional `String` | *(required)* | baseline archive directory, v2 manifest, or legacy v1 `archive.json` |
+| `<CANDIDATE>`                              | positional `String` | *(required)* | candidate archive directory, v2 manifest, or legacy v1 `archive.json` |
 
 The comparison reads the typed archive manifest/chunks directly and prints
 deltas for PET samples, on/off-CPU interval time, target time, target span
 counts, origin-link counts, ingest drops, and the top target lanes by
 duration. `--json` emits the same comparison as named baseline/candidate/delta
-fields for CI and benchmark notes.
+fields for CI and benchmark notes. Threshold flags fail the command when a
+positive candidate delta exceeds the limit; those failures are also reported
+as `threshold_failures` in JSON.
 
 ## `stax top`
 

@@ -40,7 +40,9 @@ nothing depends on it.
   run that is still going. Use `stax select-run` or per-command `--run` for
   stopped in-memory history, and `stax save`, `stax open`, `stax compare`,
   and `stax compare --json` when you need durable artifacts, before/after
-  notes, or CI-readable deltas.
+  notes, or CI-readable deltas. `compare` threshold flags such as
+  `--fail-target-delta-ms` and `--fail-unlinked-origins-delta` turn saved
+  runs into direct regression gates.
 - **Built for agents as much as humans.** Every query is a subcommand with
   plain-text output and meaningful exit codes. `stax wait --for-samples N`
   lets a script block until there is enough data to look at.

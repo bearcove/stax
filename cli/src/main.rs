@@ -763,21 +763,43 @@ async fn select_query_run_if_requested(
 }
 
 fn run_compare(args: CompareArgs) -> Result<(), Box<dyn Error>> {
+    validate_compare_thresholds(&args)?;
     let baseline = read_saved_archive(Path::new(&args.baseline))?;
     let candidate = read_saved_archive(Path::new(&args.candidate))?;
     let baseline_stats = summarize_archive(&baseline);
     let candidate_stats = summarize_archive(&candidate);
     let report = build_compare_report(&args, &baseline_stats, &candidate_stats);
+    let failed = !report.threshold_failures.is_empty();
 
     if args.json {
         let mut bytes = facet_json::to_vec_pretty(&report)
             .map_err(|e| format!("serialize compare report: {e}"))?;
         bytes.push(b'\n');
         io::stdout().write_all(&bytes)?;
-        return Ok(());
+    } else {
+        print_compare_text(&report, &baseline_stats, &candidate_stats);
     }
 
-    print_compare_text(&report, &baseline_stats, &candidate_stats);
+    if failed {
+        return Err("compare threshold(s) failed".into());
+    }
+    Ok(())
+}
+
+fn validate_compare_thresholds(args: &CompareArgs) -> Result<(), Box<dyn Error>> {
+    for (name, value) in [
+        ("--fail-active-delta-ms", args.fail_active_delta_ms),
+        ("--fail-target-delta-ms", args.fail_target_delta_ms),
+        ("--fail-off-cpu-delta-ms", args.fail_off_cpu_delta_ms),
+        ("--fail-target-delta-pct", args.fail_target_delta_pct),
+    ] {
+        let Some(value) = value else {
+            continue;
+        };
+        if !value.is_finite() || value < 0.0 {
+            return Err(format!("{name} must be a finite non-negative number").into());
+        }
+    }
     Ok(())
 }
 
@@ -892,6 +914,14 @@ fn print_compare_text(
             );
         }
     }
+
+    if !report.threshold_failures.is_empty() {
+        println!();
+        println!("threshold failures:");
+        for failure in &report.threshold_failures {
+            println!("  - {}", failure.message);
+        }
+    }
 }
 
 #[derive(Clone, Debug, Facet)]
@@ -900,6 +930,7 @@ struct CompareReport {
     candidate: CompareInputReport,
     metrics: CompareMetricsReport,
     top_target_lanes: Vec<CompareLaneReport>,
+    threshold_failures: Vec<CompareThresholdFailureReport>,
 }
 
 #[derive(Clone, Debug, Facet)]
@@ -950,6 +981,14 @@ struct CompareLaneReport {
     delta_target_spans: i64,
 }
 
+#[derive(Clone, Debug, Facet)]
+struct CompareThresholdFailureReport {
+    metric: String,
+    observed: String,
+    threshold: String,
+    message: String,
+}
+
 fn build_compare_report(
     args: &CompareArgs,
     baseline_stats: &ArchiveCompareStats,
@@ -977,6 +1016,44 @@ fn build_compare_report(
         })
         .collect();
 
+    let metrics = CompareMetricsReport {
+        pet_samples: count_delta(baseline_stats.pet_samples, candidate_stats.pet_samples),
+        on_cpu: duration_delta(baseline_stats.on_cpu_ns, candidate_stats.on_cpu_ns),
+        off_cpu: duration_delta(baseline_stats.off_cpu_ns, candidate_stats.off_cpu_ns),
+        target_time: duration_delta(baseline_stats.target_ns, candidate_stats.target_ns),
+        target_spans: count_delta(baseline_stats.target_spans, candidate_stats.target_spans),
+        target_lanes: count_delta(baseline_stats.target_lanes, candidate_stats.target_lanes),
+        spans_with_origin: count_delta(
+            baseline_stats.spans_with_origin,
+            candidate_stats.spans_with_origin,
+        ),
+        linked_origins: count_delta(
+            baseline_stats.spans_linked_origin,
+            candidate_stats.spans_linked_origin,
+        ),
+        unlinked_origins: count_delta(
+            baseline_stats.spans_unlinked_origin,
+            candidate_stats.spans_unlinked_origin,
+        ),
+        missing_origins: count_delta(
+            baseline_stats.spans_missing_origin,
+            candidate_stats.spans_missing_origin,
+        ),
+        bad_duration_drops: count_delta(
+            baseline_stats.spans_dropped_bad_duration,
+            candidate_stats.spans_dropped_bad_duration,
+        ),
+        target_queue_drops: count_delta(
+            baseline_stats.spans_dropped_target_queue_full,
+            candidate_stats.spans_dropped_target_queue_full,
+        ),
+        worker_disconnect_drops: count_delta(
+            baseline_stats.spans_dropped_target_worker_disconnected,
+            candidate_stats.spans_dropped_target_worker_disconnected,
+        ),
+    };
+    let threshold_failures = compare_threshold_failures(args, &metrics);
+
     CompareReport {
         baseline: CompareInputReport {
             label: baseline_stats.label.clone(),
@@ -986,44 +1063,147 @@ fn build_compare_report(
             label: candidate_stats.label.clone(),
             path: args.candidate.clone(),
         },
-        metrics: CompareMetricsReport {
-            pet_samples: count_delta(baseline_stats.pet_samples, candidate_stats.pet_samples),
-            on_cpu: duration_delta(baseline_stats.on_cpu_ns, candidate_stats.on_cpu_ns),
-            off_cpu: duration_delta(baseline_stats.off_cpu_ns, candidate_stats.off_cpu_ns),
-            target_time: duration_delta(baseline_stats.target_ns, candidate_stats.target_ns),
-            target_spans: count_delta(baseline_stats.target_spans, candidate_stats.target_spans),
-            target_lanes: count_delta(baseline_stats.target_lanes, candidate_stats.target_lanes),
-            spans_with_origin: count_delta(
-                baseline_stats.spans_with_origin,
-                candidate_stats.spans_with_origin,
-            ),
-            linked_origins: count_delta(
-                baseline_stats.spans_linked_origin,
-                candidate_stats.spans_linked_origin,
-            ),
-            unlinked_origins: count_delta(
-                baseline_stats.spans_unlinked_origin,
-                candidate_stats.spans_unlinked_origin,
-            ),
-            missing_origins: count_delta(
-                baseline_stats.spans_missing_origin,
-                candidate_stats.spans_missing_origin,
-            ),
-            bad_duration_drops: count_delta(
-                baseline_stats.spans_dropped_bad_duration,
-                candidate_stats.spans_dropped_bad_duration,
-            ),
-            target_queue_drops: count_delta(
-                baseline_stats.spans_dropped_target_queue_full,
-                candidate_stats.spans_dropped_target_queue_full,
-            ),
-            worker_disconnect_drops: count_delta(
-                baseline_stats.spans_dropped_target_worker_disconnected,
-                candidate_stats.spans_dropped_target_worker_disconnected,
-            ),
-        },
+        metrics,
         top_target_lanes,
+        threshold_failures,
     }
+}
+
+fn compare_threshold_failures(
+    args: &CompareArgs,
+    metrics: &CompareMetricsReport,
+) -> Vec<CompareThresholdFailureReport> {
+    let mut failures = Vec::new();
+    push_duration_threshold_failure(
+        &mut failures,
+        "active time",
+        &metrics.on_cpu,
+        args.fail_active_delta_ms,
+    );
+    push_duration_threshold_failure(
+        &mut failures,
+        "target time",
+        &metrics.target_time,
+        args.fail_target_delta_ms,
+    );
+    push_duration_threshold_failure(
+        &mut failures,
+        "off-CPU time",
+        &metrics.off_cpu,
+        args.fail_off_cpu_delta_ms,
+    );
+    push_duration_pct_threshold_failure(
+        &mut failures,
+        "target time",
+        &metrics.target_time,
+        args.fail_target_delta_pct,
+    );
+    push_count_threshold_failure(
+        &mut failures,
+        "unlinked origins",
+        &metrics.unlinked_origins,
+        args.fail_unlinked_origins_delta,
+    );
+    push_count_threshold_failure(
+        &mut failures,
+        "missing origins",
+        &metrics.missing_origins,
+        args.fail_missing_origins_delta,
+    );
+    push_count_threshold_failure(
+        &mut failures,
+        "bad-duration drops",
+        &metrics.bad_duration_drops,
+        args.fail_bad_duration_drops_delta,
+    );
+    push_count_threshold_failure(
+        &mut failures,
+        "target queue drops",
+        &metrics.target_queue_drops,
+        args.fail_target_queue_drops_delta,
+    );
+    push_count_threshold_failure(
+        &mut failures,
+        "worker disconnect drops",
+        &metrics.worker_disconnect_drops,
+        args.fail_worker_disconnect_drops_delta,
+    );
+    failures
+}
+
+fn push_duration_threshold_failure(
+    failures: &mut Vec<CompareThresholdFailureReport>,
+    metric: &str,
+    delta: &DurationDeltaReport,
+    threshold_ms: Option<f64>,
+) {
+    let Some(threshold_ms) = threshold_ms else {
+        return;
+    };
+    let observed_ms = delta.delta_ns.max(0) as f64 / 1e6;
+    if observed_ms <= threshold_ms {
+        return;
+    }
+    failures.push(CompareThresholdFailureReport {
+        metric: metric.to_owned(),
+        observed: format!("+{observed_ms:.3}ms"),
+        threshold: format!("+{threshold_ms:.3}ms"),
+        message: format!("{metric} increased by {observed_ms:.3}ms (limit {threshold_ms:.3}ms)"),
+    });
+}
+
+fn push_duration_pct_threshold_failure(
+    failures: &mut Vec<CompareThresholdFailureReport>,
+    metric: &str,
+    delta: &DurationDeltaReport,
+    threshold_pct: Option<f64>,
+) {
+    let Some(threshold_pct) = threshold_pct else {
+        return;
+    };
+    let Some(observed_pct) = positive_delta_pct(delta.baseline_ns, delta.candidate_ns) else {
+        return;
+    };
+    if observed_pct <= threshold_pct {
+        return;
+    }
+    failures.push(CompareThresholdFailureReport {
+        metric: metric.to_owned(),
+        observed: format!("+{observed_pct:.3}%"),
+        threshold: format!("+{threshold_pct:.3}%"),
+        message: format!("{metric} increased by {observed_pct:.3}% (limit {threshold_pct:.3}%)"),
+    });
+}
+
+fn positive_delta_pct(baseline: u64, candidate: u64) -> Option<f64> {
+    if candidate <= baseline {
+        return None;
+    }
+    if baseline == 0 {
+        return Some(f64::INFINITY);
+    }
+    Some((candidate - baseline) as f64 * 100.0 / baseline as f64)
+}
+
+fn push_count_threshold_failure(
+    failures: &mut Vec<CompareThresholdFailureReport>,
+    metric: &str,
+    delta: &CountDeltaReport,
+    threshold: Option<u64>,
+) {
+    let Some(threshold) = threshold else {
+        return;
+    };
+    let observed = delta.delta.max(0) as u64;
+    if observed <= threshold {
+        return;
+    }
+    failures.push(CompareThresholdFailureReport {
+        metric: metric.to_owned(),
+        observed: format!("+{observed}"),
+        threshold: format!("+{threshold}"),
+        message: format!("{metric} increased by {observed} (limit {threshold})"),
+    });
 }
 
 fn count_delta(baseline: u64, candidate: u64) -> CountDeltaReport {
@@ -2209,6 +2389,15 @@ mod tests {
         );
         let args = super::CompareArgs {
             json: true,
+            fail_active_delta_ms: None,
+            fail_target_delta_ms: None,
+            fail_off_cpu_delta_ms: None,
+            fail_target_delta_pct: None,
+            fail_unlinked_origins_delta: None,
+            fail_missing_origins_delta: None,
+            fail_bad_duration_drops_delta: None,
+            fail_target_queue_drops_delta: None,
+            fail_worker_disconnect_drops_delta: None,
             baseline: "/tmp/before.staxdir".to_owned(),
             candidate: "/tmp/after.staxdir".to_owned(),
         };
@@ -2221,11 +2410,67 @@ mod tests {
         assert_eq!(report.metrics.linked_origins.delta, 2);
         assert_eq!(report.top_target_lanes.len(), 1);
         assert_eq!(report.top_target_lanes[0].delta_target_ns, 750);
+        assert!(report.threshold_failures.is_empty());
         let json = facet_json::to_vec_pretty(&report).expect("serialize compare report");
         let json = String::from_utf8(json).expect("utf8 compare report");
         assert!(json.contains("\"target_time\""));
         assert!(json.contains("\"delta_ns\""));
         assert!(json.contains("\"GPU lane\""));
+        assert!(json.contains("\"threshold_failures\""));
+    }
+
+    #[test]
+    fn compare_report_records_threshold_failures() {
+        let baseline = super::ArchiveCompareStats {
+            label: "before".to_owned(),
+            on_cpu_ns: 10_000_000,
+            off_cpu_ns: 5_000_000,
+            target_ns: 20_000_000,
+            spans_unlinked_origin: 1,
+            spans_missing_origin: 0,
+            spans_dropped_target_queue_full: 0,
+            ..super::ArchiveCompareStats::default()
+        };
+        let candidate = super::ArchiveCompareStats {
+            label: "after".to_owned(),
+            on_cpu_ns: 13_000_000,
+            off_cpu_ns: 5_500_000,
+            target_ns: 23_000_000,
+            spans_unlinked_origin: 4,
+            spans_missing_origin: 1,
+            spans_dropped_target_queue_full: 2,
+            ..super::ArchiveCompareStats::default()
+        };
+        let args = super::CompareArgs {
+            json: true,
+            fail_active_delta_ms: Some(2.0),
+            fail_target_delta_ms: Some(2.5),
+            fail_off_cpu_delta_ms: Some(1.0),
+            fail_target_delta_pct: Some(10.0),
+            fail_unlinked_origins_delta: Some(1),
+            fail_missing_origins_delta: Some(0),
+            fail_bad_duration_drops_delta: Some(0),
+            fail_target_queue_drops_delta: Some(0),
+            fail_worker_disconnect_drops_delta: Some(0),
+            baseline: "/tmp/before.staxdir".to_owned(),
+            candidate: "/tmp/after.staxdir".to_owned(),
+        };
+
+        let report = build_compare_report(&args, &baseline, &candidate);
+
+        let metrics: Vec<&str> = report
+            .threshold_failures
+            .iter()
+            .map(|failure| failure.metric.as_str())
+            .collect();
+        assert!(metrics.contains(&"active time"));
+        assert!(metrics.contains(&"target time"));
+        assert!(metrics.contains(&"unlinked origins"));
+        assert!(metrics.contains(&"missing origins"));
+        assert!(metrics.contains(&"target queue drops"));
+        assert!(!metrics.contains(&"off-CPU time"));
+        assert!(!metrics.contains(&"bad-duration drops"));
+        assert!(!metrics.contains(&"worker disconnect drops"));
     }
 
     #[test]

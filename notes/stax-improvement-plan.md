@@ -289,7 +289,10 @@ Status as of 2026-06-12:
   - `open` refuses to replace state while a recording is active.
 - `stax compare <BASELINE> <CANDIDATE>` reads two archives directly and
   prints regression-oriented deltas. `stax compare --json` emits the same
-  comparison as a facet-json report for CI and benchmark notes.
+  comparison as a facet-json report for CI and benchmark notes. Threshold
+  flags such as `--fail-target-delta-ms`, `--fail-target-delta-pct`, and
+  `--fail-unlinked-origins-delta` let CI fail directly on saved-run
+  regressions; the JSON report includes `threshold_failures`.
 - The archive is facet-json and versioned (`format_version = 2` for new
   saves). `stax open` and `stax compare` still read legacy v1 `archive.json`
   archives.
@@ -340,6 +343,9 @@ Add commands along these lines:
     span counts, origin-link counts, ingest drops, and top target lanes
   - done: `--json` produces named baseline/candidate/delta fields without
     scraping the human table
+  - done: threshold flags fail the command directly on positive deltas for
+    active time, target time, off-CPU time, unlinked/missing origins, and
+    ingest drops
 
 ### 4.2 Storage model
 
@@ -691,7 +697,7 @@ Tasks:
   - done: blessed demo run (`just demo-corpus`)
   - done: `just archive-smoke` for save/reopen/compare using the blessed
     target-span corpus through a checkout-local server/CLI, including
-    `stax select-run`
+    `stax select-run` and zero-regression `stax compare --json` thresholds
   - done: `just web-target-smoke` for checkout-local browser verification of
     target lanes, target display mode, and target-span details
   - done: GitHub Actions focused target-span workflow, with `bearcove/vox`
