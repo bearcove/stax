@@ -92,7 +92,18 @@ to validate or attach origins before deciding where to report a span.
 
 ## Demo workload
 
-The repo includes an executor-style demo:
+The repo includes several target-span demos:
+
+| example | what it demonstrates |
+|---------|----------------------|
+| `executor` | minimal queue/worker split with `CapturedOrigin` |
+| `thread_pool` | multiple workers sharing one logical target lane |
+| `async_executor` | scheduling work into an async channel, then timing it in the async worker |
+| `codec` | exact host timestamps with decode/encode lanes |
+| `model_runtime` | semantic model-runtime lanes with `SpanBuilder` |
+| `bad_origins` | intentionally missing/stale/wrong-thread origins for `stax diagnose` |
+
+For example:
 
 ```bash
 stax record -- cargo run -p stax-target --example executor
@@ -102,10 +113,11 @@ stax top --tid <cpu-tid> --sort total
 stax flame --tid <cpu-tid>
 ```
 
-`stax threads` will show an `executor demo` synthetic lane. The synthetic
-lane's `target ms` is the exact duration of reported work and `spans` is the
-span count. When origins link, filtering flame/top to the CPU thread that
-queued work shows `CPU caller -> executor demo -> job name`.
+`stax threads` will show a synthetic lane named after the example, such as
+`executor demo` or `model attention`. The synthetic lane's `target ms` is the
+exact duration of reported work and `spans` is the span count. When origins
+link, filtering flame/top to the CPU thread that queued work shows
+`CPU caller -> lane -> job name`.
 
 ## Diagnostics
 

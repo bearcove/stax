@@ -136,9 +136,6 @@ Already present:
 
 - `examples/probe.rs`
 - `examples/executor.rs`
-
-Add examples:
-
 - `examples/thread_pool.rs`
   - CPU queue side captures origin.
   - Worker side reports spans under a named pool lane.
