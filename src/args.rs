@@ -20,9 +20,9 @@ pub struct Cli {
 #[derive(Facet, Debug)]
 #[repr(u8)]
 pub enum Command {
-    /// Record live profiling data. Forwards events to the running
-    /// `stax-server` for the web UI and `stax {top,annotate,…}` to
-    /// query.
+    /// Record CPU stacks, off-CPU waits, and cooperating target spans.
+    /// Forwards events to the running `stax-server` for the web UI and
+    /// `stax {top,annotate,…}` to query.
     Record(RecordArgs),
 
     /// Codesign this stax binary (or, when run as root, install staxd
@@ -68,7 +68,7 @@ pub enum Command {
     /// target-executor time/spans broken out per node.
     Flame(FlameArgs),
 
-    /// Per-thread and synthetic-lane CPU/target/off-CPU breakdown.
+    /// List real threads and synthetic target lanes with CPU/target/off-CPU breakdown.
     Threads(ThreadsArgs),
 }
 
@@ -105,7 +105,7 @@ pub struct WaitArgs {
 
 #[derive(Facet, Debug)]
 pub struct TopArgs {
-    /// Maximum number of entries to return.
+    /// Maximum number of function/span-name entries to return.
     #[facet(args::named, args::short = 'n', default = 20)]
     pub limit: u32,
 

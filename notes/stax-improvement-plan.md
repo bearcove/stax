@@ -241,8 +241,9 @@ Remaining CLI work:
 - Add a `stax lanes` or `stax targets` command only if `threads` cannot remain
   clear enough.
   - Prefer improving `threads` first.
-- Make help text and `--help` copy mention target spans in the same places
-  docs do.
+- Done: help text and `--help` copy mention CPU stacks, off-CPU waits,
+  target spans, synthetic lanes, target time, and target span counts on the
+  relevant commands.
 - Add CLI snapshot tests once the blessed corpus exists.
 
 Acceptance criteria:
