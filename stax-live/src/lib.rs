@@ -17,7 +17,7 @@ use stax_live_proto::{
 };
 
 use crate::aggregator::{Aggregation, EventCtx, OffCpuBreakdown, PmcAccum, StackNode};
-pub use crate::aggregator::{IntervalKind, PmuSample};
+pub use crate::aggregator::{IntervalKind, NearestPetStackError, PmuSample};
 
 mod aggregator;
 mod binaries;

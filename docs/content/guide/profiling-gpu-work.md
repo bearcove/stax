@@ -81,8 +81,10 @@ but it does not mean a CPU thread was busy.
   to dispatch callers; `--sort self` still shows the kernel/span names.
 - **`stax diagnose`** — target ingest counters: batches, recorded/dropped
   spans, no-active-run / wrong-pid drops, total target duration, lanes, and
-  origin link/unlink counts. Use this when spans are missing or CPU-stack
-  attribution is missing.
+  origin link/unlink counts. It also reports why origins did not link
+  (`bad_tid`, `no_thread`, `no_stack`, `too_far`) and the min/avg/max PET
+  sample distance for linked or too-far origins. Use this when spans are
+  missing or CPU-stack attribution is missing.
 
 ## Interpreting a GPU-bound target
 

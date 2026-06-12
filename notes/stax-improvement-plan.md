@@ -223,17 +223,16 @@ Already present:
   - batches/spans dropped because the pid does not match the active run target
   - bad span durations
   - missing origins
-  - unlinked origins
+  - unlinked origins, including synthetic tid, no sampled thread, no user
+    stack, and nearest PET sample too far
+  - linked and too-far origin PET distance min/avg/max
 
 Remaining CLI work:
 
-- Teach `stax diagnose` about:
-  - queue drops in `stax-target`, if target-side counters are exposed
-  - origin age/distance distribution, not just linked/unlinked totals
-- Add suggestions when all target spans are unlinked:
-  - "capture origin at enqueue/dispatch, not completion"
-  - "confirm the reporting thread is the dispatching OS thread if that is the
-    intended attribution"
+- Teach `stax diagnose` about queue drops in `stax-target`, if target-side
+  counters are exposed.
+- Decide whether the lane table should grow a richer per-lane diagnostic view
+  or whether the compact per-lane reason row is enough.
 - Add a `stax lanes` or `stax targets` command only if `threads` cannot remain
   clear enough.
   - Prefer improving `threads` first.
@@ -249,7 +248,7 @@ Acceptance criteria:
   placement.
 - A synthetic tid is easy to discover without `-n 2000`.
 - Diagnostics distinguish "target did not report", "server dropped it", and
-  "origin did not link".
+  "origin did not link", including why the origin did not link.
 
 Verification:
 
@@ -406,7 +405,7 @@ The corpus should produce stable enough outputs for checks:
 - `stax diagnose`
   - reports batches/spans
   - reports bad durations
-  - reports linked and unlinked origins
+  - reports linked and unlinked origins with reason and distance diagnostics
   - prints hints for intentionally bad cases
 
 ### 5.3 CI shape
@@ -614,7 +613,7 @@ Done when:
 
 - Synthetic lanes are obvious in `threads`.
 - `diagnose` differentiates target did not report, wrong pid, bad duration,
-  missing origin, and unlinked origin.
+  missing origin, and unlinked origin reasons.
 
 ### Phase C: build the blessed corpus
 

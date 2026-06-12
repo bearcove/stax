@@ -15,10 +15,13 @@ diagnostic tools and the common errors.
 
 Dumps `stax-server`'s internals, including active run state and target-span
 ingest counters: batches, recorded/dropped spans, lane totals, and origin
-link/unlink counts. For target spans it also prints hints for the common
-integration failures: no batches, invalid start/end timestamps, spans without
-origins, origins that do not link to a sampled CPU stack, batches sent while no
-run was active, and batches sent from a pid other than the active run target.
+link/unlink counts. It breaks unlinked origins down into synthetic target tid,
+no PET samples for that tid, PET samples with no user stack, and nearest sample
+too far away; linked and too-far origins include PET distance min/avg/max. For
+target spans it also prints hints for the common integration failures: no
+batches, invalid start/end timestamps, spans without origins, origins that do
+not link to a sampled CPU stack, batches sent while no run was active, and
+batches sent from a pid other than the active run target.
 
 ```bash
 stax diagnose

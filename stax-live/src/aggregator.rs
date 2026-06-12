@@ -151,6 +151,21 @@ pub struct PetSample {
     pub pmc: PmuSample,
 }
 
+pub struct NearestPetStack {
+    pub stack: Box<[u64]>,
+    pub distance_ns: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NearestPetStackError {
+    NoThread,
+    NoUserStack,
+    TooFar {
+        distance_ns: u64,
+        max_distance_ns: u64,
+    },
+}
+
 /// One on-CPU or off-CPU interval, as reported by SCHED-record
 /// transitions. For off-CPU, the stack the thread was on at the
 /// moment it parked is included so the aggregator can attribute the
@@ -438,14 +453,39 @@ impl Aggregator {
         timestamp_ns: u64,
         max_distance_ns: u64,
     ) -> Option<Box<[u64]>> {
-        let stats = self.threads.get(&tid)?;
+        self.nearest_pet_stack_with_distance(tid, timestamp_ns, max_distance_ns)
+            .ok()
+            .map(|nearest| nearest.stack)
+    }
+
+    pub fn nearest_pet_stack_with_distance(
+        &self,
+        tid: u32,
+        timestamp_ns: u64,
+        max_distance_ns: u64,
+    ) -> Result<NearestPetStack, NearestPetStackError> {
+        let stats = self
+            .threads
+            .get(&tid)
+            .ok_or(NearestPetStackError::NoThread)?;
         let sample = stats
             .pet_samples
             .iter()
             .filter(|sample| !sample.stack.is_empty())
-            .min_by_key(|sample| sample.timestamp_ns.abs_diff(timestamp_ns))?;
+            .min_by_key(|sample| sample.timestamp_ns.abs_diff(timestamp_ns))
+            .ok_or(NearestPetStackError::NoUserStack)?;
         let distance = sample.timestamp_ns.abs_diff(timestamp_ns);
-        (distance <= max_distance_ns).then(|| sample.stack.clone())
+        if distance <= max_distance_ns {
+            Ok(NearestPetStack {
+                stack: sample.stack.clone(),
+                distance_ns: distance,
+            })
+        } else {
+            Err(NearestPetStackError::TooFar {
+                distance_ns: distance,
+                max_distance_ns,
+            })
+        }
     }
 
     /// Iterate raw PET samples for a single thread, or every thread

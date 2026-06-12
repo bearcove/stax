@@ -26,7 +26,7 @@
 
 use std::collections::HashMap;
 
-use stax_live::{IntervalKind, LiveSymbolOwned, LoadedBinary, PmuSample};
+use stax_live::{IntervalKind, LiveSymbolOwned, LoadedBinary, NearestPetStackError, PmuSample};
 use stax_live_proto::{
     TargetIngest, TargetIngestDiagnostics, TargetLaneDiagnostics, TargetSpanBatch, TargetSpanOrigin,
 };
@@ -92,7 +92,79 @@ struct TargetIngestCounters {
     spans_dropped_bad_duration: u64,
     spans_with_origin: u64,
     spans_linked_origin: u64,
+    origin_links: OriginLinkCounters,
     total_duration_ns: u64,
+}
+
+#[derive(Clone, Copy, Default)]
+struct TargetBatchCounters {
+    received: u64,
+    recorded: u64,
+    dropped_bad_duration: u64,
+    spans_with_origin: u64,
+    spans_linked_origin: u64,
+    origin_links: OriginLinkCounters,
+    total_duration_ns: u64,
+}
+
+#[derive(Clone, Copy, Default)]
+struct OriginLinkCounters {
+    invalid_tid: u64,
+    no_thread: u64,
+    no_stack: u64,
+    too_far: u64,
+    linked_distance: DistanceCounters,
+    too_far_distance: DistanceCounters,
+}
+
+#[derive(Clone, Copy, Default)]
+struct DistanceCounters {
+    count: u64,
+    total_ns: u64,
+    min_ns: u64,
+    max_ns: u64,
+}
+
+impl DistanceCounters {
+    fn record(&mut self, distance_ns: u64) {
+        self.count = self.count.saturating_add(1);
+        self.total_ns = self.total_ns.saturating_add(distance_ns);
+        if self.count == 1 || distance_ns < self.min_ns {
+            self.min_ns = distance_ns;
+        }
+        self.max_ns = self.max_ns.max(distance_ns);
+    }
+
+    fn add(&mut self, other: Self) {
+        if other.count == 0 {
+            return;
+        }
+        if self.count == 0 || other.min_ns < self.min_ns {
+            self.min_ns = other.min_ns;
+        }
+        self.count = self.count.saturating_add(other.count);
+        self.total_ns = self.total_ns.saturating_add(other.total_ns);
+        self.max_ns = self.max_ns.max(other.max_ns);
+    }
+
+    fn avg_ns(&self) -> u64 {
+        if self.count == 0 {
+            0
+        } else {
+            self.total_ns / self.count
+        }
+    }
+}
+
+impl OriginLinkCounters {
+    fn add(&mut self, other: Self) {
+        self.invalid_tid = self.invalid_tid.saturating_add(other.invalid_tid);
+        self.no_thread = self.no_thread.saturating_add(other.no_thread);
+        self.no_stack = self.no_stack.saturating_add(other.no_stack);
+        self.too_far = self.too_far.saturating_add(other.too_far);
+        self.linked_distance.add(other.linked_distance);
+        self.too_far_distance.add(other.too_far_distance);
+    }
 }
 
 impl TargetIngestCounters {
@@ -101,24 +173,23 @@ impl TargetIngestCounters {
             .saturating_sub(self.spans_linked_origin)
     }
 
-    fn record_batch(
-        &mut self,
-        received: u64,
-        recorded: u64,
-        dropped_bad_duration: u64,
-        spans_with_origin: u64,
-        spans_linked_origin: u64,
-        total_duration_ns: u64,
-    ) {
+    fn record_batch(&mut self, batch: TargetBatchCounters) {
         self.batches = self.batches.saturating_add(1);
-        self.spans_received = self.spans_received.saturating_add(received);
-        self.spans_recorded = self.spans_recorded.saturating_add(recorded);
+        self.spans_received = self.spans_received.saturating_add(batch.received);
+        self.spans_recorded = self.spans_recorded.saturating_add(batch.recorded);
         self.spans_dropped_bad_duration = self
             .spans_dropped_bad_duration
-            .saturating_add(dropped_bad_duration);
-        self.spans_with_origin = self.spans_with_origin.saturating_add(spans_with_origin);
-        self.spans_linked_origin = self.spans_linked_origin.saturating_add(spans_linked_origin);
-        self.total_duration_ns = self.total_duration_ns.saturating_add(total_duration_ns);
+            .saturating_add(batch.dropped_bad_duration);
+        self.spans_with_origin = self
+            .spans_with_origin
+            .saturating_add(batch.spans_with_origin);
+        self.spans_linked_origin = self
+            .spans_linked_origin
+            .saturating_add(batch.spans_linked_origin);
+        self.origin_links.add(batch.origin_links);
+        self.total_duration_ns = self
+            .total_duration_ns
+            .saturating_add(batch.total_duration_ns);
     }
 
     fn record_dropped_no_active_run(&mut self, spans: u64) {
@@ -141,36 +212,12 @@ impl TargetLaneRegistry {
         self.totals.record_dropped_wrong_pid(spans);
     }
 
-    fn record_batch(
-        &mut self,
-        pid: u32,
-        lane: &str,
-        received: u64,
-        recorded: u64,
-        dropped_bad_duration: u64,
-        spans_with_origin: u64,
-        spans_linked_origin: u64,
-        total_duration_ns: u64,
-    ) {
-        self.totals.record_batch(
-            received,
-            recorded,
-            dropped_bad_duration,
-            spans_with_origin,
-            spans_linked_origin,
-            total_duration_ns,
-        );
+    fn record_batch(&mut self, pid: u32, lane: &str, batch: TargetBatchCounters) {
+        self.totals.record_batch(batch);
         self.lane_counters
             .entry((pid, lane.to_owned()))
             .or_default()
-            .record_batch(
-                received,
-                recorded,
-                dropped_bad_duration,
-                spans_with_origin,
-                spans_linked_origin,
-                total_duration_ns,
-            );
+            .record_batch(batch);
     }
 
     pub(crate) fn diagnostics(&self) -> TargetIngestDiagnostics {
@@ -188,6 +235,16 @@ impl TargetLaneRegistry {
                 spans_with_origin: counters.spans_with_origin,
                 spans_linked_origin: counters.spans_linked_origin,
                 spans_unlinked_origin: counters.spans_unlinked_origin(),
+                spans_origin_invalid_tid: counters.origin_links.invalid_tid,
+                spans_origin_no_thread: counters.origin_links.no_thread,
+                spans_origin_no_stack: counters.origin_links.no_stack,
+                spans_origin_too_far: counters.origin_links.too_far,
+                origin_linked_distance_min_ns: counters.origin_links.linked_distance.min_ns,
+                origin_linked_distance_avg_ns: counters.origin_links.linked_distance.avg_ns(),
+                origin_linked_distance_max_ns: counters.origin_links.linked_distance.max_ns,
+                origin_too_far_distance_min_ns: counters.origin_links.too_far_distance.min_ns,
+                origin_too_far_distance_avg_ns: counters.origin_links.too_far_distance.avg_ns(),
+                origin_too_far_distance_max_ns: counters.origin_links.too_far_distance.max_ns,
                 total_duration_ns: counters.total_duration_ns,
             })
             .collect();
@@ -210,6 +267,17 @@ impl TargetLaneRegistry {
             spans_with_origin: self.totals.spans_with_origin,
             spans_linked_origin: self.totals.spans_linked_origin,
             spans_unlinked_origin: self.totals.spans_unlinked_origin(),
+            spans_origin_invalid_tid: self.totals.origin_links.invalid_tid,
+            spans_origin_no_thread: self.totals.origin_links.no_thread,
+            spans_origin_no_stack: self.totals.origin_links.no_stack,
+            spans_origin_too_far: self.totals.origin_links.too_far,
+            origin_stack_max_distance_ns: ORIGIN_STACK_MAX_DISTANCE_NS,
+            origin_linked_distance_min_ns: self.totals.origin_links.linked_distance.min_ns,
+            origin_linked_distance_avg_ns: self.totals.origin_links.linked_distance.avg_ns(),
+            origin_linked_distance_max_ns: self.totals.origin_links.linked_distance.max_ns,
+            origin_too_far_distance_min_ns: self.totals.origin_links.too_far_distance.min_ns,
+            origin_too_far_distance_avg_ns: self.totals.origin_links.too_far_distance.avg_ns(),
+            origin_too_far_distance_max_ns: self.totals.origin_links.too_far_distance.max_ns,
             total_duration_ns: self.totals.total_duration_ns,
             lanes,
         }
@@ -333,6 +401,7 @@ impl TargetIngest for TargetIngestService {
         let spans_with_origin = events.iter().filter(|event| event.origin.is_some()).count() as u64;
         let mut total_duration_ns = 0u64;
         let mut linked_origins = 0u64;
+        let mut origin_links = OriginLinkCounters::default();
         if !events.is_empty() {
             let mut aggregator = self.server.aggregator().write();
             for event in &events {
@@ -343,13 +412,35 @@ impl TargetIngest for TargetIngestService {
                     .filter(|&tid| tid < SYNTH_TID_BASE);
                 let origin_stack = event.origin.and_then(|origin| {
                     if origin.tid >= SYNTH_TID_BASE {
+                        origin_links.invalid_tid = origin_links.invalid_tid.saturating_add(1);
                         return None;
                     }
-                    aggregator.nearest_pet_stack(
+                    match aggregator.nearest_pet_stack_with_distance(
                         origin.tid,
                         origin.timestamp_ns,
                         ORIGIN_STACK_MAX_DISTANCE_NS,
-                    )
+                    ) {
+                        Ok(nearest) => {
+                            origin_links.linked_distance.record(nearest.distance_ns);
+                            Some(nearest.stack)
+                        }
+                        Err(NearestPetStackError::NoThread) => {
+                            origin_links.no_thread = origin_links.no_thread.saturating_add(1);
+                            None
+                        }
+                        Err(NearestPetStackError::NoUserStack) => {
+                            origin_links.no_stack = origin_links.no_stack.saturating_add(1);
+                            None
+                        }
+                        Err(NearestPetStackError::TooFar {
+                            distance_ns,
+                            max_distance_ns: _,
+                        }) => {
+                            origin_links.too_far = origin_links.too_far.saturating_add(1);
+                            origin_links.too_far_distance.record(distance_ns);
+                            None
+                        }
+                    }
                 });
                 let mut stack =
                     Vec::with_capacity(2 + origin_stack.as_ref().map_or(0, |stack| stack.len()));
@@ -383,12 +474,15 @@ impl TargetIngest for TargetIngestService {
         self.server.target_lanes().lock().record_batch(
             batch.pid,
             &batch.lane,
-            spans_received,
-            recorded_spans,
-            dropped_bad_duration,
-            spans_with_origin,
-            linked_origins,
-            total_duration_ns,
+            TargetBatchCounters {
+                received: spans_received,
+                recorded: recorded_spans,
+                dropped_bad_duration,
+                spans_with_origin,
+                spans_linked_origin: linked_origins,
+                origin_links,
+                total_duration_ns,
+            },
         );
         if !events.is_empty() {
             self.server.bump_revision();
@@ -676,6 +770,98 @@ mod tests {
         assert_eq!(diagnostics.spans_with_origin, 1);
         assert_eq!(diagnostics.spans_linked_origin, 1);
         assert_eq!(diagnostics.spans_unlinked_origin, 0);
+        assert_eq!(diagnostics.origin_linked_distance_min_ns, 1_000);
+        assert_eq!(diagnostics.origin_linked_distance_avg_ns, 1_000);
+        assert_eq!(diagnostics.origin_linked_distance_max_ns, 1_000);
+    }
+
+    #[tokio::test]
+    async fn ingest_diagnoses_unlinked_origin_reasons() {
+        let server = ServerState::new_for_tests();
+        let service = TargetIngestService::new(server.clone());
+        server.set_active_run_for_tests(42);
+
+        const NO_STACK_TID: u32 = 2200;
+        const TOO_FAR_TID: u32 = 2201;
+        const TOO_FAR_SAMPLE_NS: u64 = 1_000_000;
+        const TOO_FAR_ORIGIN_NS: u64 = TOO_FAR_SAMPLE_NS + ORIGIN_STACK_MAX_DISTANCE_NS + 7;
+
+        {
+            let mut aggregator = server.aggregator().write();
+            aggregator.record_pet_sample(NO_STACK_TID, 1_000_000, &[], &[], PmuSample::default());
+            aggregator.record_pet_sample(
+                TOO_FAR_TID,
+                TOO_FAR_SAMPLE_NS,
+                &[0x2000_0000],
+                &[],
+                PmuSample::default(),
+            );
+        }
+
+        service
+            .ingest(TargetSpanBatch {
+                pid: 42,
+                lane: "GPU bad origins".to_owned(),
+                spans: vec![
+                    span_with_origin(
+                        "synthetic_origin_tid",
+                        1_000_000,
+                        2_000_000,
+                        TargetSpanOrigin {
+                            tid: SYNTH_TID_BASE,
+                            timestamp_ns: 1_000_000,
+                        },
+                    ),
+                    span_with_origin(
+                        "missing_origin_thread",
+                        2_000_000,
+                        3_000_000,
+                        TargetSpanOrigin {
+                            tid: 990_000,
+                            timestamp_ns: 2_000_000,
+                        },
+                    ),
+                    span_with_origin(
+                        "empty_origin_stack",
+                        3_000_000,
+                        4_000_000,
+                        TargetSpanOrigin {
+                            tid: NO_STACK_TID,
+                            timestamp_ns: 1_000_000,
+                        },
+                    ),
+                    span_with_origin(
+                        "stale_origin_stack",
+                        4_000_000,
+                        5_000_000,
+                        TargetSpanOrigin {
+                            tid: TOO_FAR_TID,
+                            timestamp_ns: TOO_FAR_ORIGIN_NS,
+                        },
+                    ),
+                ],
+            })
+            .await;
+
+        let diagnostics = server.target_lanes().lock().diagnostics();
+        assert_eq!(diagnostics.spans_with_origin, 4);
+        assert_eq!(diagnostics.spans_linked_origin, 0);
+        assert_eq!(diagnostics.spans_unlinked_origin, 4);
+        assert_eq!(diagnostics.spans_origin_invalid_tid, 1);
+        assert_eq!(diagnostics.spans_origin_no_thread, 1);
+        assert_eq!(diagnostics.spans_origin_no_stack, 1);
+        assert_eq!(diagnostics.spans_origin_too_far, 1);
+        assert_eq!(diagnostics.origin_stack_max_distance_ns, 50_000_000);
+        assert_eq!(diagnostics.origin_too_far_distance_min_ns, 50_000_007);
+        assert_eq!(diagnostics.origin_too_far_distance_avg_ns, 50_000_007);
+        assert_eq!(diagnostics.origin_too_far_distance_max_ns, 50_000_007);
+        assert_eq!(diagnostics.lanes.len(), 1);
+        let lane = &diagnostics.lanes[0];
+        assert_eq!(lane.spans_origin_invalid_tid, 1);
+        assert_eq!(lane.spans_origin_no_thread, 1);
+        assert_eq!(lane.spans_origin_no_stack, 1);
+        assert_eq!(lane.spans_origin_too_far, 1);
+        assert_eq!(lane.origin_too_far_distance_avg_ns, 50_000_007);
     }
 
     #[tokio::test]

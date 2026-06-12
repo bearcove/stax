@@ -1343,6 +1343,32 @@ mod tests {
     }
 
     #[test]
+    fn target_ingest_hints_explain_unlinked_origin_reasons() {
+        let hints = target_ingest_hints(&TargetIngestDiagnostics {
+            batches: 1,
+            spans_received: 4,
+            spans_recorded: 4,
+            spans_with_origin: 4,
+            spans_unlinked_origin: 4,
+            spans_origin_invalid_tid: 1,
+            spans_origin_no_thread: 1,
+            spans_origin_no_stack: 1,
+            spans_origin_too_far: 1,
+            origin_stack_max_distance_ns: 50_000_000,
+            origin_too_far_distance_avg_ns: 50_000_007,
+            origin_too_far_distance_max_ns: 50_000_007,
+            ..TargetIngestDiagnostics::default()
+        });
+
+        assert_eq!(hints.len(), 4);
+        assert!(hints[0].contains("synthetic target tid"));
+        assert!(hints[1].contains("no PET samples"));
+        assert!(hints[2].contains("no user stacks"));
+        assert!(hints[3].contains("too far"));
+        assert!(hints[3].contains("50.000ms"));
+    }
+
+    #[test]
     fn thread_kind_labels_synthetic_target_lanes() {
         let cpu = thread(123, Some("main"), 1, 0, 1, 0);
         let target = thread(SYNTH_TID_BASE, Some("gpu"), 1, 0, 0, 1);
@@ -1481,25 +1507,71 @@ fn print_diagnostics(snapshot: &DiagnosticsSnapshot) {
             "  origins {} linked / {} unlinked",
             target.spans_linked_origin, target.spans_unlinked_origin,
         );
+        print_target_origin_diagnostics(target);
     }
     if !target.lanes.is_empty() {
         println!(
-            "  {:>10} {:>8} {:>8} {:>8} {:>10}  lane",
-            "duration", "spans", "origin", "linked", "tid",
+            "  {:>10} {:>8} {:>8} {:>8} {:>8} {:>10}  lane",
+            "duration", "spans", "origin", "linked", "unlinked", "tid",
         );
         for lane in &target.lanes {
             println!(
-                "  {:>10.3} {:>8} {:>8} {:>8} {:>10}  {}",
+                "  {:>10.3} {:>8} {:>8} {:>8} {:>8} {:>10}  {}",
                 lane.total_duration_ns as f64 / 1e6,
                 lane.spans_recorded,
                 lane.spans_with_origin,
                 lane.spans_linked_origin,
+                lane.spans_unlinked_origin,
                 lane.tid,
                 lane.name,
             );
+            if lane.spans_unlinked_origin > 0 {
+                println!(
+                    "    origin failures for {}: bad_tid {}  no_thread {}  no_stack {}  too_far {}",
+                    lane.name,
+                    lane.spans_origin_invalid_tid,
+                    lane.spans_origin_no_thread,
+                    lane.spans_origin_no_stack,
+                    lane.spans_origin_too_far,
+                );
+            }
         }
     }
     print_target_ingest_hints(target);
+}
+
+fn print_target_origin_diagnostics(target: &TargetIngestDiagnostics) {
+    if target.spans_linked_origin > 0 {
+        println!(
+            "  linked origin PET distance min/avg/max {:.3}/{:.3}/{:.3}ms",
+            target.origin_linked_distance_min_ns as f64 / 1e6,
+            target.origin_linked_distance_avg_ns as f64 / 1e6,
+            target.origin_linked_distance_max_ns as f64 / 1e6,
+        );
+    }
+    let explained_unlinked = target
+        .spans_origin_invalid_tid
+        .saturating_add(target.spans_origin_no_thread)
+        .saturating_add(target.spans_origin_no_stack)
+        .saturating_add(target.spans_origin_too_far);
+    if explained_unlinked > 0 {
+        println!(
+            "  unlinked origins by reason: bad_tid {}  no_thread {}  no_stack {}  too_far {}",
+            target.spans_origin_invalid_tid,
+            target.spans_origin_no_thread,
+            target.spans_origin_no_stack,
+            target.spans_origin_too_far,
+        );
+    }
+    if target.spans_origin_too_far > 0 {
+        println!(
+            "  too-far origin PET distance min/avg/max {:.3}/{:.3}/{:.3}ms (limit {:.3}ms)",
+            target.origin_too_far_distance_min_ns as f64 / 1e6,
+            target.origin_too_far_distance_avg_ns as f64 / 1e6,
+            target.origin_too_far_distance_max_ns as f64 / 1e6,
+            target.origin_stack_max_distance_ns as f64 / 1e6,
+        );
+    }
 }
 
 fn print_target_ingest_drop_counts(target: &TargetIngestDiagnostics) {
@@ -1579,12 +1651,50 @@ fn target_ingest_hints(target: &TargetIngestDiagnostics) -> Vec<String> {
                 .to_owned(),
         );
     } else if target.spans_unlinked_origin > 0 {
-        hints.push(format!(
-            "{} of {} origin-carrying span{} did not link to a sampled CPU stack; capture origins on the dispatching OS thread immediately at queue/submit time, then inspect with `stax top --tid <cpu tid> --sort total` or `stax flame --tid <cpu tid>`",
-            target.spans_unlinked_origin,
-            target.spans_with_origin,
-            plural(target.spans_with_origin),
-        ));
+        if target.spans_origin_invalid_tid > 0 {
+            hints.push(format!(
+                "{} origin{} used a synthetic target tid; capture origins on a real CPU thread before reporting target work",
+                target.spans_origin_invalid_tid,
+                plural(target.spans_origin_invalid_tid),
+            ));
+        }
+        if target.spans_origin_no_thread > 0 {
+            hints.push(format!(
+                "{} origin{} referenced a tid with no PET samples in this run; confirm the profiled pid/thread is the one dispatching the work",
+                target.spans_origin_no_thread,
+                plural(target.spans_origin_no_thread),
+            ));
+        }
+        if target.spans_origin_no_stack > 0 {
+            hints.push(format!(
+                "{} origin thread{} had PET samples but no user stacks; check stack unwinding/frame pointers or whether the dispatch site was sampled only in kernel/runtime glue",
+                target.spans_origin_no_stack,
+                plural(target.spans_origin_no_stack),
+            ));
+        }
+        if target.spans_origin_too_far > 0 {
+            hints.push(format!(
+                "{} origin{} were too far from the nearest sampled CPU stack (avg {:.3}ms, max {:.3}ms, limit {:.3}ms); capture origins immediately at queue/submit time, not at completion or long before dispatch",
+                target.spans_origin_too_far,
+                plural(target.spans_origin_too_far),
+                target.origin_too_far_distance_avg_ns as f64 / 1e6,
+                target.origin_too_far_distance_max_ns as f64 / 1e6,
+                target.origin_stack_max_distance_ns as f64 / 1e6,
+            ));
+        }
+        let explained_unlinked = target
+            .spans_origin_invalid_tid
+            .saturating_add(target.spans_origin_no_thread)
+            .saturating_add(target.spans_origin_no_stack)
+            .saturating_add(target.spans_origin_too_far);
+        if explained_unlinked < target.spans_unlinked_origin {
+            hints.push(format!(
+                "{} of {} origin-carrying span{} did not link to a sampled CPU stack; capture origins on the dispatching OS thread immediately at queue/submit time, then inspect with `stax top --tid <cpu tid> --sort total` or `stax flame --tid <cpu tid>`",
+                target.spans_unlinked_origin,
+                target.spans_with_origin,
+                plural(target.spans_with_origin),
+            ));
+        }
     }
 
     hints

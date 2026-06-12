@@ -200,6 +200,18 @@ The usual fixes are:
 - keep span timestamps in one monotonic nanosecond clock
 - keep span names semantic and low-cardinality
 
+`stax diagnose` names the failure mode:
+
+- `bad_tid` means the origin tid was itself a synthetic target lane; capture
+  on a real CPU thread before reporting target work.
+- `no_thread` means no PET samples were recorded for that tid in this run;
+  check that the profiled process/thread is really the one dispatching work.
+- `no_stack` means the tid was sampled, but without a user stack; check frame
+  pointers / DWARF unwinding or whether the dispatch site only sampled in
+  kernel/runtime glue.
+- `too_far` means the nearest sampled CPU stack was outside stax's origin
+  window; move origin capture closer to the queue/submit point.
+
 ## Demo workload
 
 The repo includes several target-span demos:
@@ -239,11 +251,14 @@ link, filtering flame/top to the CPU thread that queued work shows
 - dropped spans with invalid durations
 - per-lane duration and span totals
 - origin-linked and origin-unlinked counts
+- unlinked-origin reasons: `bad_tid`, `no_thread`, `no_stack`, `too_far`
+- linked and too-far origin PET distance min/avg/max
 
 If spans show up on the synthetic lane but not under CPU callers, check the
 origin counters first. Unlinked origins usually mean the target captured the
 origin too far from the queue point, used the wrong thread, or the CPU sampler
-did not catch a nearby PET sample.
+did not catch a nearby PET sample. If `too_far` dominates, the average/max
+distance tells you how stale the origin was relative to the nearest CPU stack.
 
 ## Specializations
 
