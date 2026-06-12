@@ -15,6 +15,7 @@ mod recorder;
 mod target_ingest;
 
 use std::fs;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -27,11 +28,11 @@ use stax_live_proto::{
     AnnotatedView, CfgUpdate, DiagnosticsSnapshot, FlamegraphUpdate, IntervalListUpdate,
     NeighborsUpdate, PetSampleListUpdate, Profiler, ProfilerDispatcher, RunConfig, RunControl,
     RunControlDispatcher, RunControlError, RunId, RunState, RunSummary, RunViewParams,
-    SavedAggregator, SavedBinaryRegistry, SavedRunArchive, SavedRunArchiveFiles,
-    SavedRunArchiveManifest, SavedRunArchiveProvenance, ServerStatus, StopReason,
-    TargetIngestDiagnostics, TargetIngestDispatcher, TargetSpanListUpdate, ThreadsUpdate,
-    TimelineParams, TimelineUpdate, TopEntry, TopSort, TopUpdate, ViewParams, WaitCondition,
-    WaitOutcome, WakersUpdate,
+    SavedAggregator, SavedBinaryRegistry, SavedEventLogEntry, SavedRunArchive,
+    SavedRunArchiveFiles, SavedRunArchiveManifest, SavedRunArchiveProvenance, ServerStatus,
+    StopReason, TargetIngestDiagnostics, TargetIngestDispatcher, TargetSpanListUpdate,
+    ThreadsUpdate, TimelineParams, TimelineUpdate, TopEntry, TopSort, TopUpdate, ViewParams,
+    WaitCondition, WaitOutcome, WakersUpdate,
 };
 
 use crate::target_ingest::{TargetIngestService, TargetLaneRegistry};
@@ -47,6 +48,7 @@ const ARCHIVE_MANIFEST_FILE_NAME: &str = "manifest.json";
 const ARCHIVE_AGGREGATOR_FILE_NAME: &str = "aggregator.json";
 const ARCHIVE_BINARIES_FILE_NAME: &str = "binaries.json";
 const ARCHIVE_TARGET_INGEST_FILE_NAME: &str = "target-ingest.json";
+const ARCHIVE_EVENTS_FILE_NAME: &str = "events.jsonl";
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
@@ -1185,7 +1187,8 @@ fn write_archive(path: &Path, archive: &SavedRunArchive) -> Result<(), String> {
     write_target_ingest(
         path.join(ARCHIVE_TARGET_INGEST_FILE_NAME),
         &archive.target_ingest,
-    )
+    )?;
+    write_event_log(path.join(ARCHIVE_EVENTS_FILE_NAME), archive)
 }
 
 fn archive_provenance() -> SavedRunArchiveProvenance {
@@ -1253,6 +1256,118 @@ fn write_target_ingest(path: PathBuf, value: &TargetIngestDiagnostics) -> Result
     let bytes = facet_json::to_vec_pretty(value)
         .map_err(|e| format!("serialize {}: {e}", path.display()))?;
     fs::write(&path, bytes).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+fn write_event_log(path: PathBuf, archive: &SavedRunArchive) -> Result<(), String> {
+    let file = fs::File::create(&path).map_err(|e| format!("create {}: {e}", path.display()))?;
+    let mut writer = BufWriter::new(file);
+    write_event_log_entry(
+        &mut writer,
+        &path,
+        SavedEventLogEntry::ArchiveSaved {
+            saved_at_unix_ns: archive.saved_at_unix_ns,
+        },
+    )?;
+    for run in &archive.runs {
+        write_event_log_entry(
+            &mut writer,
+            &path,
+            SavedEventLogEntry::RunSummary { run: run.clone() },
+        )?;
+    }
+    write_event_log_entry(
+        &mut writer,
+        &path,
+        SavedEventLogEntry::AggregatorClock {
+            session_start_ns: archive.aggregator.session_start_ns,
+            last_event_ns: archive.aggregator.last_event_ns,
+        },
+    )?;
+    for thread_name in &archive.aggregator.thread_names {
+        write_event_log_entry(
+            &mut writer,
+            &path,
+            SavedEventLogEntry::ThreadName {
+                tid: thread_name.tid,
+                name: thread_name.name.clone(),
+            },
+        )?;
+    }
+    for binary in &archive.binaries.binaries {
+        write_event_log_entry(
+            &mut writer,
+            &path,
+            SavedEventLogEntry::BinaryLoaded {
+                binary: binary.clone(),
+            },
+        )?;
+    }
+    write_event_log_entry(
+        &mut writer,
+        &path,
+        SavedEventLogEntry::TargetIngestDiagnostics {
+            diagnostics: archive.target_ingest.clone(),
+        },
+    )?;
+
+    let mut timed = Vec::new();
+    for thread in &archive.aggregator.threads {
+        for sample in &thread.pet_samples {
+            timed.push((
+                sample.timestamp_ns,
+                0_u8,
+                thread.tid,
+                SavedEventLogEntry::PetSample {
+                    tid: thread.tid,
+                    sample: sample.clone(),
+                },
+            ));
+        }
+        for interval in &thread.intervals {
+            timed.push((
+                interval.start_ns,
+                1_u8,
+                thread.tid,
+                SavedEventLogEntry::Interval {
+                    tid: thread.tid,
+                    interval: interval.clone(),
+                },
+            ));
+        }
+        for wakeup in &thread.wakeups {
+            timed.push((
+                wakeup.timestamp_ns,
+                2_u8,
+                thread.tid,
+                SavedEventLogEntry::Wakeup {
+                    tid: thread.tid,
+                    wakeup: wakeup.clone(),
+                },
+            ));
+        }
+    }
+    timed.sort_by_key(|(timestamp_ns, order, tid, _)| (*timestamp_ns, *order, *tid));
+    for (_, _, _, entry) in timed {
+        write_event_log_entry(&mut writer, &path, entry)?;
+    }
+    writer
+        .flush()
+        .map_err(|e| format!("flush {}: {e}", path.display()))
+}
+
+fn write_event_log_entry(
+    writer: &mut impl Write,
+    path: &Path,
+    entry: SavedEventLogEntry,
+) -> Result<(), String> {
+    let bytes =
+        facet_json::to_vec(&entry).map_err(|e| format!("serialize {}: {e}", path.display()))?;
+    writer
+        .write_all(&bytes)
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+    writer
+        .write_all(b"\n")
+        .map_err(|e| format!("write {}: {e}", path.display()))
 }
 
 fn read_archive_v1(archive_path: &Path) -> Result<SavedRunArchive, String> {
@@ -1377,8 +1492,8 @@ fn now_unix_ns() -> u64 {
 #[cfg(test)]
 mod tests {
     use stax_live_proto::{
-        LiveFilter, Profiler as _, RunControl as _, RunViewParams, TargetIngest as _,
-        TargetReporterStats, TargetSpan, TargetSpanBatch, TopSort, ViewParams,
+        LiveFilter, Profiler as _, RunControl as _, RunViewParams, SavedEventLogEntry,
+        TargetIngest as _, TargetReporterStats, TargetSpan, TargetSpanBatch, TopSort, ViewParams,
     };
 
     use super::*;
@@ -1436,7 +1551,39 @@ mod tests {
         assert!(archive_dir.join(ARCHIVE_AGGREGATOR_FILE_NAME).exists());
         assert!(archive_dir.join(ARCHIVE_BINARIES_FILE_NAME).exists());
         assert!(archive_dir.join(ARCHIVE_TARGET_INGEST_FILE_NAME).exists());
+        assert!(archive_dir.join(ARCHIVE_EVENTS_FILE_NAME).exists());
         assert!(!archive_dir.join(ARCHIVE_V1_FILE_NAME).exists());
+        let event_log = read_event_log_for_test(&archive_dir.join(ARCHIVE_EVENTS_FILE_NAME));
+        assert!(event_log.iter().any(|entry| {
+            matches!(
+                entry,
+                SavedEventLogEntry::ArchiveSaved {
+                    saved_at_unix_ns: _
+                }
+            )
+        }));
+        assert!(event_log.iter().any(|entry| {
+            matches!(
+                entry,
+                SavedEventLogEntry::RunSummary { run } if run.label == "archive-source"
+            )
+        }));
+        assert!(event_log.iter().any(|entry| {
+            matches!(
+                entry,
+                SavedEventLogEntry::TargetIngestDiagnostics { diagnostics }
+                    if diagnostics.spans_recorded == 1
+            )
+        }));
+        assert!(event_log.iter().any(|entry| {
+            matches!(
+                entry,
+                SavedEventLogEntry::Interval { tid, interval }
+                    if *tid == SYNTH_TID_BASE
+                        && interval.start_ns == 10_000_000
+                        && interval.end_ns == 16_000_000
+            )
+        }));
         let manifest_bytes =
             std::fs::read(archive_dir.join(ARCHIVE_MANIFEST_FILE_NAME)).expect("read manifest");
         let manifest: SavedRunArchiveManifest =
@@ -1725,5 +1872,12 @@ mod tests {
             "stax-archive-{name}-{}-{nonce}",
             std::process::id()
         ))
+    }
+
+    fn read_event_log_for_test(path: &Path) -> Vec<SavedEventLogEntry> {
+        let text = std::fs::read_to_string(path).expect("read event log");
+        text.lines()
+            .map(|line| facet_json::from_slice(line.as_bytes()).expect("parse event log entry"))
+            .collect()
     }
 }

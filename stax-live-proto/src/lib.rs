@@ -1112,6 +1112,47 @@ pub struct SavedRunArchiveFiles {
     pub target_ingest: String,
 }
 
+/// One append-friendly record in `events.jsonl`, the saved-run sidecar
+/// written next to the v2 aggregate chunks. The current `open` path still
+/// restores from aggregate chunks; this stream gives future tooling a
+/// chronological replay substrate without reverse-engineering those chunks.
+#[derive(Clone, Debug, Facet)]
+#[repr(u8)]
+pub enum SavedEventLogEntry {
+    ArchiveSaved {
+        saved_at_unix_ns: u64,
+    },
+    RunSummary {
+        run: RunSummary,
+    },
+    AggregatorClock {
+        session_start_ns: Option<u64>,
+        last_event_ns: Option<u64>,
+    },
+    ThreadName {
+        tid: u32,
+        name: String,
+    },
+    BinaryLoaded {
+        binary: SavedLoadedBinary,
+    },
+    PetSample {
+        tid: u32,
+        sample: SavedPetSample,
+    },
+    Interval {
+        tid: u32,
+        interval: SavedInterval,
+    },
+    Wakeup {
+        tid: u32,
+        wakeup: SavedWakeup,
+    },
+    TargetIngestDiagnostics {
+        diagnostics: TargetIngestDiagnostics,
+    },
+}
+
 #[derive(Clone, Debug, Default, Facet)]
 pub struct SavedAggregator {
     pub session_start_ns: Option<u64>,
@@ -1328,7 +1369,7 @@ pub trait RunControl {
     async fn stop_active(&self) -> Result<RunSummary, RunControlError>;
 
     /// Save the current or most recent queryable run into a v2 directory
-    /// archive at `path`.
+    /// archive at `path`, including aggregate chunks plus `events.jsonl`.
     async fn save_current(&self, path: String) -> Result<(), RunControlError>;
 
     /// Open a saved archive into the server's current query state. Accepts

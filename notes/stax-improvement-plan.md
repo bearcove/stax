@@ -281,7 +281,8 @@ Status as of 2026-06-12:
 - Directory archive MVP is implemented:
   - `stax save <PATH>` writes a v2 directory archive with `manifest.json`
     plus typed chunks: `aggregator.json`, `binaries.json`, and
-    `target-ingest.json`.
+    `target-ingest.json`, plus an append-friendly typed `events.jsonl`
+    sidecar.
   - `manifest.json` records archive version, save time, producer/version,
     OS/arch, run summaries, and archive-relative chunk filenames.
   - `stax open <PATH>` loads that archive back into `stax-server`'s current
@@ -304,6 +305,8 @@ Status as of 2026-06-12:
   - binary/symbol metadata, including inline text bytes when present
   - target-ingest diagnostics, including origin-link counters and
     target-side queue drops
+  - a chronological `events.jsonl` sidecar of facet-json `SavedEventLogEntry`
+    records, produced from the saved snapshot for future replay/import tooling
 - Reopened archives are queryable through the normal `threads`, `top`,
   `flame`, and `diagnose` surfaces.
 - Archive compatibility is strict for now: `stax open` and `stax compare`
@@ -316,7 +319,9 @@ Status as of 2026-06-12:
   query against stopped in-memory history.
 - Current deliberate non-goals:
   - no single-file `.stax` packaging yet
-  - no append-friendly event log or `blobs/` layout yet
+  - no `blobs/` layout yet
+  - `events.jsonl` is emitted as a sidecar but does not replace the aggregate
+    chunks as the `open` source of truth yet
   - annotate depends on saved/host-available bytes in the same way the live
     binary registry does
 
@@ -328,7 +333,8 @@ Add commands along these lines:
   - saves the current or most recent run
   - works after `stax stop` as long as the aggregator is still populated
   - implemented as a v2 directory archive containing `manifest.json`,
-    `aggregator.json`, `binaries.json`, and `target-ingest.json`
+    `aggregator.json`, `binaries.json`, `target-ingest.json`, and
+    `events.jsonl`
 - `stax open <PATH>`
   - loads a saved run into a queryable local server state
   - implemented by replacing the current server query state; active recordings
@@ -379,11 +385,12 @@ Candidate archive contents:
 
 Implementation direction:
 
-- Prefer an append-friendly event log with typed records.
+- Done: emit an append-friendly `events.jsonl` sidecar with typed
+  `SavedEventLogEntry` records.
 - Use facet-shaped records, not manual JSON.
 - Consider a directory archive first for simplicity:
   - `manifest`
-  - `events`
+  - done: `events.jsonl` sidecar
   - `symbols`
   - `blobs/`
 - A single-file `.stax` archive can come after the schema is proven.
@@ -795,8 +802,8 @@ Deferred:
 - `just archive-smoke` / `just web-target-smoke` are wired as manual
   `workflow_dispatch` checks; making them required by default waits until the
   runner contract for local stax server/browser/profiling access is settled.
-- Append-friendly event logs, `blobs/`, and single-file packaging remain
-  future work after the v2 aggregate chunk layout.
+- `blobs/`, event-log-driven `open`, and single-file packaging remain future
+  work after the v2 aggregate chunk layout.
 
 ### Phase E: web target-time polish
 
@@ -898,15 +905,17 @@ Resolved for this phase:
   workflow dispatch until the runner contract for recording and browser access
   is settled.
 - Saved-run format v2 is implemented as a chunked directory layout for new
-  saves. Stopped-run history has both a state-changing selector via
-  `select-run` and non-mutating per-RPC `RunId` selectors for reporting
-  surfaces. The next persistence question is how far the aggregate snapshot
-  archive can go before append-friendly event logs are needed.
+  saves and now includes an append-friendly `events.jsonl` sidecar. Stopped-run
+  history has both a state-changing selector via `select-run` and
+  non-mutating per-RPC `RunId` selectors for reporting surfaces. The next
+  persistence question is when `open` should replay events instead of trusting
+  aggregate chunks.
 
 Still open:
 
-- Whether append-friendly saved-run event logs should replace or augment the
-  current aggregate snapshot chunks for future archive questions.
+- Whether append-friendly saved-run event logs should replace the current
+  aggregate snapshot chunks as the archive source of truth, or remain a replay
+  sidecar for import/debug tooling.
 - Whether the manual live smokes should become required checks once the runner
   can provide browser dependencies and stax daemon/profiling access.
 

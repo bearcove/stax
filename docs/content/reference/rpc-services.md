@@ -38,7 +38,7 @@ The lifecycle and control plane — the surface behind `stax status`, `list`,
 | `start_attach`  | begin a recording by attaching to a pid                    |
 | `wait_active`   | block until a `WaitCondition` fires or the run stops       |
 | `stop_active`   | stop the active run cleanly, returning its final summary   |
-| `save_current`  | write the current queryable run to a v2 directory archive  |
+| `save_current`  | write the current queryable run to a v2 archive with aggregate chunks + `events.jsonl` |
 | `open_saved`    | load a saved archive into the current query state          |
 | `select_run`    | restore a stopped in-memory run into the query state       |
 

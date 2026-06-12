@@ -413,10 +413,12 @@ Exits non-zero if there's no active run.
 
 Write the current or most recent queryable run to a directory archive. The
 current archive format is v2: `manifest.json` plus typed facet-json chunks
-(`aggregator.json`, `binaries.json`, and `target-ingest.json`). The manifest
-records archive version, save time, producer/version, OS/arch, run summaries,
-and archive-relative chunk filenames. The chunks store raw aggregator streams,
-binary/symbol metadata, and target-ingest diagnostics. It is meant for bug
+(`aggregator.json`, `binaries.json`, and `target-ingest.json`) plus an
+append-friendly `events.jsonl` sidecar. The manifest records archive version,
+save time, producer/version, OS/arch, run summaries, and archive-relative chunk
+filenames. The chunks store raw aggregator streams, binary/symbol metadata, and
+target-ingest diagnostics; `events.jsonl` serializes typed event records
+(`SavedEventLogEntry`) for future replay/import tooling. It is meant for bug
 reports, handoff, and replaying `threads`/`top`/`flame` after the live process
 is gone.
 

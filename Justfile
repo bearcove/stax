@@ -114,6 +114,11 @@ archive-smoke:
     STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- record -- cargo run -q -p stax-target --example corpus
     STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- save "$archive"
     ls -1 "$archive"
+    test -f "$archive/manifest.json"
+    test -f "$archive/aggregator.json"
+    test -f "$archive/binaries.json"
+    test -f "$archive/target-ingest.json"
+    test -f "$archive/events.jsonl"
     STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- open "$archive"
     STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- list
     STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- select-run 1

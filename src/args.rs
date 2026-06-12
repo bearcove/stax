@@ -50,7 +50,8 @@ pub enum Command {
     /// Ask stax-server to stop the active run cleanly.
     Stop,
 
-    /// Save the current or most recent queryable run to a v2 directory archive.
+    /// Save the current or most recent queryable run to a v2 directory archive
+    /// with aggregate chunks and an events.jsonl replay sidecar.
     Save(ArchiveArgs),
 
     /// Open a saved run archive into stax-server's query state.
