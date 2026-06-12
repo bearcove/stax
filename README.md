@@ -1,7 +1,7 @@
 # stax
 
-A live sampling profiler for macOS and Linux — flamegraphs, hot functions,
-and annotated disassembly, streaming while your program runs.
+A live profiler for macOS and Linux — CPU stacks, off-CPU waits,
+cooperating target spans, and annotated disassembly while your program runs.
 
 ```bash
 # record a program (or attach to a running one with --pid)
@@ -9,14 +9,21 @@ stax record -- ./target/release/mybench
 
 # from another shell — or from an AI agent — query the live run
 stax wait --for-samples 10000     # block until data lands
-stax top -n 10 --sort self        # hottest leaf functions
-stax flame -d 6                   # on-CPU flamegraph, as a tree
+stax threads -n 20                # CPU/off-CPU/target-lane breakdown
+stax top -n 10 --sort self        # hottest leaf functions or target spans
+stax flame -d 6                   # active flamegraph, as a tree
 stax annotate 'mycrate::hot_fn'   # per-instruction sample counts
 ```
 
-stax records on-CPU and off-CPU stacks and turns them into flamegraphs,
-top-N functions, per-thread breakdowns, and annotated disassembly — all
-queryable *while the recording is still running*.
+stax records on-CPU stacks, off-CPU waits, and cooperating target spans, then
+turns them into flamegraphs, top-N functions/spans, per-thread and per-lane
+breakdowns, and annotated disassembly — all queryable *while the recording is
+still running*.
+
+When a target links `stax-target`, GPU kernels, accelerator queues, executors,
+and runtime lanes can report exact-duration spans into the same recording.
+With origins, stax can render the causal path as CPU dispatch stack -> target
+lane -> named work.
 
 Every view is a plain CLI subcommand: text output, meaningful exit codes, no
 GUI required. That puts stax exactly where a graphical profiler can't go —
@@ -37,6 +44,9 @@ nothing depends on it.
 - **On-CPU *and* off-CPU.** stax doesn't just show where the CPU time goes —
   it correlates scheduler events to show *why* a thread was blocked: lock,
   sleep, I/O, IPC.
+- **Target/executor spans.** GPU, accelerator, executor, and runtime work
+  reported through `stax-target` shows up in `threads`, `top`, `flame`, the
+  timeline, and the web UI with explicit target time and span counts.
 - **Down to the instruction.** `stax annotate` disassembles a hot function
   and attributes samples to individual instructions, interleaved with
   source.
@@ -52,7 +62,8 @@ nothing depends on it.
 
 - **Guide, concepts & reference**: <https://stax.bearcove.eu> — installing the
   daemons, recording and inspecting runs, platform support, stack unwinding
-  (frame pointers vs. unwind tables), and programmatic usage.
+  (frame pointers vs. unwind tables), target-span integration, and
+  programmatic usage.
 - **Agent manual**: [AGENTS.md](AGENTS.md) — driving stax from an AI agent.
 
 The site sources live in `docs/` and are built with
