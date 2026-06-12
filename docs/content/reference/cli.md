@@ -117,9 +117,10 @@ Takes no options. Exits non-zero if there is no active run. See
 
 Save the current or most recent queryable run to a directory archive. The
 current archive format is v2: `manifest.json` plus typed facet-json chunks
-(`aggregator.json`, `binaries.json`, and `target-ingest.json`). The archive
-stores the run summary, raw aggregator streams, binary/symbol metadata, and
-target-ingest diagnostics.
+(`aggregator.json`, `binaries.json`, and `target-ingest.json`). The manifest
+records archive version, save time, producer/version, OS/arch, run summaries,
+and chunk filenames. The chunks store raw aggregator streams, binary/symbol
+metadata, and target-ingest diagnostics.
 
 ```text
 stax save <PATH>

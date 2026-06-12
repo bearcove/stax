@@ -146,10 +146,12 @@ stax save /tmp/stax-demo.staxdir
 ```
 
 The current archive format is v2: `manifest.json` plus typed facet-json
-chunks (`aggregator.json`, `binaries.json`, and `target-ingest.json`). It
-stores the run summary, raw aggregator streams, binary/symbol metadata, and
-target-ingest diagnostics. It preserves target spans and origin-linked stacks
-for later `threads`, `top`, `flame`, and `diagnose` queries.
+chunks (`aggregator.json`, `binaries.json`, and `target-ingest.json`). The
+manifest records archive version, save time, producer/version, OS/arch, run
+summaries, and chunk filenames. The chunks store raw aggregator streams,
+binary/symbol metadata, and target-ingest diagnostics. It preserves target
+spans and origin-linked stacks for later `threads`, `top`, `flame`, and
+`diagnose` queries.
 
 `stax save` works while a run is active, and after `stax stop`, until the
 next `stax record` resets the live aggregator.

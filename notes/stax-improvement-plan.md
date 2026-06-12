@@ -282,6 +282,8 @@ Status as of 2026-06-12:
   - `stax save <PATH>` writes a v2 directory archive with `manifest.json`
     plus typed chunks: `aggregator.json`, `binaries.json`, and
     `target-ingest.json`.
+  - `manifest.json` records archive version, save time, producer/version,
+    OS/arch, run summaries, and chunk filenames.
   - `stax open <PATH>` loads that archive back into `stax-server`'s current
     query state.
   - `open` refuses to replace state while a recording is active.
@@ -292,6 +294,7 @@ Status as of 2026-06-12:
   archives.
 - The MVP stores:
   - run summary
+  - manifest provenance: producer/version, OS, and architecture
   - raw aggregator streams: PET samples, intervals, target synthetic spans,
     wakeups, and thread names
   - binary/symbol metadata, including inline text bytes when present

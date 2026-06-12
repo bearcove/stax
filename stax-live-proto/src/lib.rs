@@ -1051,8 +1051,17 @@ pub struct SavedRunArchive {
 pub struct SavedRunArchiveManifest {
     pub format_version: u32,
     pub saved_at_unix_ns: u64,
+    pub provenance: SavedRunArchiveProvenance,
     pub runs: Vec<RunSummary>,
     pub files: SavedRunArchiveFiles,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct SavedRunArchiveProvenance {
+    pub producer: String,
+    pub producer_version: String,
+    pub os: String,
+    pub arch: String,
 }
 
 #[derive(Clone, Debug, Facet)]

@@ -1623,8 +1623,8 @@ mod tests {
     use stax_live_proto::{
         OffCpuBreakdown, SavedAggregator, SavedBinaryRegistry, SavedInterval, SavedIntervalKind,
         SavedPetSample, SavedPmuSample, SavedRunArchive, SavedRunArchiveFiles,
-        SavedRunArchiveManifest, SavedThread, SavedThreadName, TargetIngestDiagnostics, ThreadInfo,
-        ThreadsUpdate,
+        SavedRunArchiveManifest, SavedRunArchiveProvenance, SavedThread, SavedThreadName,
+        TargetIngestDiagnostics, ThreadInfo, ThreadsUpdate,
     };
 
     #[test]
@@ -1942,6 +1942,7 @@ mod tests {
         let manifest = SavedRunArchiveManifest {
             format_version: ARCHIVE_FORMAT_VERSION,
             saved_at_unix_ns: 123,
+            provenance: test_provenance(),
             runs: Vec::new(),
             files: SavedRunArchiveFiles {
                 aggregator: ARCHIVE_AGGREGATOR_FILE_NAME.to_owned(),
@@ -2028,6 +2029,15 @@ mod tests {
     fn write_test_json<T: facet::Facet<'static>>(path: &std::path::Path, value: &T) {
         let bytes = facet_json::to_vec_pretty(value).expect("serialize test json");
         std::fs::write(path, bytes).expect("write test json");
+    }
+
+    fn test_provenance() -> SavedRunArchiveProvenance {
+        SavedRunArchiveProvenance {
+            producer: "stax-test".to_owned(),
+            producer_version: "0.0.0-test".to_owned(),
+            os: std::env::consts::OS.to_owned(),
+            arch: std::env::consts::ARCH.to_owned(),
+        }
     }
 
     fn temp_archive_dir(name: &str) -> std::path::PathBuf {

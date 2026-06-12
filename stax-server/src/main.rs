@@ -26,8 +26,9 @@ use stax_live::{Aggregator, BinaryRegistry, LiveServer};
 use stax_live_proto::{
     DiagnosticsSnapshot, ProfilerDispatcher, RunConfig, RunControl, RunControlDispatcher,
     RunControlError, RunId, RunState, RunSummary, SavedAggregator, SavedBinaryRegistry,
-    SavedRunArchive, SavedRunArchiveFiles, SavedRunArchiveManifest, ServerStatus, StopReason,
-    TargetIngestDiagnostics, TargetIngestDispatcher, WaitCondition, WaitOutcome,
+    SavedRunArchive, SavedRunArchiveFiles, SavedRunArchiveManifest, SavedRunArchiveProvenance,
+    ServerStatus, StopReason, TargetIngestDiagnostics, TargetIngestDispatcher, WaitCondition,
+    WaitOutcome,
 };
 
 use crate::target_ingest::{TargetIngestService, TargetLaneRegistry};
@@ -686,6 +687,7 @@ fn write_archive(path: &Path, archive: &SavedRunArchive) -> Result<(), String> {
     let manifest = SavedRunArchiveManifest {
         format_version: ARCHIVE_FORMAT_VERSION,
         saved_at_unix_ns: archive.saved_at_unix_ns,
+        provenance: archive_provenance(),
         runs: archive.runs.clone(),
         files: SavedRunArchiveFiles {
             aggregator: ARCHIVE_AGGREGATOR_FILE_NAME.to_owned(),
@@ -700,6 +702,15 @@ fn write_archive(path: &Path, archive: &SavedRunArchive) -> Result<(), String> {
         path.join(ARCHIVE_TARGET_INGEST_FILE_NAME),
         &archive.target_ingest,
     )
+}
+
+fn archive_provenance() -> SavedRunArchiveProvenance {
+    SavedRunArchiveProvenance {
+        producer: env!("CARGO_PKG_NAME").to_owned(),
+        producer_version: env!("CARGO_PKG_VERSION").to_owned(),
+        os: std::env::consts::OS.to_owned(),
+        arch: std::env::consts::ARCH.to_owned(),
+    }
 }
 
 fn read_archive(path: &Path) -> Result<SavedRunArchive, String> {
@@ -913,6 +924,13 @@ mod tests {
         let manifest: SavedRunArchiveManifest =
             facet_json::from_slice(&manifest_bytes).expect("parse manifest");
         assert_eq!(manifest.format_version, ARCHIVE_FORMAT_VERSION);
+        assert_eq!(manifest.provenance.producer, env!("CARGO_PKG_NAME"));
+        assert_eq!(
+            manifest.provenance.producer_version,
+            env!("CARGO_PKG_VERSION")
+        );
+        assert_eq!(manifest.provenance.os, std::env::consts::OS);
+        assert_eq!(manifest.provenance.arch, std::env::consts::ARCH);
         assert_eq!(manifest.files.aggregator, ARCHIVE_AGGREGATOR_FILE_NAME);
         assert_eq!(manifest.files.binaries, ARCHIVE_BINARIES_FILE_NAME);
         assert_eq!(
