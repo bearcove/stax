@@ -146,6 +146,23 @@ stax open <PATH>
 After `stax open`, `threads`, `top`, `flame`, and `diagnose` operate on the
 restored run. `open` refuses to replace state while a recording is active.
 
+## `stax compare`
+
+Compare two saved run archives without touching `stax-server` state.
+
+```text
+stax compare <BASELINE> <CANDIDATE>
+```
+
+| arg           | type                | meaning                                               |
+|---------------|---------------------|-------------------------------------------------------|
+| `<BASELINE>`  | positional `String` | baseline archive directory or `archive.json` file     |
+| `<CANDIDATE>` | positional `String` | candidate archive directory or `archive.json` file    |
+
+The comparison reads the typed archive payload directly and prints deltas for
+PET samples, on/off-CPU interval time, target time, target span counts,
+origin-link counts, ingest drops, and the top target lanes by duration.
+
 ## `stax top`
 
 Snapshot the top-N functions or target-span names of the current run. See

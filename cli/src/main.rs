@@ -1,11 +1,13 @@
+use std::collections::{BTreeSet, HashMap};
 use std::env;
 use std::error::Error;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::exit;
 
 use figue as args;
 use stax_core::args::{
-    AnnotateArgs, ArchiveArgs, Cli, Command, FlameArgs, RecordArgs, ThreadsArgs, TopArgs, WaitArgs,
+    AnnotateArgs, ArchiveArgs, Cli, Command, CompareArgs, FlameArgs, RecordArgs, ThreadsArgs,
+    TopArgs, WaitArgs,
 };
 #[cfg(target_os = "linux")]
 use stax_core::cmd_setup_linux;
@@ -13,8 +15,9 @@ use stax_core::cmd_setup_linux;
 use stax_core::cmd_setup_mac;
 use stax_live_proto::{
     DiagnosticsSnapshot, FlameNode, FlamegraphUpdate, LiveFilter, OffCpuBreakdown, ProfilerClient,
-    RunControlClient, RunSummary, ServerStatus, StopReason, TargetIngestDiagnostics, ThreadsUpdate,
-    TopEntry, TopSort, TopUpdate, ViewParams, WaitCondition, WaitOutcome,
+    RunControlClient, RunSummary, SavedIntervalKind, SavedRunArchive, ServerStatus, StopReason,
+    TargetIngestDiagnostics, ThreadsUpdate, TopEntry, TopSort, TopUpdate, ViewParams,
+    WaitCondition, WaitOutcome,
 };
 
 #[cfg(target_os = "macos")]
@@ -69,6 +72,7 @@ fn main_impl() -> Result<(), Box<dyn Error>> {
         Command::Stop => block_on_async(async { run_stop().await })?,
         Command::Save(args) => block_on_async(async { run_save(args).await })?,
         Command::Open(args) => block_on_async(async { run_open(args).await })?,
+        Command::Compare(args) => run_compare(args)?,
         Command::Top(args) => block_on_async(async { run_top(args).await })?,
         Command::Annotate(args) => block_on_async(async { run_annotate(args).await })?,
         Command::Flame(args) => block_on_async(async { run_flame(args).await })?,
@@ -724,6 +728,298 @@ async fn run_open(args: ArchiveArgs) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn run_compare(args: CompareArgs) -> Result<(), Box<dyn Error>> {
+    let baseline = read_saved_archive(Path::new(&args.baseline))?;
+    let candidate = read_saved_archive(Path::new(&args.candidate))?;
+    let baseline_stats = summarize_archive(&baseline);
+    let candidate_stats = summarize_archive(&candidate);
+
+    println!("stax compare");
+    println!("baseline:  {}  ({})", baseline_stats.label, args.baseline);
+    println!("candidate: {}  ({})", candidate_stats.label, args.candidate);
+    println!();
+    println!(
+        "{:<28} {:>14} {:>14} {:>14}",
+        "metric", "baseline", "candidate", "delta"
+    );
+    print_count_metric(
+        "PET samples",
+        baseline_stats.pet_samples,
+        candidate_stats.pet_samples,
+    );
+    print_duration_metric(
+        "on-CPU intervals",
+        baseline_stats.on_cpu_ns,
+        candidate_stats.on_cpu_ns,
+    );
+    print_duration_metric(
+        "off-CPU intervals",
+        baseline_stats.off_cpu_ns,
+        candidate_stats.off_cpu_ns,
+    );
+    print_duration_metric(
+        "target time",
+        baseline_stats.target_ns,
+        candidate_stats.target_ns,
+    );
+    print_count_metric(
+        "target spans",
+        baseline_stats.target_spans,
+        candidate_stats.target_spans,
+    );
+    print_count_metric(
+        "target lanes",
+        baseline_stats.target_lanes,
+        candidate_stats.target_lanes,
+    );
+    print_count_metric(
+        "spans with origin",
+        baseline_stats.spans_with_origin,
+        candidate_stats.spans_with_origin,
+    );
+    print_count_metric(
+        "linked origins",
+        baseline_stats.spans_linked_origin,
+        candidate_stats.spans_linked_origin,
+    );
+    print_count_metric(
+        "unlinked origins",
+        baseline_stats.spans_unlinked_origin,
+        candidate_stats.spans_unlinked_origin,
+    );
+    print_count_metric(
+        "missing origins",
+        baseline_stats.spans_missing_origin,
+        candidate_stats.spans_missing_origin,
+    );
+    print_count_metric(
+        "bad-duration drops",
+        baseline_stats.spans_dropped_bad_duration,
+        candidate_stats.spans_dropped_bad_duration,
+    );
+    print_count_metric(
+        "target queue drops",
+        baseline_stats.spans_dropped_target_queue_full,
+        candidate_stats.spans_dropped_target_queue_full,
+    );
+    print_count_metric(
+        "worker disconnect drops",
+        baseline_stats.spans_dropped_target_worker_disconnected,
+        candidate_stats.spans_dropped_target_worker_disconnected,
+    );
+
+    let lanes = compare_lanes(&baseline_stats.lanes, &candidate_stats.lanes);
+    if !lanes.is_empty() {
+        println!();
+        println!("top target lanes by max duration:");
+        println!(
+            "{:<32} {:>12} {:>8} {:>12} {:>8} {:>12}",
+            "lane", "base ms", "spans", "cand ms", "spans", "delta ms"
+        );
+        for lane in lanes.into_iter().take(10) {
+            let baseline_lane = baseline_stats.lanes.get(&lane).copied().unwrap_or_default();
+            let candidate_lane = candidate_stats
+                .lanes
+                .get(&lane)
+                .copied()
+                .unwrap_or_default();
+            println!(
+                "{:<32} {:>12.3} {:>8} {:>12.3} {:>8} {:>12}",
+                truncate_label(&lane, 32),
+                baseline_lane.target_ns as f64 / 1e6,
+                baseline_lane.target_spans,
+                candidate_lane.target_ns as f64 / 1e6,
+                candidate_lane.target_spans,
+                format_delta_ms(candidate_lane.target_ns as i128 - baseline_lane.target_ns as i128),
+            );
+        }
+    }
+    Ok(())
+}
+
+const ARCHIVE_FILE_NAME: &str = "archive.json";
+
+fn read_saved_archive(path: &Path) -> Result<SavedRunArchive, Box<dyn Error>> {
+    let archive_path = if path.is_dir() {
+        path.join(ARCHIVE_FILE_NAME)
+    } else {
+        path.to_path_buf()
+    };
+    let bytes = std::fs::read(&archive_path)
+        .map_err(|e| format!("read {}: {e}", archive_path.display()))?;
+    facet_json::from_slice(&bytes)
+        .map_err(|e| format!("parse {}: {e}", archive_path.display()).into())
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct LaneCompareStats {
+    target_ns: u64,
+    target_spans: u64,
+}
+
+#[derive(Debug, Default)]
+struct ArchiveCompareStats {
+    label: String,
+    pet_samples: u64,
+    on_cpu_ns: u64,
+    off_cpu_ns: u64,
+    target_ns: u64,
+    target_spans: u64,
+    target_lanes: u64,
+    spans_with_origin: u64,
+    spans_linked_origin: u64,
+    spans_unlinked_origin: u64,
+    spans_missing_origin: u64,
+    spans_dropped_bad_duration: u64,
+    spans_dropped_target_queue_full: u64,
+    spans_dropped_target_worker_disconnected: u64,
+    lanes: HashMap<String, LaneCompareStats>,
+}
+
+fn summarize_archive(archive: &SavedRunArchive) -> ArchiveCompareStats {
+    let mut stats = ArchiveCompareStats {
+        label: archive
+            .runs
+            .last()
+            .map(|run| run.label.clone())
+            .unwrap_or_else(|| "(no run summary)".to_owned()),
+        spans_dropped_bad_duration: archive.target_ingest.spans_dropped_bad_duration,
+        spans_dropped_target_queue_full: archive.target_ingest.spans_dropped_target_queue_full,
+        spans_dropped_target_worker_disconnected: archive
+            .target_ingest
+            .spans_dropped_target_worker_disconnected,
+        ..ArchiveCompareStats::default()
+    };
+    let thread_names: HashMap<u32, String> = archive
+        .aggregator
+        .thread_names
+        .iter()
+        .map(|thread| (thread.tid, thread.name.clone()))
+        .collect();
+
+    for thread in &archive.aggregator.threads {
+        stats.pet_samples = stats
+            .pet_samples
+            .saturating_add(thread.pet_samples.len() as u64);
+        for interval in &thread.intervals {
+            let duration_ns = interval.end_ns.saturating_sub(interval.start_ns);
+            match &interval.kind {
+                SavedIntervalKind::OnCpu => {
+                    stats.on_cpu_ns = stats.on_cpu_ns.saturating_add(duration_ns);
+                }
+                SavedIntervalKind::OffCpu { .. } => {
+                    stats.off_cpu_ns = stats.off_cpu_ns.saturating_add(duration_ns);
+                }
+                SavedIntervalKind::SyntheticSpan { stack, origin_tid } => {
+                    stats.target_ns = stats.target_ns.saturating_add(duration_ns);
+                    stats.target_spans = stats.target_spans.saturating_add(1);
+                    match origin_tid {
+                        Some(_) => {
+                            stats.spans_with_origin = stats.spans_with_origin.saturating_add(1);
+                            if stack.len() > 2 {
+                                stats.spans_linked_origin =
+                                    stats.spans_linked_origin.saturating_add(1);
+                            } else {
+                                stats.spans_unlinked_origin =
+                                    stats.spans_unlinked_origin.saturating_add(1);
+                            }
+                        }
+                        None => {
+                            stats.spans_missing_origin =
+                                stats.spans_missing_origin.saturating_add(1);
+                        }
+                    }
+                    let lane_name = thread_names
+                        .get(&thread.tid)
+                        .cloned()
+                        .unwrap_or_else(|| format!("tid {}", thread.tid));
+                    let lane = stats.lanes.entry(lane_name).or_default();
+                    lane.target_ns = lane.target_ns.saturating_add(duration_ns);
+                    lane.target_spans = lane.target_spans.saturating_add(1);
+                }
+            }
+        }
+    }
+    stats.target_lanes = stats.lanes.len() as u64;
+    stats
+}
+
+fn compare_lanes(
+    baseline: &HashMap<String, LaneCompareStats>,
+    candidate: &HashMap<String, LaneCompareStats>,
+) -> Vec<String> {
+    let mut names: BTreeSet<String> = baseline.keys().cloned().collect();
+    names.extend(candidate.keys().cloned());
+    let mut names: Vec<String> = names.into_iter().collect();
+    names.sort_by(|a, b| {
+        let a_max = baseline
+            .get(a)
+            .map(|lane| lane.target_ns)
+            .unwrap_or_default()
+            .max(
+                candidate
+                    .get(a)
+                    .map(|lane| lane.target_ns)
+                    .unwrap_or_default(),
+            );
+        let b_max = baseline
+            .get(b)
+            .map(|lane| lane.target_ns)
+            .unwrap_or_default()
+            .max(
+                candidate
+                    .get(b)
+                    .map(|lane| lane.target_ns)
+                    .unwrap_or_default(),
+            );
+        b_max.cmp(&a_max).then_with(|| a.cmp(b))
+    });
+    names
+}
+
+fn print_count_metric(label: &str, baseline: u64, candidate: u64) {
+    println!(
+        "{:<28} {:>14} {:>14} {:>14}",
+        label,
+        baseline,
+        candidate,
+        format_delta_count(candidate as i128 - baseline as i128),
+    );
+}
+
+fn print_duration_metric(label: &str, baseline_ns: u64, candidate_ns: u64) {
+    println!(
+        "{:<28} {:>14.3} {:>14.3} {:>14}",
+        label,
+        baseline_ns as f64 / 1e6,
+        candidate_ns as f64 / 1e6,
+        format_delta_ms(candidate_ns as i128 - baseline_ns as i128),
+    );
+}
+
+fn format_delta_count(delta: i128) -> String {
+    if delta >= 0 {
+        format!("+{delta}")
+    } else {
+        delta.to_string()
+    }
+}
+
+fn format_delta_ms(delta_ns: i128) -> String {
+    let sign = if delta_ns >= 0 { "+" } else { "-" };
+    let abs_ms = delta_ns.unsigned_abs() as f64 / 1e6;
+    format!("{sign}{abs_ms:.3}")
+}
+
+fn truncate_label(label: &str, max_chars: usize) -> String {
+    if label.chars().count() <= max_chars {
+        return label.to_owned();
+    }
+    let mut out: String = label.chars().take(max_chars.saturating_sub(3)).collect();
+    out.push_str("...");
+    out
+}
+
 async fn run_top(args: TopArgs) -> Result<(), Box<dyn Error>> {
     let url = require_server_socket()?;
     let sort = match args.sort.as_str() {
@@ -1230,10 +1526,14 @@ fn mentions_metal_cooperation(function_name: Option<&str>, binary: Option<&str>)
 #[cfg(test)]
 mod tests {
     use super::{
-        SYNTH_TID_BASE, empty_view_hint, mentions_metal_cooperation, target_ingest_hints,
-        thread_kind,
+        SYNTH_TID_BASE, empty_view_hint, mentions_metal_cooperation, summarize_archive,
+        target_ingest_hints, thread_kind,
     };
-    use stax_live_proto::{OffCpuBreakdown, TargetIngestDiagnostics, ThreadInfo, ThreadsUpdate};
+    use stax_live_proto::{
+        OffCpuBreakdown, SavedAggregator, SavedBinaryRegistry, SavedInterval, SavedIntervalKind,
+        SavedPetSample, SavedPmuSample, SavedRunArchive, SavedThread, SavedThreadName,
+        TargetIngestDiagnostics, ThreadInfo, ThreadsUpdate,
+    };
 
     #[test]
     fn metal_hint_detects_dispatch_and_command_buffer_frames() {
@@ -1427,6 +1727,98 @@ mod tests {
 
         assert_eq!(thread_kind(&cpu), "thread");
         assert_eq!(thread_kind(&target), "target");
+    }
+
+    #[test]
+    fn summarize_archive_counts_target_and_origin_dimensions() {
+        let archive = SavedRunArchive {
+            format_version: 1,
+            saved_at_unix_ns: 0,
+            runs: Vec::new(),
+            aggregator: SavedAggregator {
+                session_start_ns: Some(0),
+                last_event_ns: Some(10_000),
+                thread_names: vec![SavedThreadName {
+                    tid: SYNTH_TID_BASE,
+                    name: "GPU lane".to_owned(),
+                }],
+                threads: vec![SavedThread {
+                    tid: SYNTH_TID_BASE,
+                    pet_samples: vec![SavedPetSample {
+                        timestamp_ns: 1,
+                        stack: vec![1],
+                        kernel_stack: Vec::new(),
+                        pmc: SavedPmuSample::default(),
+                    }],
+                    intervals: vec![
+                        SavedInterval {
+                            start_ns: 0,
+                            end_ns: 1_000,
+                            kind: SavedIntervalKind::OnCpu,
+                        },
+                        SavedInterval {
+                            start_ns: 1_000,
+                            end_ns: 3_000,
+                            kind: SavedIntervalKind::OffCpu {
+                                stack: vec![1],
+                                waker_tid: None,
+                                waker_user_stack: None,
+                            },
+                        },
+                        SavedInterval {
+                            start_ns: 3_000,
+                            end_ns: 6_000,
+                            kind: SavedIntervalKind::SyntheticSpan {
+                                stack: vec![10, 20, 30],
+                                origin_tid: Some(7),
+                            },
+                        },
+                        SavedInterval {
+                            start_ns: 6_000,
+                            end_ns: 8_000,
+                            kind: SavedIntervalKind::SyntheticSpan {
+                                stack: vec![10, 20],
+                                origin_tid: Some(7),
+                            },
+                        },
+                        SavedInterval {
+                            start_ns: 8_000,
+                            end_ns: 9_000,
+                            kind: SavedIntervalKind::SyntheticSpan {
+                                stack: vec![10, 20],
+                                origin_tid: None,
+                            },
+                        },
+                    ],
+                    wakeups: Vec::new(),
+                }],
+            },
+            binaries: SavedBinaryRegistry::default(),
+            target_ingest: TargetIngestDiagnostics {
+                spans_dropped_bad_duration: 2,
+                spans_dropped_target_queue_full: 3,
+                spans_dropped_target_worker_disconnected: 4,
+                ..TargetIngestDiagnostics::default()
+            },
+        };
+
+        let stats = summarize_archive(&archive);
+
+        assert_eq!(stats.pet_samples, 1);
+        assert_eq!(stats.on_cpu_ns, 1_000);
+        assert_eq!(stats.off_cpu_ns, 2_000);
+        assert_eq!(stats.target_ns, 6_000);
+        assert_eq!(stats.target_spans, 3);
+        assert_eq!(stats.target_lanes, 1);
+        assert_eq!(stats.spans_with_origin, 2);
+        assert_eq!(stats.spans_linked_origin, 1);
+        assert_eq!(stats.spans_unlinked_origin, 1);
+        assert_eq!(stats.spans_missing_origin, 1);
+        assert_eq!(stats.spans_dropped_bad_duration, 2);
+        assert_eq!(stats.spans_dropped_target_queue_full, 3);
+        assert_eq!(stats.spans_dropped_target_worker_disconnected, 4);
+        assert_eq!(stats.lanes["GPU lane"].target_ns, 6_000);
+        assert_eq!(stats.lanes["GPU lane"].target_spans, 3);
     }
 
     fn thread(

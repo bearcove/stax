@@ -405,6 +405,20 @@ $ stax flame --threshold-pct 0
 run first. It accepts either the archive directory or the `archive.json` file
 inside it.
 
+### `stax compare <BASELINE> <CANDIDATE>`
+
+Compare two saved archives without touching `stax-server` state.
+
+```
+$ stax compare /tmp/before.staxdir /tmp/after.staxdir
+```
+
+It reads each archive's typed `archive.json` directly and prints deltas for
+PET samples, on/off-CPU interval time, target time, target span counts,
+origin-link counts, ingest drops, and the top target lanes by duration. Use
+`stax open` when you want to inspect one archive through `threads`, `top`,
+`flame`, or `diagnose`; use `compare` for quick before/after notes.
+
 ### `stax top [-n N] [--sort self|total] [--tid TID]`
 
 Snapshot the top-N hottest functions in the active run.

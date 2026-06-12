@@ -56,6 +56,9 @@ pub enum Command {
     /// Open a saved run directory archive into stax-server's query state.
     Open(ArchiveArgs),
 
+    /// Compare two saved run archives without touching stax-server state.
+    Compare(CompareArgs),
+
     /// Snapshot top functions or target-span names from the active run.
     /// Output includes active time, target-executor time, PET samples,
     /// and target span counts.
@@ -77,6 +80,17 @@ pub struct ArchiveArgs {
     /// Save/open archive directory or archive.json file.
     #[facet(args::positional)]
     pub path: String,
+}
+
+#[derive(Facet, Debug)]
+pub struct CompareArgs {
+    /// Baseline archive directory or archive.json file.
+    #[facet(args::positional)]
+    pub baseline: String,
+
+    /// Candidate archive directory or archive.json file.
+    #[facet(args::positional)]
+    pub candidate: String,
 }
 
 #[derive(Facet, Debug)]

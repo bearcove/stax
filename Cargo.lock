@@ -2621,6 +2621,7 @@ dependencies = [
  "env_logger",
  "eyre",
  "facet",
+ "facet-json",
  "figue",
  "libc",
  "log",

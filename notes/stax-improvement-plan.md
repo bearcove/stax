@@ -278,6 +278,8 @@ Status as of 2026-06-12:
   - `stax open <PATH>` loads that archive back into `stax-server`'s current
     query state.
   - `open` refuses to replace state while a recording is active.
+  - `stax compare <BASELINE> <CANDIDATE>` reads two archives directly and
+    prints regression-oriented deltas.
 - The archive is facet-json and versioned (`format_version = 1`).
 - The MVP stores:
   - run summary
@@ -290,7 +292,7 @@ Status as of 2026-06-12:
   `flame`, and `diagnose` surfaces.
 - Current deliberate non-goals:
   - no per-`RunId` query selector yet
-  - no compare command yet
+  - no structured compare output yet
   - no single-file `.stax` packaging yet
   - no append-friendly chunked event log or `blobs/` layout yet
   - annotate depends on saved/host-available bytes in the same way the live
@@ -312,7 +314,9 @@ Add commands along these lines:
   - optional after the internal format exists
   - not a substitute for native persisted runs
 - `stax compare <A> <B>`
-  - later, after saved runs exist
+  - implemented for typed directory archives
+  - compares PET sample counts, on/off-CPU interval time, target time, target
+    span counts, origin-link counts, ingest drops, and top target lanes
 
 ### 4.2 Storage model
 
@@ -378,6 +382,7 @@ Acceptance criteria:
 - Saved runs preserve target spans and origin-linked flame paths.
 - The archive format has a version and clear compatibility story.
 - Bug reports can attach one file or one directory.
+- Before/after notes can use `stax compare` without mutating live server state.
 
 Verification:
 
@@ -395,6 +400,7 @@ Implemented test coverage:
 
 ```bash
 cargo nextest run -p stax-server --all-targets -E 'test(save_open_restores_query_state_and_target_diagnostics)'
+cargo nextest run -p stax --all-targets -E 'test(summarize_archive_counts_target_and_origin_dimensions)'
 ```
 
 ## Workstream 5: blessed integration test/demo corpus

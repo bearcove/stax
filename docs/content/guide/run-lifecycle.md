@@ -168,6 +168,21 @@ stax flame --threshold-pct 0
 it. It refuses to replace state while a recording is active; stop the active
 run first.
 
+## stax compare
+
+Compare two saved archives without loading either one into `stax-server`.
+
+```bash
+stax compare /tmp/before.staxdir /tmp/after.staxdir
+```
+
+The command reads each archive's typed `archive.json` directly and prints
+deltas for PET samples, on/off-CPU interval time, target time, target span
+counts, origin-link counts, ingest drops, and the top target lanes by
+duration. Use it for quick before/after checks and regression notes; use
+`stax open` when you want to inspect one archive through `threads`, `top`,
+`flame`, `diagnose`, or the web UI.
+
 ## Putting it together
 
 ```bash
