@@ -5,8 +5,8 @@ insert_anchor_links = "heading"
 +++
 
 A *run* is one recording session. `stax-server` tracks every run it has
-hosted and enforces one simple rule. This page covers that rule and the four
-commands that observe and control runs.
+hosted and enforces one simple rule. This page covers that rule and the
+commands that observe, select, save, and control runs.
 
 ## One active run at a time
 
@@ -26,9 +26,10 @@ run they describe.
 ## Which run do queries see?
 
 The query commands — `top`, `flame`, `threads`, `annotate` — operate on the
-aggregator's current contents: whichever run is **active**, or, if none is,
-the **most recent** one. The aggregator stays populated after a run stops,
-and is only cleared by the next `stax record`. So:
+daemon's **current query state**. While a recording is active, that state is
+the active run. After a run stops, its snapshot stays selected. `stax open`
+selects an archive, and `stax select-run <ID>` selects a stopped in-memory run
+from `stax list`. So:
 
 ```bash
 stax record -- ./bench       # run 1 — aggregator now holds run 1
@@ -37,11 +38,13 @@ stax top                     # snapshot of run 1
 stax stop                    # run 1 stops; aggregator keeps run 1
 stax top                     # still works — same data
 
-stax record -- ./bench       # run 2 — aggregator reset; run 1's data is gone
+stax record -- ./bench       # run 2 — current query state switches to run 2
+stax stop
+stax select-run 1            # restore run 1 into the current query state
 ```
 
-To keep an older run queryable, stop it and *don't* start a new recording
-until you're done looking, or save it first:
+In-memory run history does not survive a daemon restart. To keep a run beyond
+the current server process, save it:
 
 ```bash
 stax stop
@@ -49,8 +52,9 @@ stax save /tmp/stax-demo.staxdir
 stax open /tmp/stax-demo.staxdir
 ```
 
-`stax open` loads the saved run back into the current query state. Per-`RunId`
-querying is still on the roadmap.
+`stax open` loads the saved run back into the current query state. Per-call
+`--run <ID>` querying is still on the roadmap; today `select-run` changes the
+server's selected query state.
 
 ## stax status
 
@@ -70,7 +74,9 @@ active run:
 
 Every run the daemon has hosted — active and finished, oldest first. History
 is server-memory history; it does not survive a daemon restart unless you save
-the current queryable run with [`stax save`](#stax-save).
+the current queryable run with [`stax save`](#stax-save). Use
+[`stax select-run`](#stax-select-run) to make an older stopped row current
+again before querying it.
 
 ```bash
 stax list
@@ -177,6 +183,22 @@ stax flame --threshold-pct 0
 or a legacy v1 `archive.json`. It refuses to replace state while a recording
 is active; stop the active run first.
 
+## stax select-run
+
+Restore a stopped in-memory run from `stax list` into the daemon's current
+query state.
+
+```bash
+stax list
+stax select-run 1
+stax top -n 20
+stax flame --threshold-pct 0
+```
+
+`select-run` refuses to replace state while a recording is active. It is a
+server-memory selector, not persistence: after a daemon restart, use
+[`stax open`](#stax-open) on a saved archive instead.
+
 ## stax compare
 
 Compare two saved archives without loading either one into `stax-server`.
@@ -201,8 +223,9 @@ just archive-smoke
 
 That recipe starts a checkout-local `stax-server` on a temporary socket,
 records `stax-target/examples/corpus.rs` with the checkout CLI, saves the run
-to a temporary archive directory, reopens it, queries the restored run through
-`threads`/`top`/`flame`/`diagnose`, and runs `stax compare` against itself.
+to a temporary archive directory, reopens it, exercises `stax select-run`,
+queries the restored run through `threads`/`top`/`flame`/`diagnose`, and runs
+`stax compare` against itself.
 
 ## Putting it together
 

@@ -227,10 +227,20 @@ pub(crate) struct ServerState {
 
 struct Inner {
     active: Option<RunSummary>,
+    /// Summary for the run currently loaded into the query surfaces when
+    /// there is no active recording. Usually the most recently stopped run,
+    /// but `select_run` and `open_saved` can point it at older history.
+    selected: Option<RunSummary>,
     /// Stop signal for the active recording task. Flipped by
     /// `stop_active`; polled from `recorder`'s `should_stop` hook.
     recording_stop: Option<Arc<AtomicBool>>,
-    history: Vec<RunSummary>,
+    history: Vec<RunSnapshot>,
+}
+
+#[derive(Clone)]
+struct RunSnapshot {
+    summary: RunSummary,
+    archive: SavedRunArchive,
 }
 
 impl ServerState {
@@ -243,6 +253,7 @@ impl ServerState {
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 active: None,
+                selected: None,
                 recording_stop: None,
                 history: Vec::new(),
             })),
@@ -384,21 +395,123 @@ impl ServerState {
         inner
             .active
             .clone()
-            .or_else(|| inner.history.last().cloned())
+            .or_else(|| inner.selected.clone())
+            .or_else(|| {
+                inner
+                    .history
+                    .last()
+                    .map(|snapshot| snapshot.summary.clone())
+            })
     }
 
-    fn save_current_archive(&self, path: PathBuf) -> Result<(), String> {
-        let run = self
-            .queryable_run_summary()
-            .ok_or_else(|| "no run is available to save".to_owned())?;
-        let archive = SavedRunArchive {
+    fn archive_from_query_state(&self, run: RunSummary) -> SavedRunArchive {
+        SavedRunArchive {
             format_version: ARCHIVE_FORMAT_VERSION,
             saved_at_unix_ns: now_unix_ns(),
             runs: vec![run],
             aggregator: self.aggregator.read().to_saved(),
             binaries: self.binaries.read().to_saved(),
             target_ingest: self.target_lanes.lock().diagnostics(),
+        }
+    }
+
+    fn snapshot_from_query_state(&self, summary: RunSummary) -> RunSnapshot {
+        RunSnapshot {
+            archive: self.archive_from_query_state(summary.clone()),
+            summary,
+        }
+    }
+
+    fn upsert_history_snapshot(inner: &mut Inner, snapshot: RunSnapshot) {
+        if let Some(existing) = inner
+            .history
+            .iter_mut()
+            .find(|existing| existing.summary.id == snapshot.summary.id)
+        {
+            *existing = snapshot;
+        } else {
+            inner.history.push(snapshot);
+        }
+    }
+
+    fn store_current_query_snapshot(&self, summary: RunSummary) {
+        let snapshot = self.snapshot_from_query_state(summary.clone());
+        let mut inner = self.inner.lock();
+        Self::upsert_history_snapshot(&mut inner, snapshot);
+        inner.selected = Some(summary);
+    }
+
+    fn sweep_stopped_active_into_history(&self) -> Result<(), RunControlError> {
+        let summary = {
+            let mut inner = self.inner.lock();
+            match inner.active.as_ref() {
+                Some(active) if active.state == RunState::Recording => {
+                    return Err(RunControlError::AlreadyActive);
+                }
+                Some(_) => {
+                    let active = inner.active.take().expect("checked above");
+                    inner.recording_stop = None;
+                    Some(active)
+                }
+                None => None,
+            }
         };
+        if let Some(summary) = summary {
+            self.store_current_query_snapshot(summary);
+        }
+        Ok(())
+    }
+
+    fn restore_archive_to_query_state(
+        &self,
+        archive: SavedRunArchive,
+        summary: RunSummary,
+    ) -> Result<RunSummary, RunControlError> {
+        if !is_supported_archive_version(archive.format_version) {
+            return Err(RunControlError::Internal {
+                message: format!(
+                    "unsupported stax archive version {} (supported: {}, {})",
+                    archive.format_version, ARCHIVE_V1_FORMAT_VERSION, ARCHIVE_FORMAT_VERSION
+                ),
+            });
+        }
+
+        self.aggregator
+            .write()
+            .replace_from_saved(archive.aggregator.clone());
+        self.binaries
+            .write()
+            .replace_from_saved(archive.binaries.clone());
+        {
+            let mut target_lanes = self.target_lanes.lock();
+            *target_lanes = TargetLaneRegistry::default();
+            target_lanes.restore_saved_diagnostics(archive.target_ingest.clone());
+        }
+        self.attach_local_shared_cache();
+
+        {
+            let mut inner = self.inner.lock();
+            inner.active = None;
+            inner.recording_stop = None;
+            inner.selected = Some(summary.clone());
+            Self::upsert_history_snapshot(
+                &mut inner,
+                RunSnapshot {
+                    summary: summary.clone(),
+                    archive,
+                },
+            );
+        }
+
+        self.bump_revision();
+        Ok(summary)
+    }
+
+    fn save_current_archive(&self, path: PathBuf) -> Result<(), String> {
+        let run = self
+            .queryable_run_summary()
+            .ok_or_else(|| "no run is available to save".to_owned())?;
+        let archive = self.archive_from_query_state(run);
         write_archive(&path, &archive)
     }
 
@@ -423,37 +536,28 @@ impl ServerState {
             summary.stopped_at_unix_ns = Some(archive.saved_at_unix_ns);
         }
 
-        {
-            let mut inner = self.inner.lock();
-            if inner
-                .active
-                .as_ref()
-                .is_some_and(|active| active.state == RunState::Recording)
-            {
-                return Err(RunControlError::AlreadyActive);
-            }
-            if let Some(active) = inner.active.take()
-                && !inner.history.iter().any(|run| run.id == active.id)
-            {
-                inner.history.push(active);
-            }
-            inner.active = Some(summary.clone());
-            inner.recording_stop = None;
-        }
-
-        self.aggregator
-            .write()
-            .replace_from_saved(archive.aggregator);
-        self.binaries.write().replace_from_saved(archive.binaries);
-        {
-            let mut target_lanes = self.target_lanes.lock();
-            *target_lanes = TargetLaneRegistry::default();
-            target_lanes.restore_saved_diagnostics(archive.target_ingest);
-        }
-        self.attach_local_shared_cache();
+        self.sweep_stopped_active_into_history()?;
+        self.restore_archive_to_query_state(archive, summary.clone())?;
         self.advance_next_run_id(summary.id.0.saturating_add(1));
-        self.bump_revision();
         Ok(())
+    }
+
+    fn select_run_archive(&self, run_id: RunId) -> Result<RunSummary, RunControlError> {
+        self.sweep_stopped_active_into_history()?;
+        let snapshot = {
+            let inner = self.inner.lock();
+            inner
+                .history
+                .iter()
+                .find(|snapshot| snapshot.summary.id == run_id)
+                .cloned()
+        };
+        let Some(snapshot) = snapshot else {
+            return Err(RunControlError::Internal {
+                message: format!("run {} is not in stax-server history", run_id.0),
+            });
+        };
+        self.restore_archive_to_query_state(snapshot.archive, snapshot.summary)
     }
 
     fn advance_next_run_id(&self, next: u64) {
@@ -472,24 +576,13 @@ impl ServerState {
     }
 
     fn begin_run(&self, config: RunConfig) -> Result<RunId, String> {
+        self.sweep_stopped_active_into_history().map_err(|_| {
+            "another run is already active; \
+                    call RunControl::stop_active or wait_active first"
+                .to_owned()
+        })?;
         {
             let mut inner = self.inner.lock();
-            // If there's a stale "stopped" run still occupying the
-            // active slot, sweep it into history before starting
-            // the new one.
-            if let Some(active) = inner.active.as_ref()
-                && active.state == RunState::Stopped
-            {
-                let active = inner.active.take().expect("checked above");
-                tracing::warn!(
-                    run_id = active.id.0,
-                    "stale stopped run was still marked active; clearing it before new run"
-                );
-                if !inner.history.iter().any(|run| run.id == active.id) {
-                    inner.history.push(active);
-                }
-                inner.recording_stop = None;
-            }
             if inner.active.is_some() {
                 return Err("another run is already active; \
                     call RunControl::stop_active or wait_active first"
@@ -507,6 +600,7 @@ impl ServerState {
                 pet_samples: 0,
                 off_cpu_intervals: 0,
             });
+            inner.selected = None;
             inner.recording_stop = None;
 
             *self.aggregator.write() = Aggregator::default();
@@ -530,30 +624,33 @@ impl ServerState {
     /// (cleanly or with an error). Moves the active run into
     /// history with the given `stop_reason`.
     pub(crate) fn finalize_run(&self, run_id: RunId, default_reason: StopReason) {
-        let mut inner = self.inner.lock();
-        let Some(active) = inner.active.as_ref() else {
-            return;
+        let summary = {
+            let mut inner = self.inner.lock();
+            let Some(active) = inner.active.as_ref() else {
+                return;
+            };
+            if active.id != run_id {
+                return;
+            }
+            let mut summary = inner.active.take().expect("checked above");
+            // `stop_active` may have already set state + reason +
+            // timestamp; only fill in defaults when the recorder
+            // finished on its own.
+            if summary.state != RunState::Stopped {
+                summary.state = RunState::Stopped;
+                summary.stop_reason = Some(default_reason);
+                summary.stopped_at_unix_ns = Some(now_unix_ns());
+            }
+            inner.recording_stop = None;
+            summary
         };
-        if active.id != run_id {
-            return;
-        }
-        let mut summary = inner.active.take().expect("checked above");
-        // `stop_active` may have already set state + reason +
-        // timestamp; only fill in defaults when the recorder
-        // finished on its own.
-        if summary.state != RunState::Stopped {
-            summary.state = RunState::Stopped;
-            summary.stop_reason = Some(default_reason);
-            summary.stopped_at_unix_ns = Some(now_unix_ns());
-        }
-        inner.recording_stop = None;
         tracing::info!(
             "stax-server: run {} stopped after {} samples / {} intervals",
             summary.id.0,
             summary.pet_samples,
             summary.off_cpu_intervals
         );
-        inner.history.push(summary);
+        self.store_current_query_snapshot(summary);
     }
 }
 
@@ -568,7 +665,11 @@ impl RunControl for ServerState {
 
     async fn list_runs(&self) -> Vec<RunSummary> {
         let inner = self.inner.lock();
-        let mut out = inner.history.clone();
+        let mut out: Vec<RunSummary> = inner
+            .history
+            .iter()
+            .map(|snapshot| snapshot.summary.clone())
+            .collect();
         if let Some(active) = inner.active.clone() {
             out.push(active);
         }
@@ -672,6 +773,10 @@ impl RunControl for ServerState {
 
     async fn open_saved(&self, path: String) -> Result<(), RunControlError> {
         self.open_saved_archive(PathBuf::from(path))
+    }
+
+    async fn select_run(&self, run_id: RunId) -> Result<RunSummary, RunControlError> {
+        self.select_run_archive(run_id)
     }
 }
 
@@ -1046,6 +1151,69 @@ mod tests {
         assert_eq!(diagnostics.lanes[0].name, "GPU archive");
 
         let _ = std::fs::remove_dir_all(&archive_dir);
+    }
+
+    #[tokio::test]
+    async fn select_run_restores_stopped_run_query_snapshot() {
+        let server = ServerState::new_for_tests();
+        let service = TargetIngestService::new(server.clone());
+
+        let first = server
+            .begin_run(test_run_config("first-run"))
+            .expect("begin first run");
+        server.apply_target_attached_in_process(first, 1111, 0);
+        service
+            .ingest(TargetSpanBatch {
+                pid: 1111,
+                lane: "GPU first".to_owned(),
+                spans: vec![TargetSpan::new("first_kernel", 1_000_000, 3_000_000)],
+            })
+            .await;
+        server.finalize_run(first, StopReason::TargetExited);
+
+        let second = server
+            .begin_run(test_run_config("second-run"))
+            .expect("begin second run");
+        server.apply_target_attached_in_process(second, 2222, 0);
+        service
+            .ingest(TargetSpanBatch {
+                pid: 2222,
+                lane: "GPU second".to_owned(),
+                spans: vec![TargetSpan::new("second_kernel", 10_000_000, 16_000_000)],
+            })
+            .await;
+        server.finalize_run(second, StopReason::TargetExited);
+
+        let runs = server.list_runs().await;
+        assert_eq!(
+            runs.iter().map(|run| run.id).collect::<Vec<_>>(),
+            vec![first, second,]
+        );
+
+        let profiler = server.profiler();
+        let top = profiler
+            .top(10, TopSort::BySelf, view_params(Some(SYNTH_TID_BASE)))
+            .await;
+        assert_eq!(top[0].function_name.as_deref(), Some("second_kernel"));
+
+        let selected = server
+            .select_run_archive(first)
+            .expect("select first run snapshot");
+        assert_eq!(selected.id, first);
+        assert_eq!(selected.label, "first-run");
+
+        let top = profiler
+            .top(10, TopSort::BySelf, view_params(Some(SYNTH_TID_BASE)))
+            .await;
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].function_name.as_deref(), Some("first_kernel"));
+        assert_eq!(top[0].self_target_ns, 2_000_000);
+        assert_eq!(top[0].self_target_spans, 1);
+
+        let diagnostics = server.diagnostics().await.target_ingest;
+        assert_eq!(diagnostics.lanes.len(), 1);
+        assert_eq!(diagnostics.lanes[0].name, "GPU first");
+        assert_eq!(diagnostics.total_duration_ns, 2_000_000);
     }
 
     fn test_run_config(label: &str) -> RunConfig {

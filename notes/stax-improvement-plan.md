@@ -305,8 +305,11 @@ Status as of 2026-06-12:
 - Archive compatibility is strict for now: `stax open` and `stax compare`
   accept v2 manifest archives and legacy v1 `archive.json` archives, and
   reject other versions loudly.
+- Stopped/opened runs now keep an in-memory query snapshot while
+  `stax-server` stays alive. `stax select-run <ID>` restores one stopped run
+  from `stax list` into the current query state.
 - Current deliberate non-goals:
-  - no per-`RunId` query selector yet
+  - no per-call `--run <ID>` query parameter yet
   - no structured compare output yet
   - no single-file `.stax` packaging yet
   - no append-friendly event log or `blobs/` layout yet
@@ -384,7 +387,9 @@ Add per-run querying:
 
 - The current "active or most recent aggregator" model is useful but limited.
 - Saved runs imply explicit run identity in CLI and RPC:
-  - `--run <ID>` for live history
+  - done: `stax select-run <ID>` restores stopped in-memory history into the
+    current query state
+  - later: per-call `--run <ID>` for non-mutating live-history queries
   - `--archive <PATH>` or `stax open`
 - Web UI should be able to inspect a saved run without a live target.
 
@@ -416,6 +421,7 @@ Implemented test coverage:
 
 ```bash
 cargo nextest run -p stax-server --all-targets -E 'test(save_open_restores_query_state_and_target_diagnostics)'
+cargo nextest run -p stax-server --all-targets -E 'test(select_run_restores_stopped_run_query_snapshot)'
 cargo nextest run -p stax --all-targets -E 'test(read_saved_archive_accepts_v2_manifest_layout) | test(read_saved_archive_accepts_legacy_v1_archive_json_layout) | test(summarize_archive_counts_target_and_origin_dimensions)'
 ```
 
@@ -667,7 +673,8 @@ Tasks:
   - done: aggregate focused target-span verification (`just target-span-check`)
   - done: blessed demo run (`just demo-corpus`)
   - done: `just archive-smoke` for save/reopen/compare using the blessed
-    target-span corpus through a checkout-local server/CLI
+    target-span corpus through a checkout-local server/CLI, including
+    `stax select-run`
   - done: `just web-target-smoke` for checkout-local browser verification of
     target lanes, target display mode, and target-span details
 
@@ -731,10 +738,14 @@ Done when:
 6. Done: document archive compatibility.
 7. Done: add `just archive-smoke` for the blessed corpus persistence path
    through a checkout-local server/CLI.
+8. Done: add stopped-run query snapshots plus `stax select-run <ID>` for
+   restoring in-memory history into the current query state.
 
 Done when:
 
 - Record -> stop -> save -> restart server -> open -> threads/top/flame works.
+- Record multiple runs -> `stax list` -> `stax select-run <ID>` ->
+  threads/top/flame works while the daemon stays alive.
 
 Deferred:
 
@@ -841,14 +852,15 @@ Resolved for this phase:
   Live `just demo-corpus` / `just archive-smoke` belongs in gated CI once the
   runner can manage the stax daemon lifecycle.
 - Saved-run format v2 is implemented as a chunked directory layout for new
-  saves. The next persistence question is whether append-friendly event logs
-  and per-`RunId` query selectors should share a single query model.
+  saves. Stopped-run history has an in-memory selector via `select-run`. The
+  next persistence question is whether append-friendly event logs and
+  non-mutating per-call `--run` selectors should share a single query model.
 
 Still open:
 
-- Should append-friendly saved-run event logs land before per-`RunId` live
-  querying, or should those land together so archives and live history share
-  one query selector model?
+- Should append-friendly saved-run event logs land before per-call
+  `--run <ID>` live querying, or should those land together so archives and
+  live history share one query selector model?
 - Whether `just web-target-smoke` should run in CI by default once the runner
   can provide browser dependencies and stax daemon access.
 

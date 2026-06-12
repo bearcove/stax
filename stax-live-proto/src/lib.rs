@@ -1293,6 +1293,12 @@ pub trait RunControl {
     /// v2 archive directories/manifests and legacy v1 archive.json files.
     /// Fails while a recording is active.
     async fn open_saved(&self, path: String) -> Result<(), RunControlError>;
+
+    /// Restore one stopped in-memory run into the server's current query
+    /// state. This is the explicit selector for run history until every
+    /// Profiler query grows a `RunId` parameter. Fails while a recording is
+    /// active, because the live aggregator belongs to that recording.
+    async fn select_run(&self, run_id: RunId) -> Result<RunSummary, RunControlError>;
 }
 
 /// All service descriptors exposed by stax-live; the codegen iterates over

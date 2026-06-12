@@ -40,6 +40,7 @@ The lifecycle and control plane — the surface behind `stax status`, `list`,
 | `stop_active`   | stop the active run cleanly, returning its final summary   |
 | `save_current`  | write the current queryable run to a v2 directory archive  |
 | `open_saved`    | load a saved archive into the current query state          |
+| `select_run`    | restore a stopped in-memory run into the query state       |
 
 `start_attach` is how recordings begin: for `stax record -- <argv>`, the CLI
 launches the target suspended and hands the PID to this call.

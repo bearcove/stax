@@ -73,6 +73,7 @@ fn main_impl() -> Result<(), Box<dyn Error>> {
         Command::Stop => block_on_async(async { run_stop().await })?,
         Command::Save(args) => block_on_async(async { run_save(args).await })?,
         Command::Open(args) => block_on_async(async { run_open(args).await })?,
+        Command::SelectRun(args) => block_on_async(async { run_select_run(args).await })?,
         Command::Compare(args) => run_compare(args)?,
         Command::Top(args) => block_on_async(async { run_top(args).await })?,
         Command::Annotate(args) => block_on_async(async { run_annotate(args).await })?,
@@ -726,6 +727,19 @@ async fn run_open(args: ArchiveArgs) -> Result<(), Box<dyn Error>> {
         .await
         .map_err(|e| format!("{e:?}"))?;
     println!("opened: {}", args.path);
+    Ok(())
+}
+
+async fn run_select_run(args: stax_core::args::SelectRunArgs) -> Result<(), Box<dyn Error>> {
+    let url = require_server_socket()?;
+    let client: RunControlClient = vox::connect(&url).await?;
+    let _debug_registration = register_run_control_client("select-run", &client);
+    let summary = client
+        .select_run(stax_live_proto::RunId(args.run_id))
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+    println!("selected:");
+    print_run_one_line(&summary);
     Ok(())
 }
 

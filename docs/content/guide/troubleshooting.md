@@ -164,11 +164,13 @@ outside `~/Library`.
 - **macOS: hardened-runtime targets are out of scope.** An app with the
   hardened runtime and no `get-task-allow` entitlement cannot be attached to.
 - **Run list history is in-memory.** `stax list` shows active/history rows,
-  but that list does not survive a `stax-server` restart. Use
+  and `stax select-run <ID>` can restore a stopped row into the current query
+  state, but that list does not survive a `stax-server` restart. Use
   `stax save <DIR>` before restart, then `stax open <DIR>` to restore the
   saved run into the current query state.
-- **No per-run query selector yet.** Queries hit whichever run is active or
-  most recent — see [Run Lifecycle](@/guide/run-lifecycle.md).
+- **No per-call `--run` selector yet.** Queries hit the current query state:
+  the active run, the most recently stopped run, a `select-run` row, or an
+  opened archive. See [Run Lifecycle](@/guide/run-lifecycle.md).
 
 ## Still stuck?
 

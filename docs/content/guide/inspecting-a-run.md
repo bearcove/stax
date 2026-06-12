@@ -9,10 +9,12 @@ look at it from different angles — from a one-line leaderboard down to
 individual machine instructions. They all read the **current** aggregator
 state, so they work on a run that is still recording.
 
-> **Which run do they query?** There is no run selector yet. `top`, `flame`,
-> `threads`, and `annotate` operate on whichever run is active — or, if none
-> is, the most recent one, which stays queryable until the next `stax record`
-> resets the aggregator. See [Run Lifecycle](@/guide/run-lifecycle.md).
+> **Which run do they query?** `top`, `flame`, `threads`, and `annotate`
+> operate on `stax-server`'s current query state. While a recording is active,
+> that is the active run; after a run stops, its snapshot stays selected.
+> Use `stax select-run <ID>` to restore a stopped in-memory run from
+> `stax list`, or `stax open <DIR>` to restore a saved archive. See
+> [Run Lifecycle](@/guide/run-lifecycle.md).
 
 ## stax top
 

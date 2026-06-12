@@ -56,6 +56,9 @@ pub enum Command {
     /// Open a saved run archive into stax-server's query state.
     Open(ArchiveArgs),
 
+    /// Restore a stopped in-memory run into stax-server's query state.
+    SelectRun(SelectRunArgs),
+
     /// Compare two saved run archives without touching stax-server state.
     Compare(CompareArgs),
 
@@ -91,6 +94,13 @@ pub struct CompareArgs {
     /// Candidate archive directory, v2 manifest.json, or legacy v1 archive.json.
     #[facet(args::positional)]
     pub candidate: String,
+}
+
+#[derive(Facet, Debug)]
+pub struct SelectRunArgs {
+    /// Run id from `stax list`.
+    #[facet(args::positional)]
+    pub run_id: u64,
 }
 
 #[derive(Facet, Debug)]

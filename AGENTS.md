@@ -212,16 +212,17 @@ stax stop     # ask stax-server to stop it now
 ```
 
 `stax list` shows every run the daemon has hosted (active + history).
-That list is still server-memory history; use `stax save <DIR>` to persist
-the current queryable run before starting another recording or restarting
+That list is still server-memory history; use `stax select-run <ID>` to
+restore a stopped in-memory run into the current query state, and
+`stax save <DIR>` to persist the current queryable run before restarting
 `stax-server`.
 
 ### Which run does `stax top` / `stax annotate` query?
 
-There's no run selector yet. They operate on the **current** aggregator
-state, which is whichever run is active *or* the most recent one — the
-aggregator stays populated until the next recording resets it. So the
-working flow is:
+They operate on `stax-server`'s **current query state**. While a recording is
+active, that is the active run. After a run stops, its query snapshot stays
+selected. `stax open <DIR>` selects an archive, and `stax select-run <ID>`
+selects a stopped in-memory run from `stax list`. So the working flow is:
 
 ```
 stax record …           # start a recording (in another shell or backgrounded)
@@ -229,13 +230,16 @@ stax wait --for-samples 5000
 stax top                # snapshot of the active run
 stax stop               # stops the run; aggregator stays queryable
 stax top                # still works — same data as above
-stax record …           # NEW run resets the aggregator; the previous one is gone
+stax record …           # NEW run resets the current query state
+stax list               # shows stopped history
+stax select-run 1       # restore run 1 into the current query state
 ```
 
-If you need to query an older run later, you'll have to stop the active
-one first (so its data sticks around), save it with `stax save <DIR>`, and
-reopen it later with `stax open <DIR>`. Per-`RunId` querying is still on the
-roadmap.
+`select-run` is still server-memory history: it does not survive a daemon
+restart. Save anything you need to hand off or keep with `stax save <DIR>`,
+then restore it later with `stax open <DIR>`. Per-call `--run <ID>` querying
+is still future work; today the selector changes the server's current query
+state.
 
 ## Lifecycle from an agent's POV
 
@@ -426,6 +430,25 @@ $ stax flame --threshold-pct 0
 run first. It accepts the archive directory, the v2 `manifest.json` file, or
 a legacy v1 `archive.json` file.
 
+### `stax select-run <RUN_ID>`
+
+Restore one stopped in-memory run from `stax list` into `stax-server`'s
+current query state.
+
+```
+$ stax list
+  run 1  [stopped]  pid 11000  9421 samples / 244 intervals  (./bench)
+  run 2  [stopped]  pid 12345  5012 samples / 124 intervals  (./bench)
+$ stax select-run 1
+selected:
+  run 1  [stopped]  pid 11000  9421 samples / 244 intervals  (./bench)
+```
+
+After selecting, `threads`, `top`, `flame`, `annotate`, and `diagnose`
+operate on that run. `select-run` refuses to replace state while a recording
+is active. It is not persistence; restart-safe handoff still needs
+`stax save` / `stax open`.
+
 ### `stax compare <BASELINE> <CANDIDATE>`
 
 Compare two saved archives without touching `stax-server` state.
@@ -449,7 +472,7 @@ just archive-smoke
 
 That starts a checkout-local `stax-server` on a temporary socket, records
 `stax-target/examples/corpus.rs` with the checkout CLI, saves it to a
-temporary archive directory, reopens it, queries
+temporary archive directory, reopens it, exercises `stax select-run`, queries
 `threads`/`top`/`flame`/`diagnose`, and runs `stax compare` against the
 archive itself.
 
@@ -610,7 +633,8 @@ directly. Both live in `stax-live-proto` and are exposed on the local socket
 *and* `ws://127.0.0.1:8080`:
 
 - **`RunControl`** — lifecycle: `status`, `list_runs`, `diagnostics`,
-  `start_attach`, `wait_active`, `stop_active`.
+  `start_attach`, `wait_active`, `stop_active`, `save_current`,
+  `open_saved`, `select_run`.
 - **`Profiler`** — query surface: `top`, `flamegraph`, `threads`,
   `annotated`, `timeline`, `neighbors`, `intervals`, `target_spans`,
   `wakers`, … most with a

@@ -83,7 +83,8 @@ the daemon started. Takes no options. See
 List every run `stax-server` has hosted — active and history, oldest first.
 Takes no options. History is server-memory history and does not survive a
 daemon restart unless you save the current queryable run with
-[`stax save`](#stax-save). See
+[`stax save`](#stax-save). Use [`stax select-run`](#stax-select-run) to
+restore a stopped history row into the current query state. See
 [Run Lifecycle](@/guide/run-lifecycle.md#stax-list).
 
 ## `stax wait`
@@ -151,6 +152,24 @@ stax open <PATH>
 
 After `stax open`, `threads`, `top`, `flame`, and `diagnose` operate on the
 restored run. `open` refuses to replace state while a recording is active.
+
+## `stax select-run`
+
+Restore one stopped in-memory run from `stax list` into `stax-server`'s
+current query state.
+
+```text
+stax select-run <RUN_ID>
+```
+
+| arg        | type             | meaning                 |
+|------------|------------------|-------------------------|
+| `<RUN_ID>` | positional `u64` | run id from `stax list` |
+
+After `select-run`, `threads`, `top`, `flame`, `annotate`, and `diagnose`
+operate on that run. It refuses to replace state while a recording is active.
+This is server-memory history, not persistence; save restart-safe artifacts
+with [`stax save`](#stax-save) and restore them with [`stax open`](#stax-open).
 
 ## `stax compare`
 

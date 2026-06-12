@@ -68,6 +68,8 @@ archive-smoke:
     STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- save "$archive"
     ls -1 "$archive"
     STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- open "$archive"
+    STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- list
+    STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- select-run 1
     STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- threads -n 20
     STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- top -n 20 --sort self
     STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- flame --threshold-pct 2 -d 4
