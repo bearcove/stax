@@ -249,6 +249,8 @@ thread that queued work shows `CPU caller -> lane -> job name`.
 
 - batches and spans received/recorded
 - batches/spans dropped because no run was active or the pid did not match
+- batches/spans dropped in stax-target before reaching the server because the
+  local queue filled or the background worker disconnected
 - dropped spans with invalid durations
 - per-lane duration and span totals
 - origin-linked and origin-unlinked counts

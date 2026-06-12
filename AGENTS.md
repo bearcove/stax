@@ -488,13 +488,14 @@ omit for whole-process.
 Dump `stax-server` diagnostics: active run state plus target-span ingest
 counters (batches, recorded/dropped spans, lane totals, and origin
 link/unlink counts, unlinked-origin reasons, and PET origin-distance
-min/avg/max). It also prints target-ingest hints for missing batches, bad span
-durations, missing origins, origins that do not link to a sampled CPU stack,
-batches that arrived with no active run, and batches from the wrong pid. For
-unlinked origins it distinguishes synthetic target tids, tids with no PET
-samples, sampled tids with no user stacks, and origins too far from the nearest
-sample. Use it when numbers look wrong and you want the pipeline's own
-accounting.
+min/avg/max, plus target-side stax-target queue drops). It also prints
+target-ingest hints for missing batches, bad span durations, missing origins,
+origins that do not link to a sampled CPU stack, batches that arrived with no
+active run, batches from the wrong pid, and local stax-target queue overflow or
+worker-disconnect drops. For unlinked origins it distinguishes synthetic target
+tids, tids with no PET samples, sampled tids with no user stacks, and origins
+too far from the nearest sample. Use it when numbers look wrong and you want
+the pipeline's own accounting.
 
 ### `stax dump`
 

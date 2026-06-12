@@ -102,9 +102,9 @@ Remaining API polish:
   - A RAII guard could be convenient, but only if it is opt-in and clearly
     documented as best-effort telemetry.
 - Add queue/backpressure observability from the target side:
-  - local dropped-batch count
-  - connection state
-  - last gate state
+  - local dropped-batch count is now exposed through `ReporterStats` and
+    `stax diagnose` while capture is active
+  - connection state and last gate state remain useful future additions
   - maybe exposed through tracing and/or a lightweight accessor
 
 Acceptance criteria:
@@ -226,6 +226,8 @@ Already present:
   - no target batches
   - batches/spans dropped while no run is active
   - batches/spans dropped because the pid does not match the active run target
+  - batches/spans dropped inside stax-target because the local queue filled or
+    the worker disconnected
   - bad span durations
   - missing origins
   - unlinked origins, including synthetic tid, no sampled thread, no user
@@ -234,8 +236,6 @@ Already present:
 
 Remaining CLI work:
 
-- Teach `stax diagnose` about queue drops in `stax-target`, if target-side
-  counters are exposed.
 - Decide whether the lane table should grow a richer per-lane diagnostic view
   or whether the compact per-lane reason row is enough.
 - Add a `stax lanes` or `stax targets` command only if `threads` cannot remain
@@ -253,7 +253,8 @@ Acceptance criteria:
   placement.
 - A synthetic tid is easy to discover without `-n 2000`.
 - Diagnostics distinguish "target did not report", "server dropped it", and
-  "origin did not link", including why the origin did not link.
+  "origin did not link", including why the origin did not link and whether
+  stax-target dropped batches locally before the server saw them.
 
 Verification:
 
@@ -408,6 +409,7 @@ The corpus should produce stable enough outputs for checks:
 - `stax diagnose`
   - reports batches/spans
   - reports bad durations
+  - reports target-side queue drops
   - reports linked and unlinked origins with reason and distance diagnostics
   - prints hints for intentionally bad cases
 
@@ -616,7 +618,7 @@ Done when:
 
 - Synthetic lanes are obvious in `threads`.
 - `diagnose` differentiates target did not report, wrong pid, bad duration,
-  missing origin, and unlinked origin reasons.
+  missing origin, local stax-target drops, and unlinked origin reasons.
 
 ### Phase C: build the blessed corpus
 

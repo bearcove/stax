@@ -1310,6 +1310,32 @@ mod tests {
     }
 
     #[test]
+    fn target_ingest_hints_explain_target_queue_drops() {
+        let hints = target_ingest_hints(&TargetIngestDiagnostics {
+            batches_dropped_target_queue_full: 2,
+            spans_dropped_target_queue_full: 12,
+            ..TargetIngestDiagnostics::default()
+        });
+
+        assert_eq!(hints.len(), 1);
+        assert!(hints[0].contains("local queue filled"));
+        assert!(hints[0].contains("batch spans together"));
+    }
+
+    #[test]
+    fn target_ingest_hints_explain_target_worker_drops() {
+        let hints = target_ingest_hints(&TargetIngestDiagnostics {
+            batches_dropped_target_worker_disconnected: 2,
+            spans_dropped_target_worker_disconnected: 12,
+            ..TargetIngestDiagnostics::default()
+        });
+
+        assert_eq!(hints.len(), 1);
+        assert!(hints[0].contains("background worker disconnected"));
+        assert!(hints[0].contains("target logs"));
+    }
+
+    #[test]
     fn target_ingest_hints_explain_bad_durations_and_missing_origins() {
         let hints = target_ingest_hints(&TargetIngestDiagnostics {
             batches: 1,
@@ -1593,6 +1619,24 @@ fn print_target_ingest_drop_counts(target: &TargetIngestDiagnostics) {
             plural(target.spans_dropped_wrong_pid),
         );
     }
+    if target.batches_dropped_target_queue_full > 0 {
+        println!(
+            "  dropped in stax-target queue: {} batch{} / {} span{}",
+            target.batches_dropped_target_queue_full,
+            plural(target.batches_dropped_target_queue_full),
+            target.spans_dropped_target_queue_full,
+            plural(target.spans_dropped_target_queue_full),
+        );
+    }
+    if target.batches_dropped_target_worker_disconnected > 0 {
+        println!(
+            "  dropped after stax-target worker stopped: {} batch{} / {} span{}",
+            target.batches_dropped_target_worker_disconnected,
+            plural(target.batches_dropped_target_worker_disconnected),
+            target.spans_dropped_target_worker_disconnected,
+            plural(target.spans_dropped_target_worker_disconnected),
+        );
+    }
 }
 
 fn print_target_ingest_hints(target: &TargetIngestDiagnostics) {
@@ -1622,6 +1666,20 @@ fn target_ingest_hints(target: &TargetIngestDiagnostics) -> Vec<String> {
             )
             .to_owned(),
         );
+    }
+    if target.batches_dropped_target_queue_full > 0 {
+        hints.push(format!(
+            "stax-target dropped {} batch{} before they reached the server because its local queue filled; batch spans together, reduce per-item span cardinality, and keep reporting behind `reporting_active()`",
+            target.batches_dropped_target_queue_full,
+            plural(target.batches_dropped_target_queue_full),
+        ));
+    }
+    if target.batches_dropped_target_worker_disconnected > 0 {
+        hints.push(format!(
+            "stax-target dropped {} batch{} after its background worker disconnected; check target logs for stax-target runtime/connect failures",
+            target.batches_dropped_target_worker_disconnected,
+            plural(target.batches_dropped_target_worker_disconnected),
+        ));
     }
     if target.batches == 0 {
         if hints.is_empty() {

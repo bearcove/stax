@@ -28,7 +28,8 @@ use std::collections::HashMap;
 
 use stax_live::{IntervalKind, LiveSymbolOwned, LoadedBinary, NearestPetStackError, PmuSample};
 use stax_live_proto::{
-    TargetIngest, TargetIngestDiagnostics, TargetLaneDiagnostics, TargetSpanBatch, TargetSpanOrigin,
+    TargetIngest, TargetIngestDiagnostics, TargetLaneDiagnostics, TargetReporterStats,
+    TargetSpanBatch, TargetSpanOrigin,
 };
 
 use crate::ServerState;
@@ -60,6 +61,7 @@ pub(crate) struct TargetLaneRegistry {
     symbol_addrs: HashMap<SyntheticSymbolKey, u64>,
     totals: TargetIngestCounters,
     lane_counters: HashMap<(u32, String), TargetIngestCounters>,
+    reporter_stats: HashMap<u32, TargetReporterStats>,
 }
 
 #[derive(Clone)]
@@ -212,6 +214,10 @@ impl TargetLaneRegistry {
         self.totals.record_dropped_wrong_pid(spans);
     }
 
+    fn record_reporter_stats(&mut self, stats: TargetReporterStats) {
+        self.reporter_stats.insert(stats.pid, stats);
+    }
+
     fn record_batch(&mut self, pid: u32, lane: &str, batch: TargetBatchCounters) {
         self.totals.record_batch(batch);
         self.lane_counters
@@ -261,6 +267,26 @@ impl TargetLaneRegistry {
             spans_dropped_no_active_run: self.totals.spans_dropped_no_active_run,
             batches_dropped_wrong_pid: self.totals.batches_dropped_wrong_pid,
             spans_dropped_wrong_pid: self.totals.spans_dropped_wrong_pid,
+            batches_dropped_target_queue_full: self
+                .reporter_stats
+                .values()
+                .map(|stats| stats.batches_dropped_queue_full)
+                .sum(),
+            spans_dropped_target_queue_full: self
+                .reporter_stats
+                .values()
+                .map(|stats| stats.spans_dropped_queue_full)
+                .sum(),
+            batches_dropped_target_worker_disconnected: self
+                .reporter_stats
+                .values()
+                .map(|stats| stats.batches_dropped_worker_disconnected)
+                .sum(),
+            spans_dropped_target_worker_disconnected: self
+                .reporter_stats
+                .values()
+                .map(|stats| stats.spans_dropped_worker_disconnected)
+                .sum(),
             spans_received: self.totals.spans_received,
             spans_recorded: self.totals.spans_recorded,
             spans_dropped_bad_duration: self.totals.spans_dropped_bad_duration,
@@ -499,6 +525,16 @@ impl TargetIngest for TargetIngestService {
         );
     }
 
+    async fn reporter_stats(&self, stats: TargetReporterStats) {
+        if self.server.active_target_pid() != Some(stats.pid) {
+            return;
+        }
+        self.server
+            .target_lanes()
+            .lock()
+            .record_reporter_stats(stats);
+    }
+
     async fn should_report(&self, pid: u32) -> bool {
         self.server.active_target_pid() == Some(pid)
     }
@@ -655,6 +691,38 @@ mod tests {
         assert_eq!(diagnostics.lanes.len(), 1);
         assert_eq!(diagnostics.lanes[0].tid, tid);
         assert_eq!(diagnostics.lanes[0].name, "GPU test");
+    }
+
+    #[tokio::test]
+    async fn reporter_stats_land_only_for_active_target() {
+        let server = ServerState::new_for_tests();
+        let service = TargetIngestService::new(server.clone());
+        server.set_active_run_for_tests(42);
+
+        service
+            .reporter_stats(TargetReporterStats {
+                pid: 41,
+                batches_dropped_queue_full: 9,
+                spans_dropped_queue_full: 90,
+                batches_dropped_worker_disconnected: 8,
+                spans_dropped_worker_disconnected: 80,
+            })
+            .await;
+        service
+            .reporter_stats(TargetReporterStats {
+                pid: 42,
+                batches_dropped_queue_full: 2,
+                spans_dropped_queue_full: 7,
+                batches_dropped_worker_disconnected: 1,
+                spans_dropped_worker_disconnected: 3,
+            })
+            .await;
+
+        let diagnostics = server.target_lanes().lock().diagnostics();
+        assert_eq!(diagnostics.batches_dropped_target_queue_full, 2);
+        assert_eq!(diagnostics.spans_dropped_target_queue_full, 7);
+        assert_eq!(diagnostics.batches_dropped_target_worker_disconnected, 1);
+        assert_eq!(diagnostics.spans_dropped_target_worker_disconnected, 3);
     }
 
     #[tokio::test]

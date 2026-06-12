@@ -21,7 +21,9 @@
 //!   later poll.
 //! - **Data ([`report`])** — fire-and-forget batches, bounded queue,
 //!   drop-newest. The server is the authority: it drops batches whose
-//!   pid doesn't match the active run's target. Lossy by design.
+//!   pid doesn't match the active run's target. Lossy by design. Local
+//!   queue drops are counted in [`reporter_stats`] and sent to
+//!   `stax diagnose` while capture is active.
 //!
 //! Span timestamps are absolute mach-derived nanoseconds — on Apple
 //! platforms `mach_absolute_time` converted to ns (Apple Silicon GPU
@@ -48,7 +50,7 @@
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::time::{Duration, Instant};
 
@@ -57,7 +59,7 @@ use std::time::{Duration, Instant};
 /// drop the client, reconnect on a later poll.
 const CALL_TIMEOUT: Duration = Duration::from_secs(3);
 
-use stax_live_proto::{TargetIngestClient, TargetSpanBatch};
+use stax_live_proto::{TargetIngestClient, TargetReporterStats, TargetSpanBatch};
 pub use stax_live_proto::{TargetSpan, TargetSpanOrigin};
 
 /// Bounded queue between reporting threads and the worker. Each entry
@@ -70,6 +72,18 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Whether the app's pid is currently being recorded.
 static REPORTING_ACTIVE: AtomicBool = AtomicBool::new(false);
+static BATCHES_DROPPED_QUEUE_FULL: AtomicU64 = AtomicU64::new(0);
+static SPANS_DROPPED_QUEUE_FULL: AtomicU64 = AtomicU64::new(0);
+static BATCHES_DROPPED_WORKER_DISCONNECTED: AtomicU64 = AtomicU64::new(0);
+static SPANS_DROPPED_WORKER_DISCONNECTED: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReporterStats {
+    pub batches_dropped_queue_full: u64,
+    pub spans_dropped_queue_full: u64,
+    pub batches_dropped_worker_disconnected: u64,
+    pub spans_dropped_worker_disconnected: u64,
+}
 
 /// Capture gate: `true` while a stax recording of this process is
 /// active. One relaxed atomic load — safe to read on hot paths. The
@@ -78,6 +92,45 @@ static REPORTING_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub fn reporting_active() -> bool {
     let _ = worker_sender();
     REPORTING_ACTIVE.load(Ordering::Relaxed)
+}
+
+pub fn reporter_stats() -> ReporterStats {
+    ReporterStats {
+        batches_dropped_queue_full: BATCHES_DROPPED_QUEUE_FULL.load(Ordering::Relaxed),
+        spans_dropped_queue_full: SPANS_DROPPED_QUEUE_FULL.load(Ordering::Relaxed),
+        batches_dropped_worker_disconnected: BATCHES_DROPPED_WORKER_DISCONNECTED
+            .load(Ordering::Relaxed),
+        spans_dropped_worker_disconnected: SPANS_DROPPED_WORKER_DISCONNECTED
+            .load(Ordering::Relaxed),
+    }
+}
+
+fn reset_reporter_stats() {
+    BATCHES_DROPPED_QUEUE_FULL.store(0, Ordering::Relaxed);
+    SPANS_DROPPED_QUEUE_FULL.store(0, Ordering::Relaxed);
+    BATCHES_DROPPED_WORKER_DISCONNECTED.store(0, Ordering::Relaxed);
+    SPANS_DROPPED_WORKER_DISCONNECTED.store(0, Ordering::Relaxed);
+}
+
+fn reporter_stats_for_pid(pid: u32) -> TargetReporterStats {
+    let stats = reporter_stats();
+    TargetReporterStats {
+        pid,
+        batches_dropped_queue_full: stats.batches_dropped_queue_full,
+        spans_dropped_queue_full: stats.spans_dropped_queue_full,
+        batches_dropped_worker_disconnected: stats.batches_dropped_worker_disconnected,
+        spans_dropped_worker_disconnected: stats.spans_dropped_worker_disconnected,
+    }
+}
+
+fn record_queue_full_drop(spans: u64) {
+    BATCHES_DROPPED_QUEUE_FULL.fetch_add(1, Ordering::Relaxed);
+    SPANS_DROPPED_QUEUE_FULL.fetch_add(spans, Ordering::Relaxed);
+}
+
+fn record_worker_disconnected_drop(spans: u64) {
+    BATCHES_DROPPED_WORKER_DISCONNECTED.fetch_add(1, Ordering::Relaxed);
+    SPANS_DROPPED_WORKER_DISCONNECTED.fetch_add(spans, Ordering::Relaxed);
 }
 
 /// Current timestamp in the same nanosecond clock domain stax uses for
@@ -139,6 +192,7 @@ pub fn try_report(lane: &str, spans: Vec<TargetSpan>) -> Result<(), ReportError>
     if spans.is_empty() {
         return Ok(());
     }
+    let span_count = spans.len() as u64;
     let sender = worker_sender();
     let batch = TargetSpanBatch {
         pid: std::process::id(),
@@ -148,10 +202,14 @@ pub fn try_report(lane: &str, spans: Vec<TargetSpan>) -> Result<(), ReportError>
     match sender.try_send(batch) {
         Ok(()) => Ok(()),
         Err(TrySendError::Full(_)) => {
+            record_queue_full_drop(span_count);
             tracing::debug!("stax-target queue full; dropping span batch");
             Err(ReportError::QueueFull)
         }
-        Err(TrySendError::Disconnected(_)) => Err(ReportError::WorkerDisconnected),
+        Err(TrySendError::Disconnected(_)) => {
+            record_worker_disconnected_drop(span_count);
+            Err(ReportError::WorkerDisconnected)
+        }
     }
 }
 
@@ -543,8 +601,32 @@ fn worker(rx: Receiver<TargetSpanBatch>) {
                     None => false,
                 };
                 let was = REPORTING_ACTIVE.swap(active, Ordering::Relaxed);
+                if !was && active {
+                    reset_reporter_stats();
+                }
                 if was != active {
                     tracing::debug!(active, "stax-target: capture gate flipped");
+                }
+                if active {
+                    let Some(live) = client.as_ref() else {
+                        return;
+                    };
+                    let stats = reporter_stats_for_pid(pid);
+                    match tokio::time::timeout(CALL_TIMEOUT, live.reporter_stats(stats)).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            tracing::debug!(
+                                "stax-target: reporter stats failed, dropping connection: {e}"
+                            );
+                            client = None;
+                        }
+                        Err(_) => {
+                            tracing::debug!(
+                                "stax-target: reporter stats timed out, dropping connection"
+                            );
+                            client = None;
+                        }
+                    }
                 }
             });
         }
@@ -686,7 +768,10 @@ fn clock_now_ns() -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CapturedOrigin, Lane, SpanBuilder, TargetSpanOrigin};
+    use super::{
+        CapturedOrigin, Lane, SpanBuilder, TargetSpanOrigin, record_queue_full_drop,
+        record_worker_disconnected_drop, reporter_stats, reset_reporter_stats,
+    };
 
     #[test]
     fn captured_origin_distinguishes_inactive_from_no_origin() {
@@ -744,5 +829,21 @@ mod tests {
                 .build()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn reporter_stats_count_target_side_drops() {
+        reset_reporter_stats();
+
+        record_queue_full_drop(3);
+        record_worker_disconnected_drop(5);
+
+        let stats = reporter_stats();
+        assert_eq!(stats.batches_dropped_queue_full, 1);
+        assert_eq!(stats.spans_dropped_queue_full, 3);
+        assert_eq!(stats.batches_dropped_worker_disconnected, 1);
+        assert_eq!(stats.spans_dropped_worker_disconnected, 5);
+
+        reset_reporter_stats();
     }
 }

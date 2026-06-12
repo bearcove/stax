@@ -692,12 +692,27 @@ pub struct TargetSpanBatch {
     pub spans: Vec<TargetSpan>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Facet)]
+pub struct TargetReporterStats {
+    /// Reporting process id — stats are ignored unless this matches the
+    /// active run's target.
+    pub pid: u32,
+    pub batches_dropped_queue_full: u64,
+    pub spans_dropped_queue_full: u64,
+    pub batches_dropped_worker_disconnected: u64,
+    pub spans_dropped_worker_disconnected: u64,
+}
+
 /// Target-facing ingest surface: the thing a profiled app latches onto.
 /// Fire-and-forget; the target keeps running whether or not a recording
 /// is active (the server drops batches with no matching run).
 #[vox::service]
 pub trait TargetIngest {
     async fn ingest(&self, batch: TargetSpanBatch);
+
+    /// Snapshot of target-side reporter drops from stax-target's local
+    /// bounded queue. Sent by the target worker while capture is active.
+    async fn reporter_stats(&self, stats: TargetReporterStats);
 
     /// Capture gate, polled by targets (~1s): `true` iff an active run
     /// is recording `pid`. Targets use this to switch span capture on
@@ -932,6 +947,10 @@ pub struct TargetIngestDiagnostics {
     pub spans_dropped_no_active_run: u64,
     pub batches_dropped_wrong_pid: u64,
     pub spans_dropped_wrong_pid: u64,
+    pub batches_dropped_target_queue_full: u64,
+    pub spans_dropped_target_queue_full: u64,
+    pub batches_dropped_target_worker_disconnected: u64,
+    pub spans_dropped_target_worker_disconnected: u64,
     pub spans_received: u64,
     pub spans_recorded: u64,
     pub spans_dropped_bad_duration: u64,
