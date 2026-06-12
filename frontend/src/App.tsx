@@ -38,7 +38,7 @@ import {
   type WakersUpdate,
 } from "./generated/profiler.generated.ts";
 import { Flamegraph } from "./Flamegraph.tsx";
-import { IntervalsPanel } from "./Intervals.tsx";
+import { IntervalsPanel, TargetSpansPanel } from "./Intervals.tsx";
 import { Neighbors } from "./Neighbors.tsx";
 import { Timeline } from "./Timeline.tsx";
 import {
@@ -690,6 +690,14 @@ export function App() {
                 >
                   intervals
                 </button>
+                <button
+                  className={`tab${paneTab === "target-spans" ? " active" : ""}`}
+                  onClick={() => setPaneTab("target-spans")}
+                  role="tab"
+                  aria-selected={paneTab === "target-spans"}
+                >
+                  target spans
+                </button>
               </div>
               <div className="tab-body">
                 {paneTab === "asm" && selected !== null ? (
@@ -714,6 +722,15 @@ export function App() {
                   />
                 ) : paneTab === "intervals" ? (
                   <IntervalsPanel
+                    client={client}
+                    flameKey={flameFocusAbsKey ?? "r"}
+                    tid={selectedTid}
+                    filter={effectiveFilter}
+                    threads={threads}
+                    onSelectTid={setSelectedTid}
+                  />
+                ) : paneTab === "target-spans" ? (
+                  <TargetSpansPanel
                     client={client}
                     flameKey={flameFocusAbsKey ?? "r"}
                     tid={selectedTid}
@@ -867,7 +884,7 @@ function escapeRegex(s: string): string {
 
 export type LangKind = "rust" | "c" | "cpp" | "swift" | "asm" | "unknown";
 export type ObjKind = "main" | "system" | "dylib" | "unknown";
-type PaneTab = "asm" | "neighbors" | "intervals";
+type PaneTab = "asm" | "neighbors" | "intervals" | "target-spans";
 
 /// What visual widths/ordering represent: active time, target time,
 /// off-CPU waiting time, or wall (active + off). Display-only; the

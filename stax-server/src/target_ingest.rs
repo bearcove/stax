@@ -694,6 +694,28 @@ mod tests {
         assert_eq!(thread.pet_samples, 2);
         assert_eq!(thread.target_spans, 2);
 
+        let target_spans = profiler
+            .target_spans("r".to_owned(), view_params(Some(tid)))
+            .await;
+        assert_eq!(target_spans.total_spans, 2);
+        assert_eq!(target_spans.total_duration_ns, 3_500_000);
+        assert_eq!(target_spans.entries.len(), 2);
+        assert_eq!(
+            target_spans.entries[0]
+                .span_name
+                .and_then(|index| target_spans.strings.get(index as usize).map(String::as_str)),
+            Some("kernel_b")
+        );
+        assert_eq!(target_spans.entries[0].duration_ns, 500_000);
+        assert_eq!(target_spans.entries[0].origin_tid, None);
+        assert_eq!(
+            target_spans.entries[1]
+                .lane_name
+                .and_then(|index| target_spans.strings.get(index as usize).map(String::as_str)),
+            Some("GPU test")
+        );
+        assert_eq!(target_spans.entries[1].duration_ns, 3_000_000);
+
         let diagnostics = server.target_lanes().lock().diagnostics();
         assert_eq!(diagnostics.batches, 1);
         assert_eq!(diagnostics.batches_dropped_no_active_run, 1);

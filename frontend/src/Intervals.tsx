@@ -5,6 +5,8 @@ import type {
   IntervalListUpdate,
   LiveFilter,
   ProfilerClient,
+  TargetSpanEntry,
+  TargetSpanListUpdate,
   ThreadInfo,
 } from "./generated/profiler.generated.ts";
 import {
@@ -126,6 +128,151 @@ export function IntervalsPanel({
         </table>
       </div>
     </div>
+  );
+}
+
+export function TargetSpansPanel({
+  client,
+  flameKey,
+  tid,
+  filter,
+  threads,
+  onSelectTid,
+}: {
+  client: ProfilerClient;
+  flameKey: string;
+  tid: number | null;
+  filter: LiveFilter;
+  threads: ThreadInfo[];
+  onSelectTid: (tid: number) => void;
+}) {
+  const [update, setUpdate] = useState<TargetSpanListUpdate | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setUpdate(null);
+    const [tx, rx] = channel<TargetSpanListUpdate>();
+    client
+      .subscribeTargetSpans(flameKey, viewParams(tid, filter), tx)
+      .catch(() => {});
+    (async () => {
+      for await (const next of rx) {
+        if (cancelled) break;
+        setUpdate(next);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [client, flameKey, tid, filter]);
+
+  if (!update) {
+    return <div className="placeholder">streaming target spans…</div>;
+  }
+  if (update.entries.length === 0) {
+    return (
+      <div className="placeholder">
+        no target spans attributed to this view yet
+      </div>
+    );
+  }
+
+  const threadName = (t: number) =>
+    threads.find((th) => th.tid === t)?.name ?? null;
+
+  return (
+    <div className="intervals-pane target-spans-pane">
+      <div className="intervals-header">
+        <span>
+          <strong>{update.total_spans.toString()}</strong> spans ·{" "}
+          {formatDuration(update.total_duration_ns)} total
+        </span>
+        <span className="intervals-header-meta">
+          showing {update.entries.length} most recent
+        </span>
+      </div>
+      <div className="intervals-body">
+        <table className="intervals-table target-spans-table">
+          <thead>
+            <tr>
+              <th>start</th>
+              <th>duration</th>
+              <th>lane</th>
+              <th>span</th>
+              <th>origin</th>
+            </tr>
+          </thead>
+          <tbody>
+            {update.entries.map((e, i) => (
+              <TargetSpanRow
+                key={i}
+                entry={e}
+                strings={update.strings}
+                threadName={threadName}
+                onSelectTid={onSelectTid}
+              />
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function TargetSpanRow({
+  entry,
+  strings,
+  threadName,
+  onSelectTid,
+}: {
+  entry: TargetSpanEntry;
+  strings: string[];
+  threadName: (tid: number) => string | null;
+  onSelectTid: (tid: number) => void;
+}) {
+  const startSec = (Number(entry.start_ns) / 1e9).toFixed(3);
+  const lane = entry.lane_name != null ? strings[entry.lane_name] : "(lane)";
+  const span = entry.span_name != null ? strings[entry.span_name] : "(span)";
+  const originFn =
+    entry.origin_function_name != null
+      ? strings[entry.origin_function_name]
+      : null;
+  const originBin =
+    entry.origin_binary != null ? strings[entry.origin_binary] : null;
+  const originThreadName =
+    entry.origin_tid != null ? threadName(entry.origin_tid) : null;
+  return (
+    <tr>
+      <td className="col-start">{startSec}s</td>
+      <td className="col-duration">{formatDuration(entry.duration_ns)}</td>
+      <td className="col-lane">{lane}</td>
+      <td className="col-span">{span}</td>
+      <td className={`col-origin${entry.origin_tid == null ? " empty" : ""}`}>
+        {entry.origin_tid != null ? (
+          <button
+            type="button"
+            className="waker-link"
+            onClick={() => onSelectTid(entry.origin_tid!)}
+            title={
+              originBin
+                ? `${originFn ?? "(unresolved)"} · ${originBin}`
+                : originFn ?? `tid ${entry.origin_tid}`
+            }
+          >
+            {originFn ??
+              (entry.origin_linked
+                ? "(linked origin)"
+                : "(unlinked origin)")}
+            <span className="waker-tid">
+              {" "}
+              · {originThreadName ?? `tid ${entry.origin_tid}`}
+            </span>
+          </button>
+        ) : (
+          "(none)"
+        )}
+      </td>
+    </tr>
   );
 }
 

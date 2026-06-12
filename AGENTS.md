@@ -554,7 +554,8 @@ directly. Both live in `stax-live-proto` and are exposed on the local socket
 - **`RunControl`** — lifecycle: `status`, `list_runs`, `diagnostics`,
   `start_attach`, `wait_active`, `stop_active`.
 - **`Profiler`** — query surface: `top`, `flamegraph`, `threads`,
-  `annotated`, `timeline`, `neighbors`, `intervals`, `wakers`, … most with a
+  `annotated`, `timeline`, `neighbors`, `intervals`, `target_spans`,
+  `wakers`, … most with a
   `subscribe_*` variant that pushes periodic updates over a `vox::Tx<…>`
   (a one-shot call is the snapshot form).
 

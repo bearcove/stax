@@ -12,8 +12,8 @@ use parking_lot::RwLock;
 use stax_live_proto::{
     AnnotatedLine, AnnotatedView, CfgUpdate, FlameNode, FlamegraphUpdate, IntervalEntry,
     IntervalListUpdate, LiveFilter, NeighborsUpdate, PetSampleEntry, PetSampleListUpdate, Profiler,
-    ThreadInfo, ThreadsUpdate, TimelineBucket, TimelineUpdate, TopEntry, TopSort, TopUpdate,
-    ViewParams,
+    TargetSpanEntry, TargetSpanListUpdate, ThreadInfo, ThreadsUpdate, TimelineBucket,
+    TimelineUpdate, TopEntry, TopSort, TopUpdate, ViewParams,
 };
 
 use crate::aggregator::{Aggregation, EventCtx, OffCpuBreakdown, PmcAccum, StackNode};
@@ -469,6 +469,47 @@ impl Profiler for LiveServer {
         });
     }
 
+    async fn target_spans(&self, flame_key: String, params: ViewParams) -> TargetSpanListUpdate {
+        let _ = flame_key;
+        let ViewParams { tid, filter } = params;
+        let agg = self.aggregator.read();
+        let bins = self.binaries.read();
+        build_target_spans_update(&agg, &bins, tid, &filter)
+    }
+
+    async fn subscribe_target_spans(
+        &self,
+        flame_key: String,
+        params: ViewParams,
+        output: vox::Tx<TargetSpanListUpdate>,
+    ) {
+        let _ = flame_key;
+        let ViewParams { tid, filter } = params;
+        tracing::info!(?tid, "subscribe_target_spans: starting stream");
+        let agg = self.aggregator.clone();
+        let bins = self.binaries.clone();
+        let rev = self.revision.clone();
+        tokio::spawn(async move {
+            let mut last_seen = None;
+            let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
+            loop {
+                tick.tick().await;
+                if !should_publish_revision(&rev, &mut last_seen) {
+                    continue;
+                }
+                let update = {
+                    let agg = agg.read();
+                    let bins = bins.read();
+                    build_target_spans_update(&agg, &bins, tid, &filter)
+                };
+                if let Err(e) = output.send(update).await {
+                    tracing::info!("subscribe_target_spans: stream ended: {e:?}");
+                    break;
+                }
+            }
+        });
+    }
+
     async fn set_paused(&self, paused: bool) {
         self.paused
             .store(paused, std::sync::atomic::Ordering::Relaxed);
@@ -738,6 +779,87 @@ fn build_pet_samples_update(
     entries.sort_by(|a, b| b.timestamp_ns.cmp(&a.timestamp_ns));
     PetSampleListUpdate {
         total_samples,
+        entries,
+    }
+}
+
+fn build_target_spans_update(
+    agg: &Aggregator,
+    binaries: &BinaryRegistry,
+    tid: Option<u32>,
+    filter: &LiveFilter,
+) -> TargetSpanListUpdate {
+    let session_start = agg.session_start_ns().unwrap_or(0);
+    let mut interner = StringInterner::new();
+    let mut total_spans: u64 = 0;
+    let mut total_duration_ns: u64 = 0;
+    let mut entries: Vec<TargetSpanEntry> = Vec::new();
+    let mut predicate = make_predicate(filter, session_start);
+
+    for (event_tid, raw) in agg.iter_intervals(tid) {
+        let (stack, origin_tid) = match &raw.kind {
+            IntervalKind::SyntheticSpan { stack, origin_tid } => (stack, origin_tid),
+            IntervalKind::OnCpu | IntervalKind::OffCpu { .. } => continue,
+        };
+        if !predicate(EventCtx::Interval {
+            tid: event_tid,
+            interval: raw,
+            binaries,
+        }) {
+            continue;
+        }
+        let duration_ns = raw.end_ns.saturating_sub(raw.start_ns);
+        if duration_ns == 0 {
+            continue;
+        }
+        total_spans = total_spans.saturating_add(1);
+        total_duration_ns = total_duration_ns.saturating_add(duration_ns);
+        if entries.len() >= DRILLDOWN_ENTRY_CAP {
+            continue;
+        }
+
+        let resolve_name = |addr: u64, interner: &mut StringInterner| {
+            binaries
+                .lookup_symbol(addr)
+                .map(|resolved| interner.intern(resolved.function_name))
+        };
+        let lane_name = stack
+            .get(1)
+            .copied()
+            .and_then(|addr| resolve_name(addr, &mut interner));
+        let span_name = stack
+            .first()
+            .copied()
+            .and_then(|addr| resolve_name(addr, &mut interner));
+        let origin_resolved = stack.get(2).copied().and_then(|addr| {
+            binaries.lookup_symbol(addr).map(|resolved| {
+                (
+                    interner.intern(resolved.function_name),
+                    interner.intern(resolved.binary),
+                )
+            })
+        });
+        let (origin_function_name, origin_binary) =
+            origin_resolved.map_or((None, None), |(name, binary)| (Some(name), Some(binary)));
+
+        entries.push(TargetSpanEntry {
+            tid: event_tid,
+            start_ns: raw.start_ns.saturating_sub(session_start),
+            duration_ns,
+            lane_name,
+            span_name,
+            origin_tid: *origin_tid,
+            origin_linked: stack.len() > 2,
+            origin_function_name,
+            origin_binary,
+        });
+    }
+
+    entries.sort_by(|a, b| b.start_ns.cmp(&a.start_ns));
+    TargetSpanListUpdate {
+        strings: interner.into_strings(),
+        total_spans,
+        total_duration_ns,
         entries,
     }
 }

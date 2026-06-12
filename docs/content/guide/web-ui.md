@@ -78,7 +78,9 @@ there is nothing to reload. The layout, top to bottom:
 - **A tabbed detail pane** — *disassembly* (cost-annotated, source-headed,
   the same data as [`stax annotate`](@/guide/inspecting-a-run.md#stax-annotate)),
   *family tree* (callers/callees around a symbol), and *intervals* (the
-  individual off-CPU intervals, with reasons and wakers).
+  individual off-CPU intervals, with reasons and wakers), and *target spans*
+  (the individual target/executor spans, with lane, span name, duration, and
+  origin thread/link status).
 
 The UI and the CLI are interchangeable: a run started from the CLI shows up
 in the browser, and vice versa. They are both just clients of the same

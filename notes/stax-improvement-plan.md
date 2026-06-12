@@ -487,6 +487,9 @@ Current state:
   ordering/bars, and the timeline strip all pivot to target duration.
 - Target mode uses distinct target colors in the timeline, top table, and
   thread switcher.
+- Added a target-span detail RPC and web tab. It streams individual synthetic
+  span intervals with lane/span names, duration, origin tid, and origin-link
+  status from the existing aggregator event log.
 
 Remaining work:
 
@@ -516,6 +519,8 @@ Remaining work:
     - count/aggregate if grouped
     - origin tid and nearest CPU stack if linked
 - Details panels:
+  - started: target spans tab answers span count, total duration, lane/name,
+    and origin tid/link state
   - answer "who queued this?"
   - answer "how many times and total duration?"
   - answer "which CPU thread dispatched it?"

@@ -548,6 +548,29 @@ pub struct PetSampleListUpdate {
     pub entries: Vec<PetSampleEntry>,
 }
 
+/// One target/executor span surfaced by `subscribe_target_spans`.
+#[derive(Clone, Debug, Facet)]
+pub struct TargetSpanEntry {
+    pub tid: u32,
+    /// Recording-relative ns.
+    pub start_ns: u64,
+    pub duration_ns: u64,
+    pub lane_name: Option<u32>,
+    pub span_name: Option<u32>,
+    pub origin_tid: Option<u32>,
+    pub origin_linked: bool,
+    pub origin_function_name: Option<u32>,
+    pub origin_binary: Option<u32>,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct TargetSpanListUpdate {
+    pub strings: Vec<String>,
+    pub total_spans: u64,
+    pub total_duration_ns: u64,
+    pub entries: Vec<TargetSpanEntry>,
+}
+
 #[derive(Clone, Debug, Facet)]
 pub struct AnnotatedView {
     /// Best-effort symbol name (or hex string fallback).
@@ -836,6 +859,21 @@ pub trait Profiler {
         flame_key: String,
         params: ViewParams,
         output: vox::Tx<PetSampleListUpdate>,
+    );
+
+    /// Stream target/executor spans attributed to a selected thread/lane
+    /// and filter. This is the target-time counterpart to
+    /// `subscribe_intervals`: each entry is one synthetic span interval
+    /// with lane/span names and origin-link status.
+    async fn target_spans(&self, flame_key: String, params: ViewParams) -> TargetSpanListUpdate;
+
+    /// Stream target/executor spans attributed to a selected thread/lane
+    /// and filter.
+    async fn subscribe_target_spans(
+        &self,
+        flame_key: String,
+        params: ViewParams,
+        output: vox::Tx<TargetSpanListUpdate>,
     );
 
     /// Pause / resume live ingestion. While paused, new samples and

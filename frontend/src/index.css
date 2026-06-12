@@ -1807,6 +1807,20 @@ table.intervals-table td.col-tid {
   color: var(--text-tertiary);
 }
 
+table.intervals-table td.col-lane {
+  color: var(--target-color);
+  max-width: 18em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+table.intervals-table td.col-span {
+  color: var(--text-primary);
+  max-width: 28em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 table.intervals-table td.col-waker {
   color: var(--text-secondary);
   max-width: 32em;
@@ -1817,6 +1831,22 @@ table.intervals-table td.col-waker {
 table.intervals-table td.col-waker.empty {
   color: var(--text-muted);
   font-style: italic;
+}
+
+table.intervals-table td.col-origin {
+  color: var(--text-secondary);
+  max-width: 32em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+table.intervals-table td.col-origin.empty {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.target-spans-pane .intervals-header strong {
+  color: var(--target-color);
 }
 
 button.waker-link {

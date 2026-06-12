@@ -38,6 +38,8 @@ The lifecycle and control plane — the surface behind `stax status`, `list`,
 | `start_attach`  | begin a recording by attaching to a pid                    |
 | `wait_active`   | block until a `WaitCondition` fires or the run stops       |
 | `stop_active`   | stop the active run cleanly, returning its final summary   |
+| `save_current`  | write the current queryable run to a directory archive     |
+| `open_saved`    | load a saved archive into the current query state          |
 
 `start_attach` is how recordings begin: for `stax record -- <argv>`, the CLI
 launches the target suspended and hands the PID to this call.
@@ -47,8 +49,8 @@ launches the target suspended and hands the PID to this call.
 The query surface — the live aggregator. Most methods come in two shapes:
 
 - **one-shot** — `top`, `flamegraph`, `threads`, `annotated`, `timeline`,
-  `neighbors`, `intervals`, `pet_samples`, `wakers`, `cfg`, `total_on_cpu_ns`
-  — return a single snapshot;
+  `neighbors`, `intervals`, `pet_samples`, `target_spans`, `wakers`, `cfg`,
+  `total_on_cpu_ns` — return a single snapshot;
 - **`subscribe_*`** — the same queries, but each pushes periodic updates
   over a `vox::Tx<…>` channel for as long as you hold it.
 
