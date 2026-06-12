@@ -16,9 +16,9 @@ use stax_core::cmd_setup_linux;
 use stax_core::cmd_setup_mac;
 use stax_live_proto::{
     DiagnosticsSnapshot, FlameNode, FlamegraphUpdate, LiveFilter, OffCpuBreakdown, ProfilerClient,
-    RunControlClient, RunSummary, SavedIntervalKind, SavedRunArchive, ServerStatus, StopReason,
-    TargetIngestDiagnostics, ThreadsUpdate, TopEntry, TopSort, TopUpdate, ViewParams,
-    WaitCondition, WaitOutcome,
+    RunControlClient, RunSummary, SavedIntervalKind, SavedRunArchive, SavedRunArchiveManifest,
+    ServerStatus, StopReason, TargetIngestDiagnostics, ThreadsUpdate, TopEntry, TopSort, TopUpdate,
+    ViewParams, WaitCondition, WaitOutcome,
 };
 
 #[cfg(target_os = "macos")]
@@ -838,29 +838,92 @@ fn run_compare(args: CompareArgs) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-const ARCHIVE_FILE_NAME: &str = "archive.json";
-const ARCHIVE_FORMAT_VERSION: u32 = 1;
+const ARCHIVE_FORMAT_VERSION: u32 = 2;
+const ARCHIVE_V1_FORMAT_VERSION: u32 = 1;
+const ARCHIVE_V1_FILE_NAME: &str = "archive.json";
+const ARCHIVE_MANIFEST_FILE_NAME: &str = "manifest.json";
+#[cfg(test)]
+const ARCHIVE_AGGREGATOR_FILE_NAME: &str = "aggregator.json";
+#[cfg(test)]
+const ARCHIVE_BINARIES_FILE_NAME: &str = "binaries.json";
+#[cfg(test)]
+const ARCHIVE_TARGET_INGEST_FILE_NAME: &str = "target-ingest.json";
 
 fn read_saved_archive(path: &Path) -> Result<SavedRunArchive, Box<dyn Error>> {
-    let archive_path = if path.is_dir() {
-        path.join(ARCHIVE_FILE_NAME)
+    let archive = if path.is_dir() {
+        let manifest_path = path.join(ARCHIVE_MANIFEST_FILE_NAME);
+        if manifest_path.exists() {
+            read_saved_archive_manifest(&manifest_path)?
+        } else {
+            read_saved_archive_v1(&path.join(ARCHIVE_V1_FILE_NAME))?
+        }
+    } else if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == ARCHIVE_MANIFEST_FILE_NAME)
+    {
+        read_saved_archive_manifest(path)?
     } else {
-        path.to_path_buf()
+        read_saved_archive_v1(path)?
     };
-    let bytes = std::fs::read(&archive_path)
-        .map_err(|e| format!("read {}: {e}", archive_path.display()))?;
-    let archive: SavedRunArchive = facet_json::from_slice(&bytes)
-        .map_err(|e| format!("parse {}: {e}", archive_path.display()))?;
-    if archive.format_version != ARCHIVE_FORMAT_VERSION {
+    if !is_supported_archive_version(archive.format_version) {
         return Err(format!(
-            "unsupported stax archive version {} in {} (expected {})",
+            "unsupported stax archive version {} in {} (supported: {}, {})",
             archive.format_version,
-            archive_path.display(),
+            path.display(),
+            ARCHIVE_V1_FORMAT_VERSION,
             ARCHIVE_FORMAT_VERSION
         )
         .into());
     }
     Ok(archive)
+}
+
+fn read_saved_archive_v1(archive_path: &Path) -> Result<SavedRunArchive, Box<dyn Error>> {
+    let bytes = std::fs::read(&archive_path)
+        .map_err(|e| format!("read {}: {e}", archive_path.display()))?;
+    facet_json::from_slice(&bytes)
+        .map_err(|e| format!("parse {}: {e}", archive_path.display()).into())
+}
+
+fn read_saved_archive_manifest(manifest_path: &Path) -> Result<SavedRunArchive, Box<dyn Error>> {
+    let bytes = std::fs::read(manifest_path)
+        .map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
+    let manifest: SavedRunArchiveManifest = facet_json::from_slice(&bytes)
+        .map_err(|e| format!("parse {}: {e}", manifest_path.display()))?;
+    if !is_supported_archive_version(manifest.format_version) {
+        return Err(format!(
+            "unsupported stax archive version {} in {} (supported: {}, {})",
+            manifest.format_version,
+            manifest_path.display(),
+            ARCHIVE_V1_FORMAT_VERSION,
+            ARCHIVE_FORMAT_VERSION
+        )
+        .into());
+    }
+    let base = manifest_path.parent().ok_or_else(|| {
+        format!(
+            "manifest {} has no parent directory",
+            manifest_path.display()
+        )
+    })?;
+    Ok(SavedRunArchive {
+        format_version: manifest.format_version,
+        saved_at_unix_ns: manifest.saved_at_unix_ns,
+        runs: manifest.runs,
+        aggregator: read_saved_json(&base.join(&manifest.files.aggregator))?,
+        binaries: read_saved_json(&base.join(&manifest.files.binaries))?,
+        target_ingest: read_saved_json(&base.join(&manifest.files.target_ingest))?,
+    })
+}
+
+fn read_saved_json<T: facet::Facet<'static>>(path: &Path) -> Result<T, Box<dyn Error>> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    facet_json::from_slice(&bytes).map_err(|e| format!("parse {}: {e}", path.display()).into())
+}
+
+fn is_supported_archive_version(version: u32) -> bool {
+    matches!(version, ARCHIVE_V1_FORMAT_VERSION | ARCHIVE_FORMAT_VERSION)
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1552,13 +1615,16 @@ fn mentions_metal_cooperation(function_name: Option<&str>, binary: Option<&str>)
 #[cfg(test)]
 mod tests {
     use super::{
-        SYNTH_TID_BASE, empty_view_hint, mentions_metal_cooperation, summarize_archive,
-        target_ingest_hints, thread_kind, write_threads,
+        ARCHIVE_AGGREGATOR_FILE_NAME, ARCHIVE_BINARIES_FILE_NAME, ARCHIVE_FORMAT_VERSION,
+        ARCHIVE_MANIFEST_FILE_NAME, ARCHIVE_TARGET_INGEST_FILE_NAME, ARCHIVE_V1_FILE_NAME,
+        ARCHIVE_V1_FORMAT_VERSION, SYNTH_TID_BASE, empty_view_hint, mentions_metal_cooperation,
+        read_saved_archive, summarize_archive, target_ingest_hints, thread_kind, write_threads,
     };
     use stax_live_proto::{
         OffCpuBreakdown, SavedAggregator, SavedBinaryRegistry, SavedInterval, SavedIntervalKind,
-        SavedPetSample, SavedPmuSample, SavedRunArchive, SavedThread, SavedThreadName,
-        TargetIngestDiagnostics, ThreadInfo, ThreadsUpdate,
+        SavedPetSample, SavedPmuSample, SavedRunArchive, SavedRunArchiveFiles,
+        SavedRunArchiveManifest, SavedThread, SavedThreadName, TargetIngestDiagnostics, ThreadInfo,
+        ThreadsUpdate,
     };
 
     #[test]
@@ -1867,6 +1933,76 @@ mod tests {
         assert_eq!(stats.lanes["GPU lane"].target_spans, 3);
     }
 
+    #[test]
+    fn read_saved_archive_accepts_v2_manifest_layout() {
+        let archive_dir = temp_archive_dir("cli-v2");
+        let _ = std::fs::remove_dir_all(&archive_dir);
+        std::fs::create_dir_all(&archive_dir).expect("create archive dir");
+
+        let manifest = SavedRunArchiveManifest {
+            format_version: ARCHIVE_FORMAT_VERSION,
+            saved_at_unix_ns: 123,
+            runs: Vec::new(),
+            files: SavedRunArchiveFiles {
+                aggregator: ARCHIVE_AGGREGATOR_FILE_NAME.to_owned(),
+                binaries: ARCHIVE_BINARIES_FILE_NAME.to_owned(),
+                target_ingest: ARCHIVE_TARGET_INGEST_FILE_NAME.to_owned(),
+            },
+        };
+        write_test_json(&archive_dir.join(ARCHIVE_MANIFEST_FILE_NAME), &manifest);
+        write_test_json(
+            &archive_dir.join(ARCHIVE_AGGREGATOR_FILE_NAME),
+            &SavedAggregator::default(),
+        );
+        write_test_json(
+            &archive_dir.join(ARCHIVE_BINARIES_FILE_NAME),
+            &SavedBinaryRegistry::default(),
+        );
+        write_test_json(
+            &archive_dir.join(ARCHIVE_TARGET_INGEST_FILE_NAME),
+            &TargetIngestDiagnostics::default(),
+        );
+
+        let from_dir = read_saved_archive(&archive_dir).expect("read archive directory");
+        assert_eq!(from_dir.format_version, ARCHIVE_FORMAT_VERSION);
+        assert_eq!(from_dir.saved_at_unix_ns, 123);
+
+        let from_manifest = read_saved_archive(&archive_dir.join(ARCHIVE_MANIFEST_FILE_NAME))
+            .expect("read manifest path");
+        assert_eq!(from_manifest.format_version, ARCHIVE_FORMAT_VERSION);
+        assert_eq!(from_manifest.saved_at_unix_ns, 123);
+
+        let _ = std::fs::remove_dir_all(&archive_dir);
+    }
+
+    #[test]
+    fn read_saved_archive_accepts_legacy_v1_archive_json_layout() {
+        let archive_dir = temp_archive_dir("cli-v1");
+        let _ = std::fs::remove_dir_all(&archive_dir);
+        std::fs::create_dir_all(&archive_dir).expect("create archive dir");
+
+        let archive = SavedRunArchive {
+            format_version: ARCHIVE_V1_FORMAT_VERSION,
+            saved_at_unix_ns: 456,
+            runs: Vec::new(),
+            aggregator: SavedAggregator::default(),
+            binaries: SavedBinaryRegistry::default(),
+            target_ingest: TargetIngestDiagnostics::default(),
+        };
+        write_test_json(&archive_dir.join(ARCHIVE_V1_FILE_NAME), &archive);
+
+        let from_dir = read_saved_archive(&archive_dir).expect("read legacy archive directory");
+        assert_eq!(from_dir.format_version, ARCHIVE_V1_FORMAT_VERSION);
+        assert_eq!(from_dir.saved_at_unix_ns, 456);
+
+        let from_file =
+            read_saved_archive(&archive_dir.join(ARCHIVE_V1_FILE_NAME)).expect("read legacy file");
+        assert_eq!(from_file.format_version, ARCHIVE_V1_FORMAT_VERSION);
+        assert_eq!(from_file.saved_at_unix_ns, 456);
+
+        let _ = std::fs::remove_dir_all(&archive_dir);
+    }
+
     fn thread(
         tid: u32,
         name: Option<&str>,
@@ -1887,6 +2023,22 @@ mod tests {
             pet_samples,
             target_spans,
         }
+    }
+
+    fn write_test_json<T: facet::Facet<'static>>(path: &std::path::Path, value: &T) {
+        let bytes = facet_json::to_vec_pretty(value).expect("serialize test json");
+        std::fs::write(path, bytes).expect("write test json");
+    }
+
+    fn temp_archive_dir(name: &str) -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!(
+            "stax-cli-archive-{name}-{}-{nonce}",
+            std::process::id()
+        ))
     }
 }
 

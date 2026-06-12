@@ -145,8 +145,9 @@ Write the current or most recent queryable run to a directory archive.
 stax save /tmp/stax-demo.staxdir
 ```
 
-The archive contains `archive.json`, a versioned facet-json payload with the
-run summary, raw aggregator streams, binary/symbol metadata, and
+The current archive format is v2: `manifest.json` plus typed facet-json
+chunks (`aggregator.json`, `binaries.json`, and `target-ingest.json`). It
+stores the run summary, raw aggregator streams, binary/symbol metadata, and
 target-ingest diagnostics. It preserves target spans and origin-linked stacks
 for later `threads`, `top`, `flame`, and `diagnose` queries.
 
@@ -154,9 +155,10 @@ for later `threads`, `top`, `flame`, and `diagnose` queries.
 next `stax record` resets the live aggregator.
 
 Archive compatibility is strict in the current format: `stax open` and
-`stax compare` accept `format_version = 1` and reject other versions loudly.
-Treat saved archives as developer/regression artifacts for the matching stax
-format until a migration policy or stable package format lands.
+`stax compare` accept v2 manifest archives and legacy v1 `archive.json`
+archives, and reject other versions loudly. Treat saved archives as
+developer/regression artifacts for the matching stax format until a migration
+policy or stable package format lands.
 
 ## stax open
 
@@ -169,9 +171,9 @@ stax top -n 20
 stax flame --threshold-pct 0
 ```
 
-`stax open` accepts either the archive directory or the `archive.json` inside
-it. It refuses to replace state while a recording is active; stop the active
-run first.
+`stax open` accepts the archive directory, the v2 `manifest.json` inside it,
+or a legacy v1 `archive.json`. It refuses to replace state while a recording
+is active; stop the active run first.
 
 ## stax compare
 
@@ -181,12 +183,13 @@ Compare two saved archives without loading either one into `stax-server`.
 stax compare /tmp/before.staxdir /tmp/after.staxdir
 ```
 
-The command reads each archive's typed `archive.json` directly and prints
+The command reads each archive's typed manifest/chunks directly and prints
 deltas for PET samples, on/off-CPU interval time, target time, target span
 counts, origin-link counts, ingest drops, and the top target lanes by
-duration. Use it for quick before/after checks and regression notes; use
-`stax open` when you want to inspect one archive through `threads`, `top`,
-`flame`, `diagnose`, or the web UI.
+duration. Legacy v1 `archive.json` inputs are accepted too. Use it for quick
+before/after checks and regression notes; use `stax open` when you want to
+inspect one archive through `threads`, `top`, `flame`, `diagnose`, or the web
+UI.
 
 For a live persistence smoke with the blessed target-span corpus:
 

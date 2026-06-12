@@ -1047,6 +1047,21 @@ pub struct SavedRunArchive {
     pub target_ingest: TargetIngestDiagnostics,
 }
 
+#[derive(Clone, Debug, Facet)]
+pub struct SavedRunArchiveManifest {
+    pub format_version: u32,
+    pub saved_at_unix_ns: u64,
+    pub runs: Vec<RunSummary>,
+    pub files: SavedRunArchiveFiles,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct SavedRunArchiveFiles {
+    pub aggregator: String,
+    pub binaries: String,
+    pub target_ingest: String,
+}
+
 #[derive(Clone, Debug, Default, Facet)]
 pub struct SavedAggregator {
     pub session_start_ns: Option<u64>,
@@ -1261,12 +1276,13 @@ pub trait RunControl {
     /// Errors if no run is active.
     async fn stop_active(&self) -> Result<RunSummary, RunControlError>;
 
-    /// Save the current or most recent queryable run into a directory
+    /// Save the current or most recent queryable run into a v2 directory
     /// archive at `path`.
     async fn save_current(&self, path: String) -> Result<(), RunControlError>;
 
-    /// Open a saved directory archive into the server's current query
-    /// state. Fails while a recording is active.
+    /// Open a saved archive into the server's current query state. Accepts
+    /// v2 archive directories/manifests and legacy v1 archive.json files.
+    /// Fails while a recording is active.
     async fn open_saved(&self, path: String) -> Result<(), RunControlError>;
 }
 

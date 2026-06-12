@@ -279,13 +279,17 @@ CI regressions, and before/after analysis.
 Status as of 2026-06-12:
 
 - Directory archive MVP is implemented:
-  - `stax save <PATH>` writes `archive.json` into a directory archive.
+  - `stax save <PATH>` writes a v2 directory archive with `manifest.json`
+    plus typed chunks: `aggregator.json`, `binaries.json`, and
+    `target-ingest.json`.
   - `stax open <PATH>` loads that archive back into `stax-server`'s current
     query state.
   - `open` refuses to replace state while a recording is active.
   - `stax compare <BASELINE> <CANDIDATE>` reads two archives directly and
     prints regression-oriented deltas.
-- The archive is facet-json and versioned (`format_version = 1`).
+- The archive is facet-json and versioned (`format_version = 2` for new
+  saves). `stax open` and `stax compare` still read legacy v1 `archive.json`
+  archives.
 - The MVP stores:
   - run summary
   - raw aggregator streams: PET samples, intervals, target synthetic spans,
@@ -296,12 +300,13 @@ Status as of 2026-06-12:
 - Reopened archives are queryable through the normal `threads`, `top`,
   `flame`, and `diagnose` surfaces.
 - Archive compatibility is strict for now: `stax open` and `stax compare`
-  accept `format_version = 1` and reject other versions loudly.
+  accept v2 manifest archives and legacy v1 `archive.json` archives, and
+  reject other versions loudly.
 - Current deliberate non-goals:
   - no per-`RunId` query selector yet
   - no structured compare output yet
   - no single-file `.stax` packaging yet
-  - no append-friendly chunked event log or `blobs/` layout yet
+  - no append-friendly event log or `blobs/` layout yet
   - annotate depends on saved/host-available bytes in the same way the live
     binary registry does
 
@@ -312,7 +317,8 @@ Add commands along these lines:
 - `stax save <PATH>`
   - saves the current or most recent run
   - works after `stax stop` as long as the aggregator is still populated
-  - implemented as a directory archive containing `archive.json`
+  - implemented as a v2 directory archive containing `manifest.json`,
+    `aggregator.json`, `binaries.json`, and `target-ingest.json`
 - `stax open <PATH>`
   - loads a saved run into a queryable local server state
   - implemented by replacing the current server query state; active recordings

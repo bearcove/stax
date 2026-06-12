@@ -38,7 +38,7 @@ The lifecycle and control plane — the surface behind `stax status`, `list`,
 | `start_attach`  | begin a recording by attaching to a pid                    |
 | `wait_active`   | block until a `WaitCondition` fires or the run stops       |
 | `stop_active`   | stop the active run cleanly, returning its final summary   |
-| `save_current`  | write the current queryable run to a directory archive     |
+| `save_current`  | write the current queryable run to a v2 directory archive  |
 | `open_saved`    | load a saved archive into the current query state          |
 
 `start_attach` is how recordings begin: for `stax record -- <argv>`, the CLI

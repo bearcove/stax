@@ -50,10 +50,10 @@ pub enum Command {
     /// Ask stax-server to stop the active run cleanly.
     Stop,
 
-    /// Save the current or most recent queryable run to a directory archive.
+    /// Save the current or most recent queryable run to a v2 directory archive.
     Save(ArchiveArgs),
 
-    /// Open a saved run directory archive into stax-server's query state.
+    /// Open a saved run archive into stax-server's query state.
     Open(ArchiveArgs),
 
     /// Compare two saved run archives without touching stax-server state.
@@ -77,18 +77,18 @@ pub enum Command {
 
 #[derive(Facet, Debug)]
 pub struct ArchiveArgs {
-    /// Save/open archive directory or archive.json file.
+    /// Archive directory, v2 manifest.json, or legacy v1 archive.json file.
     #[facet(args::positional)]
     pub path: String,
 }
 
 #[derive(Facet, Debug)]
 pub struct CompareArgs {
-    /// Baseline archive directory or archive.json file.
+    /// Baseline archive directory, v2 manifest.json, or legacy v1 archive.json.
     #[facet(args::positional)]
     pub baseline: String,
 
-    /// Candidate archive directory or archive.json file.
+    /// Candidate archive directory, v2 manifest.json, or legacy v1 archive.json.
     #[facet(args::positional)]
     pub candidate: String,
 }

@@ -116,9 +116,10 @@ Takes no options. Exits non-zero if there is no active run. See
 ## `stax save`
 
 Save the current or most recent queryable run to a directory archive. The
-archive contains `archive.json`, a versioned facet-json payload with the run
-summary, raw aggregator streams, binary/symbol metadata, and target-ingest
-diagnostics.
+current archive format is v2: `manifest.json` plus typed facet-json chunks
+(`aggregator.json`, `binaries.json`, and `target-ingest.json`). The archive
+stores the run summary, raw aggregator streams, binary/symbol metadata, and
+target-ingest diagnostics.
 
 ```text
 stax save <PATH>
@@ -132,7 +133,8 @@ stax save <PATH>
 next recording resets the live aggregator.
 
 Archive compatibility is strict in the current format: `open` and `compare`
-accept `format_version = 1` and reject other versions loudly.
+accept v2 manifest archives and legacy v1 `archive.json` archives, and reject
+other versions loudly.
 
 ## `stax open`
 
@@ -144,7 +146,7 @@ stax open <PATH>
 
 | arg      | type                | meaning                                                    |
 |----------|---------------------|------------------------------------------------------------|
-| `<PATH>` | positional `String` | archive directory, or the `archive.json` file inside it    |
+| `<PATH>` | positional `String` | archive directory, v2 `manifest.json`, or legacy v1 `archive.json` |
 
 After `stax open`, `threads`, `top`, `flame`, and `diagnose` operate on the
 restored run. `open` refuses to replace state while a recording is active.
@@ -159,12 +161,13 @@ stax compare <BASELINE> <CANDIDATE>
 
 | arg           | type                | meaning                                               |
 |---------------|---------------------|-------------------------------------------------------|
-| `<BASELINE>`  | positional `String` | baseline archive directory or `archive.json` file     |
-| `<CANDIDATE>` | positional `String` | candidate archive directory or `archive.json` file    |
+| `<BASELINE>`  | positional `String` | baseline archive directory, v2 manifest, or legacy v1 `archive.json` |
+| `<CANDIDATE>` | positional `String` | candidate archive directory, v2 manifest, or legacy v1 `archive.json` |
 
-The comparison reads the typed archive payload directly and prints deltas for
-PET samples, on/off-CPU interval time, target time, target span counts,
-origin-link counts, ingest drops, and the top target lanes by duration.
+The comparison reads the typed archive manifest/chunks directly and prints
+deltas for PET samples, on/off-CPU interval time, target time, target span
+counts, origin-link counts, ingest drops, and the top target lanes by
+duration.
 
 ## `stax top`
 

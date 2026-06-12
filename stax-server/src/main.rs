@@ -25,8 +25,9 @@ use stax_live::source::SourceResolver;
 use stax_live::{Aggregator, BinaryRegistry, LiveServer};
 use stax_live_proto::{
     DiagnosticsSnapshot, ProfilerDispatcher, RunConfig, RunControl, RunControlDispatcher,
-    RunControlError, RunId, RunState, RunSummary, SavedRunArchive, ServerStatus, StopReason,
-    TargetIngestDispatcher, WaitCondition, WaitOutcome,
+    RunControlError, RunId, RunState, RunSummary, SavedAggregator, SavedBinaryRegistry,
+    SavedRunArchive, SavedRunArchiveFiles, SavedRunArchiveManifest, ServerStatus, StopReason,
+    TargetIngestDiagnostics, TargetIngestDispatcher, WaitCondition, WaitOutcome,
 };
 
 use crate::target_ingest::{TargetIngestService, TargetLaneRegistry};
@@ -35,8 +36,13 @@ use vox::VoxListener;
 const DEFAULT_SOCK_NAME: &str = "stax-server.sock";
 const DEFAULT_WS_BIND: &str = "127.0.0.1:8080";
 const STAX_SERVER_CHANNEL_CAPACITY: u32 = 64;
-const ARCHIVE_FORMAT_VERSION: u32 = 1;
-const ARCHIVE_FILE_NAME: &str = "archive.json";
+const ARCHIVE_FORMAT_VERSION: u32 = 2;
+const ARCHIVE_V1_FORMAT_VERSION: u32 = 1;
+const ARCHIVE_V1_FILE_NAME: &str = "archive.json";
+const ARCHIVE_MANIFEST_FILE_NAME: &str = "manifest.json";
+const ARCHIVE_AGGREGATOR_FILE_NAME: &str = "aggregator.json";
+const ARCHIVE_BINARIES_FILE_NAME: &str = "binaries.json";
+const ARCHIVE_TARGET_INGEST_FILE_NAME: &str = "target-ingest.json";
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
@@ -398,11 +404,11 @@ impl ServerState {
     fn open_saved_archive(&self, path: PathBuf) -> Result<(), RunControlError> {
         let archive =
             read_archive(&path).map_err(|message| RunControlError::Internal { message })?;
-        if archive.format_version != ARCHIVE_FORMAT_VERSION {
+        if !is_supported_archive_version(archive.format_version) {
             return Err(RunControlError::Internal {
                 message: format!(
-                    "unsupported stax archive version {} (expected {})",
-                    archive.format_version, ARCHIVE_FORMAT_VERSION
+                    "unsupported stax archive version {} (supported: {}, {})",
+                    archive.format_version, ARCHIVE_V1_FORMAT_VERSION, ARCHIVE_FORMAT_VERSION
                 ),
             });
         }
@@ -676,21 +682,140 @@ fn write_archive(path: &Path, archive: &SavedRunArchive) -> Result<(), String> {
         ));
     }
     fs::create_dir_all(path).map_err(|e| format!("create archive dir {}: {e}", path.display()))?;
-    let bytes = facet_json::to_vec_pretty(archive)
-        .map_err(|e| format!("serialize archive {}: {e}", path.display()))?;
-    let archive_path = path.join(ARCHIVE_FILE_NAME);
-    fs::write(&archive_path, bytes).map_err(|e| format!("write {}: {e}", archive_path.display()))
+    remove_legacy_archive_file(path)?;
+    let manifest = SavedRunArchiveManifest {
+        format_version: ARCHIVE_FORMAT_VERSION,
+        saved_at_unix_ns: archive.saved_at_unix_ns,
+        runs: archive.runs.clone(),
+        files: SavedRunArchiveFiles {
+            aggregator: ARCHIVE_AGGREGATOR_FILE_NAME.to_owned(),
+            binaries: ARCHIVE_BINARIES_FILE_NAME.to_owned(),
+            target_ingest: ARCHIVE_TARGET_INGEST_FILE_NAME.to_owned(),
+        },
+    };
+    write_manifest(path.join(ARCHIVE_MANIFEST_FILE_NAME), &manifest)?;
+    write_aggregator(path.join(ARCHIVE_AGGREGATOR_FILE_NAME), &archive.aggregator)?;
+    write_binaries(path.join(ARCHIVE_BINARIES_FILE_NAME), &archive.binaries)?;
+    write_target_ingest(
+        path.join(ARCHIVE_TARGET_INGEST_FILE_NAME),
+        &archive.target_ingest,
+    )
 }
 
 fn read_archive(path: &Path) -> Result<SavedRunArchive, String> {
-    let archive_path = if path.is_dir() {
-        path.join(ARCHIVE_FILE_NAME)
+    if path.is_dir() {
+        let manifest_path = path.join(ARCHIVE_MANIFEST_FILE_NAME);
+        if manifest_path.exists() {
+            return read_archive_manifest(&manifest_path);
+        }
+        return read_archive_v1(&path.join(ARCHIVE_V1_FILE_NAME));
+    }
+
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == ARCHIVE_MANIFEST_FILE_NAME)
+    {
+        read_archive_manifest(path)
     } else {
-        path.to_path_buf()
-    };
+        read_archive_v1(path)
+    }
+}
+
+fn remove_legacy_archive_file(path: &Path) -> Result<(), String> {
+    let legacy_path = path.join(ARCHIVE_V1_FILE_NAME);
+    if !legacy_path.exists() {
+        return Ok(());
+    }
+    if !legacy_path.is_file() {
+        return Err(format!(
+            "legacy archive path {} exists and is not a file",
+            legacy_path.display()
+        ));
+    }
+    fs::remove_file(&legacy_path).map_err(|e| format!("remove {}: {e}", legacy_path.display()))
+}
+
+fn write_manifest(path: PathBuf, value: &SavedRunArchiveManifest) -> Result<(), String> {
+    let bytes = facet_json::to_vec_pretty(value)
+        .map_err(|e| format!("serialize {}: {e}", path.display()))?;
+    fs::write(&path, bytes).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+fn write_aggregator(path: PathBuf, value: &SavedAggregator) -> Result<(), String> {
+    let bytes = facet_json::to_vec_pretty(value)
+        .map_err(|e| format!("serialize {}: {e}", path.display()))?;
+    fs::write(&path, bytes).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+fn write_binaries(path: PathBuf, value: &SavedBinaryRegistry) -> Result<(), String> {
+    let bytes = facet_json::to_vec_pretty(value)
+        .map_err(|e| format!("serialize {}: {e}", path.display()))?;
+    fs::write(&path, bytes).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+fn write_target_ingest(path: PathBuf, value: &TargetIngestDiagnostics) -> Result<(), String> {
+    let bytes = facet_json::to_vec_pretty(value)
+        .map_err(|e| format!("serialize {}: {e}", path.display()))?;
+    fs::write(&path, bytes).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+fn read_archive_v1(archive_path: &Path) -> Result<SavedRunArchive, String> {
     let bytes =
         fs::read(&archive_path).map_err(|e| format!("read {}: {e}", archive_path.display()))?;
     facet_json::from_slice(&bytes).map_err(|e| format!("parse {}: {e}", archive_path.display()))
+}
+
+fn read_archive_manifest(manifest_path: &Path) -> Result<SavedRunArchive, String> {
+    let bytes =
+        fs::read(manifest_path).map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
+    let manifest: SavedRunArchiveManifest = facet_json::from_slice(&bytes)
+        .map_err(|e| format!("parse {}: {e}", manifest_path.display()))?;
+    if !is_supported_archive_version(manifest.format_version) {
+        return Err(format!(
+            "unsupported stax archive version {} in {} (supported: {}, {})",
+            manifest.format_version,
+            manifest_path.display(),
+            ARCHIVE_V1_FORMAT_VERSION,
+            ARCHIVE_FORMAT_VERSION
+        ));
+    }
+    let base = manifest_path.parent().ok_or_else(|| {
+        format!(
+            "manifest {} has no parent directory",
+            manifest_path.display()
+        )
+    })?;
+    let aggregator = read_aggregator(base.join(&manifest.files.aggregator))?;
+    let binaries = read_binaries(base.join(&manifest.files.binaries))?;
+    let target_ingest = read_target_ingest(base.join(&manifest.files.target_ingest))?;
+    Ok(SavedRunArchive {
+        format_version: manifest.format_version,
+        saved_at_unix_ns: manifest.saved_at_unix_ns,
+        runs: manifest.runs,
+        aggregator,
+        binaries,
+        target_ingest,
+    })
+}
+
+fn read_aggregator(path: PathBuf) -> Result<SavedAggregator, String> {
+    let bytes = fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    facet_json::from_slice(&bytes).map_err(|e| format!("parse {}: {e}", path.display()))
+}
+
+fn read_binaries(path: PathBuf) -> Result<SavedBinaryRegistry, String> {
+    let bytes = fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    facet_json::from_slice(&bytes).map_err(|e| format!("parse {}: {e}", path.display()))
+}
+
+fn read_target_ingest(path: PathBuf) -> Result<TargetIngestDiagnostics, String> {
+    let bytes = fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    facet_json::from_slice(&bytes).map_err(|e| format!("parse {}: {e}", path.display()))
+}
+
+fn is_supported_archive_version(version: u32) -> bool {
+    matches!(version, ARCHIVE_V1_FORMAT_VERSION | ARCHIVE_FORMAT_VERSION)
 }
 
 fn init_logging() {
@@ -772,9 +897,35 @@ mod tests {
 
         let archive_dir = temp_archive_dir("roundtrip");
         let _ = std::fs::remove_dir_all(&archive_dir);
+        std::fs::create_dir_all(&archive_dir).expect("create archive dir");
+        std::fs::write(archive_dir.join(ARCHIVE_V1_FILE_NAME), b"stale v1 archive")
+            .expect("write stale legacy archive");
         server
             .save_current_archive(archive_dir.clone())
             .expect("save current archive");
+        assert!(archive_dir.join(ARCHIVE_MANIFEST_FILE_NAME).exists());
+        assert!(archive_dir.join(ARCHIVE_AGGREGATOR_FILE_NAME).exists());
+        assert!(archive_dir.join(ARCHIVE_BINARIES_FILE_NAME).exists());
+        assert!(archive_dir.join(ARCHIVE_TARGET_INGEST_FILE_NAME).exists());
+        assert!(!archive_dir.join(ARCHIVE_V1_FILE_NAME).exists());
+        let manifest_bytes =
+            std::fs::read(archive_dir.join(ARCHIVE_MANIFEST_FILE_NAME)).expect("read manifest");
+        let manifest: SavedRunArchiveManifest =
+            facet_json::from_slice(&manifest_bytes).expect("parse manifest");
+        assert_eq!(manifest.format_version, ARCHIVE_FORMAT_VERSION);
+        assert_eq!(manifest.files.aggregator, ARCHIVE_AGGREGATOR_FILE_NAME);
+        assert_eq!(manifest.files.binaries, ARCHIVE_BINARIES_FILE_NAME);
+        assert_eq!(
+            manifest.files.target_ingest,
+            ARCHIVE_TARGET_INGEST_FILE_NAME
+        );
+        let manifest_archive = read_archive(&archive_dir.join(ARCHIVE_MANIFEST_FILE_NAME))
+            .expect("read archive through manifest path");
+        assert_eq!(manifest_archive.format_version, ARCHIVE_FORMAT_VERSION);
+        assert_eq!(
+            manifest_archive.runs.last().map(|run| run.label.as_str()),
+            Some("archive-source")
+        );
 
         let busy = ServerState::new_for_tests();
         busy.set_active_run_for_tests(9000);
