@@ -39,6 +39,10 @@ import {
   type ViewParams,
   type WakersUpdate,
 } from "./generated/profiler.generated.ts";
+import {
+  connectRunControl,
+  type RunSummary,
+} from "./generated/runcontrol.generated.ts";
 import { Flamegraph } from "./Flamegraph.tsx";
 import { IntervalsPanel, TargetSpansPanel } from "./Intervals.tsx";
 import { Neighbors } from "./Neighbors.tsx";
@@ -209,16 +213,20 @@ function deriveDrillView(stack: DrillStep[]): {
 export function viewParams(
   tid: number | null,
   filter: LiveFilter = EMPTY_FILTER,
+  runId: bigint | null = null,
 ): ViewParams {
-  return { run: null, tid, filter };
+  return { run: runId === null ? null : { 0: runId }, tid, filter };
 }
 
-export function runViewParams(): RunViewParams {
-  return { run: null };
+export function runViewParams(runId: bigint | null = null): RunViewParams {
+  return { run: runId === null ? null : { 0: runId } };
 }
 
-export function timelineParams(tid: number | null): TimelineParams {
-  return { run: null, tid };
+export function timelineParams(
+  tid: number | null,
+  runId: bigint | null = null,
+): TimelineParams {
+  return { run: runId === null ? null : { 0: runId }, tid };
 }
 
 function defaultUrl(): string {
@@ -236,6 +244,8 @@ export function App() {
   const [status, setStatus] = useState<Status>("pending");
   const [error, setError] = useState<string | null>(null);
   const [client, setClient] = useState<ProfilerClient | null>(null);
+  const [runs, setRuns] = useState<RunSummary[]>([]);
+  const [selectedRunId, setSelectedRunId] = useState<bigint | null>(null);
   const [displayed, setDisplayed] = useState<TopUpdate | null>(null);
   const [selected, setSelected] = useState<bigint | null>(null);
   const [tableFrozen, setTableFrozen] = useState(false);
@@ -284,6 +294,13 @@ export function App() {
       setPaneTab("neighbors");
     }
   };
+  const selectRun = (runId: bigint | null) => {
+    setSelectedRunId(runId);
+    setSelectedTid(null);
+    setSelected(null);
+    setDrillStack([]);
+    setFilter(EMPTY_FILTER);
+  };
 
   // Reflect the theme onto the <html> element so the CSS tokens flip,
   // and persist the user's choice across reloads.
@@ -293,6 +310,43 @@ export function App() {
       localStorage.setItem("stax-theme", theme);
     } catch {}
   }, [theme]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    (async () => {
+      try {
+        const control = await connectRunControl(committedUrl);
+        const refresh = async () => {
+          try {
+            const next = await control.listRuns();
+            if (!cancelled) setRuns(next);
+          } catch {
+            if (!cancelled) setRuns([]);
+          }
+        };
+        await refresh();
+        timer = setInterval(refresh, 1000);
+      } catch {
+        if (!cancelled) setRuns([]);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (timer !== null) clearInterval(timer);
+    };
+  }, [committedUrl]);
+
+  useEffect(() => {
+    if (
+      selectedRunId !== null &&
+      !runs.some((run) => run.id[0] === selectedRunId)
+    ) {
+      selectRun(null);
+    }
+  }, [runs, selectedRunId]);
 
   const dropSymbol = (s: { function_name: string | null; binary: string | null }) => {
     setDrillStack((prev) => {
@@ -393,13 +447,20 @@ export function App() {
         const sortArg: TopSort =
           sort === "self" ? { tag: "BySelf" } : { tag: "ByTotal" };
         console.debug("App: subscribeTop", { sort: sortArg, tid: selectedTid });
-        await c.subscribeTop(50, sortArg, viewParams(selectedTid, effectiveFilter), tx).catch((err) => {
-          console.debug("App: subscribeTop call failed", err);
-          if (!cancelled) {
-            setStatus("err");
-            setError(String(err));
-          }
-        });
+        await c
+          .subscribeTop(
+            50,
+            sortArg,
+            viewParams(selectedTid, effectiveFilter, selectedRunId),
+            tx,
+          )
+          .catch((err) => {
+            console.debug("App: subscribeTop call failed", err);
+            if (!cancelled) {
+              setStatus("err");
+              setError(String(err));
+            }
+          });
 
         for await (const next of rx) {
           if (cancelled) break;
@@ -429,14 +490,14 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [committedUrl, sort, selectedTid, effectiveFilter]);
+  }, [committedUrl, sort, selectedTid, effectiveFilter, selectedRunId]);
 
   // Subscribe to the live thread list whenever the client connects.
   useEffect(() => {
     if (!client) return;
     let cancelled = false;
     const [tx, rx] = channel<ThreadsUpdate>();
-    client.subscribeThreads(runViewParams(), tx).catch(() => {});
+    client.subscribeThreads(runViewParams(selectedRunId), tx).catch(() => {});
     (async () => {
       for await (const next of rx) {
         if (cancelled) break;
@@ -446,7 +507,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [client]);
+  }, [client, selectedRunId]);
 
   // "Who woke this thread?" — only meaningful when a single tid is
   // selected. Resubscribe on tid change; reset state on disconnect.
@@ -456,7 +517,9 @@ export function App() {
     if (!client || selectedTid === null) return;
     let cancelled = false;
     const [tx, rx] = channel<WakersUpdate>();
-    client.subscribeWakers(selectedTid, runViewParams(), tx).catch(() => {});
+    client
+      .subscribeWakers(selectedTid, runViewParams(selectedRunId), tx)
+      .catch(() => {});
     (async () => {
       for await (const next of rx) {
         if (cancelled) break;
@@ -466,7 +529,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [client, selectedTid]);
+  }, [client, selectedTid, selectedRunId]);
 
   // Mirror table-pane frozen into a ref so the rx loop can check it
   // without re-running.
@@ -520,6 +583,11 @@ export function App() {
               {paused ? "paused" : "pause"}
             </button>
           )}
+          <RunSwitcher
+            runs={runs}
+            selectedRunId={selectedRunId}
+            onSelect={selectRun}
+          />
           <ThreadSwitcher
             threads={threads}
             selectedTid={selectedTid}
@@ -581,6 +649,7 @@ export function App() {
             onRangeChange={setTimeRange}
             displayMode={displayMode}
             onSelectTid={setSelectedTid}
+            runId={selectedRunId}
           />
         </section>
       )}
@@ -643,6 +712,7 @@ export function App() {
             client={client}
             tid={selectedTid}
             filter={effectiveFilter}
+            runId={selectedRunId}
             matchText={matchText}
             hiddenKinds={hiddenKinds}
             displayMode={displayMode}
@@ -739,6 +809,7 @@ export function App() {
                     address={selected}
                     tid={selectedTid}
                     filter={effectiveFilter}
+                    runId={selectedRunId}
                   />
                 ) : paneTab === "neighbors" && selected !== null ? (
                   <Neighbors
@@ -747,6 +818,7 @@ export function App() {
                     address={selected}
                     tid={selectedTid}
                     filter={effectiveFilter}
+                    runId={selectedRunId}
                     matchText={matchText}
                     hiddenKinds={hiddenKinds}
                     onSelectAddress={setSelected}
@@ -758,6 +830,7 @@ export function App() {
                     flameKey={flameFocusAbsKey ?? "r"}
                     tid={selectedTid}
                     filter={effectiveFilter}
+                    runId={selectedRunId}
                     threads={threads}
                     onSelectTid={setSelectedTid}
                   />
@@ -767,6 +840,7 @@ export function App() {
                     flameKey={flameFocusAbsKey ?? "r"}
                     tid={selectedTid}
                     filter={effectiveFilter}
+                    runId={selectedRunId}
                     threads={threads}
                     onSelectTid={setSelectedTid}
                     onSelectOrigin={selectOrigin}
@@ -1638,6 +1712,133 @@ function threadLabel(t: ThreadInfo): string {
   return t.name ? `${t.name} [${t.tid}]` : `[${t.tid}]`;
 }
 
+function runIdValue(run: RunSummary): bigint {
+  return run.id[0];
+}
+
+function runStateLabel(run: RunSummary): string {
+  switch (run.state.tag) {
+    case "Recording":
+      return "recording";
+    case "Stopped":
+      return "stopped";
+  }
+}
+
+function runLabel(run: RunSummary): string {
+  return `run ${runIdValue(run).toString()} · ${runStateLabel(run)} · ${run.label}`;
+}
+
+function RunSwitcher({
+  runs,
+  selectedRunId,
+  onSelect,
+}: {
+  runs: RunSummary[];
+  selectedRunId: bigint | null;
+  onSelect: (runId: bigint | null) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const sortedRuns = useMemo(
+    () =>
+      [...runs].sort((a, b) => {
+        const av = runIdValue(a);
+        const bv = runIdValue(b);
+        if (av === bv) return 0;
+        return av > bv ? -1 : 1;
+      }),
+    [runs],
+  );
+  const selectedRun =
+    selectedRunId === null
+      ? null
+      : runs.find((run) => runIdValue(run) === selectedRunId) ?? null;
+  const triggerLabel =
+    selectedRun === null ? "current run" : `run ${selectedRunId?.toString()}`;
+
+  useEffect(() => {
+    if (!open) return;
+    const onMouse = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("mousedown", onMouse);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onMouse);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const pick = (runId: bigint | null) => {
+    onSelect(runId);
+    setOpen(false);
+  };
+
+  return (
+    <div
+      ref={rootRef}
+      className={`thread-switcher run-switcher${open ? " open" : ""}`}
+    >
+      <button
+        type="button"
+        className="thread-trigger run-trigger"
+        onClick={() => setOpen((o) => !o)}
+        title={selectedRun ? runLabel(selectedRun) : "follow the current query state"}
+      >
+        <span className="thread-trigger-label">{triggerLabel}</span>
+        <LuChevronDown className="thread-trigger-chev" />
+      </button>
+      {open && (
+        <div className="thread-popover run-popover" role="listbox">
+          <div className="thread-list">
+            <button
+              type="button"
+              className={`thread-row run-row${selectedRunId === null ? " selected" : ""}`}
+              onClick={() => pick(null)}
+            >
+              <span className="thread-check">
+                {selectedRunId === null && <LuCheck />}
+              </span>
+              <span className="thread-name">current query state</span>
+              <span className="thread-count">live</span>
+            </button>
+            {sortedRuns.length === 0 ? (
+              <div className="thread-empty">no runs yet</div>
+            ) : (
+              sortedRuns.map((run) => {
+                const id = runIdValue(run);
+                const selected = selectedRunId === id;
+                return (
+                  <button
+                    type="button"
+                    key={id.toString()}
+                    className={`thread-row run-row${selected ? " selected" : ""}`}
+                    onClick={() => pick(id)}
+                    title={runLabel(run)}
+                  >
+                    <span className="thread-check">{selected && <LuCheck />}</span>
+                    <span className="thread-name">
+                      run {id.toString()} · {run.label}
+                    </span>
+                    <span className="thread-count">{runStateLabel(run)}</span>
+                  </button>
+                );
+              })
+            )}
+          </div>
+          <div className="thread-popover-footer">
+            {runs.length} runs · server-memory history
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /// Custom dropdown for filtering by thread. Replaces a `<select>` so
 /// we can do live search (over name + tid), show per-row sample bars,
 /// and later sort by other metrics (off-CPU samples, allocations…).
@@ -1985,11 +2186,13 @@ function Annotation({
   address,
   tid,
   filter,
+  runId,
 }: {
   client: ProfilerClient;
   address: bigint;
   tid: number | null;
   filter: LiveFilter;
+  runId: bigint | null;
 }) {
   const [view, setView] = useState<AnnotatedView | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -2001,9 +2204,11 @@ function Annotation({
     setErr(null);
 
     const [tx, rx] = channel<AnnotatedView>();
-    client.subscribeAnnotated(address, viewParams(tid, filter), tx).catch((e) => {
-      if (!cancelled) setErr(String(e));
-    });
+    client
+      .subscribeAnnotated(address, viewParams(tid, filter, runId), tx)
+      .catch((e) => {
+        if (!cancelled) setErr(String(e));
+      });
 
     (async () => {
       for await (const next of rx) {
@@ -2015,7 +2220,7 @@ function Annotation({
     return () => {
       cancelled = true;
     };
-  }, [client, address, tid, filter]);
+  }, [client, address, tid, filter, runId]);
 
   const lines = view?.lines ?? [];
   const maxSelf = lines.reduce(

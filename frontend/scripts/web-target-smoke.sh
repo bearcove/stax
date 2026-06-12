@@ -125,7 +125,7 @@ require_eval_true() {
 }
 
 dump_browser_state() {
-    pw_eval "(() => { const raw = document.body.innerText; const text = raw.toLowerCase(); return JSON.stringify({ width: window.innerWidth, scrollWidth: document.documentElement.scrollWidth, overflow: document.documentElement.scrollWidth - window.innerWidth, selectedTab: document.querySelector('[role=tab][aria-selected=true]')?.textContent?.trim() ?? null, hasTopTargetWork: text.includes('top target work'), hasRecentTargetSpans: text.includes('recent target spans'), hasTopOrigin: text.includes('top origin'), hasOriginCoverage: text.includes('origin coverage'), hasLaneLinks: document.querySelectorAll('.target-lane-link').length, hasTimelineLaneTracks: document.querySelectorAll('.timeline-target-lane').length, hasCollectCompletion: text.includes('corpus collect completion'), hasCopyKernel: text.includes('corpus copy kernel'), buttons: [...document.querySelectorAll('button')].map((b) => b.textContent.trim()).filter(Boolean).slice(0, 80), textStart: raw.slice(0, 3000) }); })()" >&2 || true
+    pw_eval "(() => { const raw = document.body.innerText; const text = raw.toLowerCase(); return JSON.stringify({ width: window.innerWidth, scrollWidth: document.documentElement.scrollWidth, overflow: document.documentElement.scrollWidth - window.innerWidth, selectedTab: document.querySelector('[role=tab][aria-selected=true]')?.textContent?.trim() ?? null, hasRunSelector: [...document.querySelectorAll('button')].some((b) => b.textContent.trim() === 'current run' || b.textContent.trim() === 'run 1'), hasTopTargetWork: text.includes('top target work'), hasRecentTargetSpans: text.includes('recent target spans'), hasTopOrigin: text.includes('top origin'), hasOriginCoverage: text.includes('origin coverage'), hasLaneLinks: document.querySelectorAll('.target-lane-link').length, hasTimelineLaneTracks: document.querySelectorAll('.timeline-target-lane').length, hasCollectCompletion: text.includes('corpus collect completion'), hasCopyKernel: text.includes('corpus copy kernel'), buttons: [...document.querySelectorAll('button')].map((b) => b.textContent.trim()).filter(Boolean).slice(0, 80), textStart: raw.slice(0, 3000) }); })()" >&2 || true
 }
 
 echo "archive: $archive"
@@ -140,26 +140,39 @@ STAX_SERVER_SOCKET="$socket" \
 STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- save "$archive"
 STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- open "$archive"
 
+echo "starting Vite on ${vite_port}"
 pnpm --dir frontend exec vite --host 127.0.0.1 --port "$vite_port" --strictPort \
     >"$vite_log" 2>&1 &
 vite_pid=$!
 wait_for_http "http://127.0.0.1:${vite_port}/"
 
 url="http://127.0.0.1:${vite_port}/?ws=ws://127.0.0.1:${ws_port}"
+echo "opening browser: $url"
 pw open "$url" >/dev/null
+echo "resizing browser"
 pw resize 1280 900 >/dev/null
-pw snapshot >/dev/null
+echo "checking target lanes"
 wait_for_eval_true "(() => { const text = document.body.innerText; return text.includes('corpus executor') && text.includes('corpus gpu') && text.includes('target'); })()" "target lanes visible"
+echo "checking run selector"
+require_eval_true "(() => { const trigger = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'current run'); if (!trigger) return false; trigger.click(); return true; })()" "run selector trigger exists"
+wait_for_eval_true "(() => [...document.querySelectorAll('button')].some((b) => b.textContent.includes('run 1')))" "run selector lists stopped run"
+require_eval_true "(() => { const run = [...document.querySelectorAll('button')].find((b) => b.textContent.includes('run 1')); if (!run) return false; run.click(); return true; })()" "run selector can switch to stopped run"
+wait_for_eval_true "(() => [...document.querySelectorAll('button')].some((b) => b.textContent.trim() === 'run 1'))" "run selector shows selected run"
+echo "checking target detail controls"
 require_eval_true "(() => { const button = (name) => [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === name); const target = button('target'); const spans = button('target spans'); if (!target || !spans) return false; target.click(); spans.click(); return true; })()" "target mode and target-spans tab controls exist"
+echo "checking desktop target detail"
 if ! wait_for_eval_true "(() => { const text = document.body.innerText.toLowerCase(); const overflow = document.documentElement.scrollWidth - window.innerWidth; return text.includes('top target work') && text.includes('recent target spans') && text.includes('top lane') && text.includes('top origin') && text.includes('origin coverage') && document.querySelectorAll('.target-lane-link').length > 0 && document.querySelectorAll('.timeline-target-lane').length > 0 && text.includes('corpus collect completion') && text.includes('corpus copy kernel') && overflow <= 2; })()" "desktop target-span detail visible without overflow"; then
     dump_browser_state
     exit 1
 fi
-pw snapshot >/dev/null
+echo "checking mobile target detail"
+echo "resizing browser to mobile"
 pw resize 390 844 >/dev/null
-if ! wait_for_eval_true "(() => { const text = document.body.innerText.toLowerCase(); const overflow = document.documentElement.scrollWidth - window.innerWidth; return text.includes('target spans') && text.includes('corpus executor') && text.includes('corpus gpu') && text.includes('origin coverage') && document.querySelectorAll('.timeline-target-lane').length > 0 && overflow <= 4; })()" "mobile target UI visible without overflow"; then
+echo "checking mobile target detail after resize"
+sleep 0.25
+if ! require_eval_true "(() => { const text = (document.body.textContent ?? '').toLowerCase(); const selectedTab = document.querySelector('[role=tab][aria-selected=true]')?.textContent?.trim().toLowerCase() ?? ''; const overflow = document.documentElement.scrollWidth - document.documentElement.clientWidth; return selectedTab === 'target spans' && text.includes('run 1') && text.includes('corpus executor') && text.includes('corpus gpu') && text.includes('origin coverage') && document.querySelectorAll('.timeline-target-lane').length > 0 && overflow <= 4; })()" "mobile target UI visible without overflow"; then
     dump_browser_state
     exit 1
 fi
 
-echo "PASS: web target smoke rendered target lanes, target summaries, and target-span details"
+echo "PASS: web target smoke rendered run selector, target lanes, target summaries, and target-span details"

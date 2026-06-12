@@ -182,6 +182,7 @@ export function Neighbors({
   address,
   tid,
   filter,
+  runId,
   matchText,
   hiddenKinds,
   onSelectAddress,
@@ -191,6 +192,7 @@ export function Neighbors({
   address: bigint;
   tid: number | null;
   filter: LiveFilter;
+  runId: bigint | null;
   matchText: ((t: string) => boolean) | null;
   hiddenKinds: Set<ObjKind>;
   onSelectAddress: (a: bigint) => void;
@@ -206,7 +208,9 @@ export function Neighbors({
     setUpdate(null);
     latestRef.current = null;
     const [tx, rx] = channel<WireNeighborsUpdate>();
-    client.subscribeNeighbors(address, viewParams(tid, filter), tx).catch(() => {});
+    client
+      .subscribeNeighbors(address, viewParams(tid, filter, runId), tx)
+      .catch(() => {});
     (async () => {
       for await (const wire of rx) {
         if (cancelled) break;
@@ -218,7 +222,7 @@ export function Neighbors({
     return () => {
       cancelled = true;
     };
-  }, [client, address, tid, filter]);
+  }, [client, address, tid, filter, runId]);
 
   useEffect(() => {
     frozenRef.current = frozen;

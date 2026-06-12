@@ -22,6 +22,7 @@ export function Timeline({
   onRangeChange,
   displayMode,
   onSelectTid,
+  runId,
 }: {
   client: ProfilerClient;
   tid: number | null;
@@ -29,6 +30,7 @@ export function Timeline({
   onRangeChange: (r: TimeRange | null) => void;
   displayMode: DisplayMode;
   onSelectTid: (tid: number) => void;
+  runId: bigint | null;
 }) {
   const [update, setUpdate] = useState<TimelineUpdate | null>(null);
   const barsRef = useRef<SVGSVGElement | null>(null);
@@ -40,7 +42,7 @@ export function Timeline({
     let cancelled = false;
     setUpdate(null);
     const [tx, rx] = channel<TimelineUpdate>();
-    client.subscribeTimeline(timelineParams(tid), tx).catch(() => {});
+    client.subscribeTimeline(timelineParams(tid, runId), tx).catch(() => {});
     (async () => {
       for await (const next of rx) {
         if (cancelled) break;
@@ -50,7 +52,7 @@ export function Timeline({
     return () => {
       cancelled = true;
     };
-  }, [client, tid]);
+  }, [client, tid, runId]);
 
   if (!update || update.buckets.length === 0) {
     return <div className="timeline placeholder">timeline (waiting for samples…)</div>;

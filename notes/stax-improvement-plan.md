@@ -541,6 +541,9 @@ Current state:
 - Target-span details now include origin symbol addresses and include
   origin-linked spans when the selected tid is the CPU dispatch thread, so the
   web UI can jump from target work back to the queueing CPU symbol.
+- The topbar now has a run selector backed by `RunControl::list_runs` and
+  `ViewParams.run` / `RunViewParams.run`, so the web UI can inspect stopped
+  in-memory history without changing the server's selected query state.
 
 Implemented and deferred work:
 
@@ -556,6 +559,8 @@ Implemented and deferred work:
   - target-span count visible where useful
   - origin-linked target spans naturally visible under CPU callers
 - Threads/lanes:
+  - done: run selector switches all live panels between current query state
+    and stopped in-memory run history
   - done: target mode sorts/bars by target duration, so lanes float up
   - done: CLI regression test proves synthetic target lanes remain visible
     even when `stax threads -n` cuts off ordinary threads
@@ -700,7 +705,8 @@ Tasks:
     target-span corpus through a checkout-local server/CLI, including
     `stax select-run` and zero-regression `stax compare --json` thresholds
   - done: `just web-target-smoke` for checkout-local browser verification of
-    target lanes, target display mode, and target-span details
+    the run selector, target lanes, target display mode, and target-span
+    details
   - done: GitHub Actions focused target-span workflow, with `bearcove/vox`
     checked out as the required sibling and live archive/browser smokes gated
     behind manual dispatch
@@ -811,7 +817,8 @@ Deferred:
 Done when:
 
 - The web UI can answer "what target work dominated?" and "who queued it?"
-  without leaving the UI.
+  without leaving the UI, and can do so for stopped in-memory runs selected
+  from the topbar.
 
 ### Phase F: cleanup, docs, and developer workflows
 

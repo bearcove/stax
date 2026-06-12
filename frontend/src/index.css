@@ -367,6 +367,19 @@ body {
   overflow: hidden;
 }
 
+.run-trigger {
+  max-width: 14em;
+}
+
+.run-popover {
+  min-width: 300px;
+  max-width: 34em;
+}
+
+.run-row {
+  grid-template-columns: 16px minmax(0, 1fr) 74px;
+}
+
 .thread-search {
   background: transparent;
   color: var(--text-primary);

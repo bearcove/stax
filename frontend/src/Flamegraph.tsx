@@ -151,6 +151,7 @@ export function Flamegraph({
   client,
   tid,
   filter,
+  runId,
   matchText,
   hiddenKinds,
   displayMode,
@@ -168,6 +169,7 @@ export function Flamegraph({
   client: ProfilerClient;
   tid: number | null;
   filter: LiveFilter;
+  runId: bigint | null;
   matchText: ((t: string) => boolean) | null;
   hiddenKinds: Set<ObjKind>;
   /// Drives flame box widths: active, CPU-only, target, off-CPU, or wall.
@@ -239,7 +241,7 @@ export function Flamegraph({
     setUpdate(null);
     latestRef.current = null;
     const [tx, rx] = channel<WireFlamegraphUpdate>();
-    client.subscribeFlamegraph(viewParams(tid, filter), tx).catch(() => {});
+    client.subscribeFlamegraph(viewParams(tid, filter, runId), tx).catch(() => {});
     (async () => {
       for await (const wire of rx) {
         if (cancelled) break;
@@ -252,7 +254,7 @@ export function Flamegraph({
     return () => {
       cancelled = true;
     };
-  }, [client, tid, filter]);
+  }, [client, tid, filter, runId]);
 
   useEffect(() => {
     frozenRef.current = frozen;

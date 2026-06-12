@@ -5,8 +5,10 @@ insert_anchor_links = "heading"
 +++
 
 The CLI is one face of stax. The other is a browser UI that renders the same
-live run — flamegraph, top-N functions/spans, timeline, annotated
-disassembly — and updates continuously as samples and target spans land.
+query surfaces — flamegraph, top-N functions/spans, timeline, annotated
+disassembly — and updates continuously as samples and target spans land. It
+can follow the current live query state or inspect a stopped in-memory run
+from `stax list` through the run selector.
 
 ## The WebSocket endpoint
 
@@ -50,14 +52,16 @@ a `?ws=` query parameter — `http://localhost:5173/?ws=ws://127.0.0.1:9000`.
 
 ## What the UI shows
 
-The UI connects to the `Profiler` service and subscribes to a stream per
-panel, so every view refreshes on its own while a recording is in progress —
-there is nothing to reload. The layout, top to bottom:
+The UI connects to both local RPC services: `RunControl` for run history and
+`Profiler` for the views. Each panel subscribes to its own stream, so every
+view refreshes on its own while a recording is in progress — there is nothing
+to reload. The layout, top to bottom:
 
-- **Topbar** — connection status, a pause toggle for ingestion, a thread
-  switcher, a symbol search (substring or regex), display-mode pills
-  (active / CPU / target / off-CPU / wall), PMU-metric pills (IPC / L1-d
-  misses / branch mispredicts), a binary-kind filter, and a light/dark toggle.
+- **Topbar** — connection status, a pause toggle for ingestion, a run
+  selector (`current run` or a stopped run id), a thread switcher, a symbol
+  search (substring or regex), display-mode pills (active / CPU / target /
+  off-CPU / wall), PMU-metric pills (IPC / L1-d misses / branch
+  mispredicts), a binary-kind filter, and a light/dark toggle.
 - **Timeline** — the selected display metric per bucket. Active mode includes
   sampled CPU time plus cooperating target spans; CPU mode peels target spans
   back out; target mode shows target-span duration over time; wall mode is
@@ -90,7 +94,8 @@ there is nothing to reload. The layout, top to bottom:
   switches to the CPU thread and opens the origin symbol's family tree.
 
 The UI and the CLI are interchangeable: a run started from the CLI shows up
-in the browser, and vice versa. They are both just clients of the same
+in the browser, and the browser's run selector uses the same non-mutating
+per-run query model as CLI `--run`. They are both just clients of the same
 daemon.
 
 ## Checking Target UI Behavior
@@ -105,7 +110,8 @@ just web-target-smoke
 That records the blessed `stax-target/examples/corpus.rs` workload through a
 temporary checkout-local `stax-server`, saves and reopens the archive, starts
 Vite, then drives a real browser through the target-time and target-span
-details surfaces at desktop and mobile widths.
+details surfaces at desktop and mobile widths, including the topbar run
+selector for stopped in-memory history.
 
 The script uses the Codex Playwright wrapper when it is available. Outside
 Codex it tries `playwright-cli` from `PATH`, then falls back to

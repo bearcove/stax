@@ -33,6 +33,7 @@ export function IntervalsPanel({
   flameKey,
   tid,
   filter,
+  runId,
   threads,
   onSelectTid,
 }: {
@@ -40,6 +41,7 @@ export function IntervalsPanel({
   flameKey: string;
   tid: number | null;
   filter: LiveFilter;
+  runId: bigint | null;
   threads: ThreadInfo[];
   onSelectTid: (tid: number) => void;
 }) {
@@ -50,7 +52,7 @@ export function IntervalsPanel({
     setUpdate(null);
     const [tx, rx] = channel<IntervalListUpdate>();
     client
-      .subscribeIntervals(flameKey, viewParams(tid, filter), tx)
+      .subscribeIntervals(flameKey, viewParams(tid, filter, runId), tx)
       .catch(() => {});
     (async () => {
       for await (const next of rx) {
@@ -61,7 +63,7 @@ export function IntervalsPanel({
     return () => {
       cancelled = true;
     };
-  }, [client, flameKey, tid, filter]);
+  }, [client, flameKey, tid, filter, runId]);
 
   if (!update) {
     return <div className="placeholder">streaming intervals…</div>;
@@ -139,6 +141,7 @@ export function TargetSpansPanel({
   flameKey,
   tid,
   filter,
+  runId,
   threads,
   onSelectTid,
   onSelectOrigin,
@@ -147,6 +150,7 @@ export function TargetSpansPanel({
   flameKey: string;
   tid: number | null;
   filter: LiveFilter;
+  runId: bigint | null;
   threads: ThreadInfo[];
   onSelectTid: (tid: number) => void;
   onSelectOrigin: (tid: number, address: bigint | null) => void;
@@ -158,7 +162,7 @@ export function TargetSpansPanel({
     setUpdate(null);
     const [tx, rx] = channel<TargetSpanListUpdate>();
     client
-      .subscribeTargetSpans(flameKey, viewParams(tid, filter), tx)
+      .subscribeTargetSpans(flameKey, viewParams(tid, filter, runId), tx)
       .catch(() => {});
     (async () => {
       for await (const next of rx) {
@@ -169,7 +173,7 @@ export function TargetSpansPanel({
     return () => {
       cancelled = true;
     };
-  }, [client, flameKey, tid, filter]);
+  }, [client, flameKey, tid, filter, runId]);
 
   if (!update) {
     return <div className="placeholder">streaming target spans…</div>;
