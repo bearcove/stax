@@ -81,8 +81,9 @@ there is nothing to reload. The layout, top to bottom:
   the same data as [`stax annotate`](@/guide/inspecting-a-run.md#stax-annotate)),
   *family tree* (callers/callees around a symbol), and *intervals* (the
   individual off-CPU intervals, with reasons and wakers), and *target spans*
-  (grouped target work by lane/span/origin, plus the most recent individual
-  spans with duration and origin thread/link status). If a selected CPU thread
+  (top lane/span/origin summary, grouped target work by lane/span/origin, plus
+  the most recent individual spans with duration and origin thread/link
+  status). Lane cells switch to that synthetic tid. If a selected CPU thread
   has no linked spans while synthetic lanes do have work, the target-span pane
   points at those lanes directly; if origins are linked, clicking the origin
   switches to the CPU thread and opens the origin symbol's family tree.

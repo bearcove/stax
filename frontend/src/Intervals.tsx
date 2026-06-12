@@ -177,6 +177,7 @@ export function TargetSpansPanel({
 
   const threadName = (t: number) =>
     threads.find((th) => th.tid === t)?.name ?? null;
+  const summary = buildTargetSummary(update);
   const targetLanes = threads
     .filter((thread) => thread.tid >= SYNTH_TID_BASE && thread.target_spans > 0n)
     .sort((a, b) => {
@@ -213,6 +214,13 @@ export function TargetSpansPanel({
           recent
         </span>
       </div>
+      <TargetSummaryStrip
+        summary={summary}
+        strings={update.strings}
+        threadName={threadName}
+        onSelectTid={onSelectTid}
+        onSelectOrigin={onSelectOrigin}
+      />
       <div className="intervals-body">
         <table className="intervals-table target-spans-table target-groups-table">
           <caption>top target work</caption>
@@ -233,6 +241,7 @@ export function TargetSpansPanel({
                 group={group}
                 strings={update.strings}
                 threadName={threadName}
+                onSelectTid={onSelectTid}
                 onSelectOrigin={onSelectOrigin}
               />
             ))}
@@ -256,6 +265,7 @@ export function TargetSpansPanel({
                 entry={e}
                 strings={update.strings}
                 threadName={threadName}
+                onSelectTid={onSelectTid}
                 onSelectOrigin={onSelectOrigin}
               />
             ))}
@@ -322,11 +332,13 @@ function TargetSpanGroupRow({
   group,
   strings,
   threadName,
+  onSelectTid,
   onSelectOrigin,
 }: {
   group: TargetSpanGroup;
   strings: string[];
   threadName: (tid: number) => string | null;
+  onSelectTid: (tid: number) => void;
   onSelectOrigin: (tid: number, address: bigint | null) => void;
 }) {
   const lane = group.lane_name != null ? strings[group.lane_name] : "(lane)";
@@ -338,7 +350,7 @@ function TargetSpanGroupRow({
         {formatDuration(group.total_duration_ns)}
       </td>
       <td className="col-duration">{formatDuration(group.max_duration_ns)}</td>
-      <td className="col-lane">{lane}</td>
+      <LaneCell tid={group.tid} lane={lane} onSelectTid={onSelectTid} />
       <td className="col-span">{span}</td>
       <OriginCell
         originTid={group.origin_tid}
@@ -358,11 +370,13 @@ function TargetSpanRow({
   entry,
   strings,
   threadName,
+  onSelectTid,
   onSelectOrigin,
 }: {
   entry: TargetSpanEntry;
   strings: string[];
   threadName: (tid: number) => string | null;
+  onSelectTid: (tid: number) => void;
   onSelectOrigin: (tid: number, address: bigint | null) => void;
 }) {
   const startSec = (Number(entry.start_ns) / 1e9).toFixed(3);
@@ -372,7 +386,7 @@ function TargetSpanRow({
     <tr>
       <td className="col-start">{startSec}s</td>
       <td className="col-duration">{formatDuration(entry.duration_ns)}</td>
-      <td className="col-lane">{lane}</td>
+      <LaneCell tid={entry.tid} lane={lane} onSelectTid={onSelectTid} />
       <td className="col-span">{span}</td>
       <OriginCell
         originTid={entry.origin_tid}
@@ -385,6 +399,244 @@ function TargetSpanRow({
         onSelectOrigin={onSelectOrigin}
       />
     </tr>
+  );
+}
+
+type LaneSummary = {
+  tid: number;
+  laneName: number | null;
+  totalDurationNs: bigint;
+  count: bigint;
+  maxDurationNs: bigint;
+};
+
+type OriginSummary = {
+  originTid: number;
+  originLinked: boolean;
+  originAddress: bigint | null;
+  originFunctionName: number | null;
+  originBinary: number | null;
+  totalDurationNs: bigint;
+  count: bigint;
+  maxDurationNs: bigint;
+};
+
+type TargetSummary = {
+  topLane: LaneSummary | null;
+  topSpan: TargetSpanGroup | null;
+  topOrigin: OriginSummary | null;
+  originSpans: bigint;
+  linkedOriginSpans: bigint;
+};
+
+function buildTargetSummary(update: TargetSpanListUpdate): TargetSummary {
+  const lanes = new Map<string, LaneSummary>();
+  const origins = new Map<string, OriginSummary>();
+  let originSpans = 0n;
+  let linkedOriginSpans = 0n;
+
+  for (const group of update.groups) {
+    const laneKey = `${group.tid}:${group.lane_name ?? ""}`;
+    const lane =
+      lanes.get(laneKey) ??
+      {
+        tid: group.tid,
+        laneName: group.lane_name,
+        totalDurationNs: 0n,
+        count: 0n,
+        maxDurationNs: 0n,
+      };
+    lane.totalDurationNs += group.total_duration_ns;
+    lane.count += group.count;
+    if (group.max_duration_ns > lane.maxDurationNs) {
+      lane.maxDurationNs = group.max_duration_ns;
+    }
+    lanes.set(laneKey, lane);
+
+    if (group.origin_tid != null) {
+      originSpans += group.count;
+      if (group.origin_linked) linkedOriginSpans += group.count;
+      const originKey = [
+        group.origin_tid,
+        group.origin_linked ? "linked" : "unlinked",
+        group.origin_address?.toString() ?? "",
+        group.origin_function_name ?? "",
+        group.origin_binary ?? "",
+      ].join(":");
+      const origin =
+        origins.get(originKey) ??
+        {
+          originTid: group.origin_tid,
+          originLinked: group.origin_linked,
+          originAddress: group.origin_address,
+          originFunctionName: group.origin_function_name,
+          originBinary: group.origin_binary,
+          totalDurationNs: 0n,
+          count: 0n,
+          maxDurationNs: 0n,
+        };
+      origin.totalDurationNs += group.total_duration_ns;
+      origin.count += group.count;
+      if (group.max_duration_ns > origin.maxDurationNs) {
+        origin.maxDurationNs = group.max_duration_ns;
+      }
+      origins.set(originKey, origin);
+    }
+  }
+
+  const byDuration = <T extends { totalDurationNs: bigint; count: bigint }>(
+    a: T,
+    b: T,
+  ) =>
+    a.totalDurationNs === b.totalDurationNs
+      ? a.count === b.count
+        ? 0
+        : a.count > b.count
+          ? -1
+          : 1
+      : a.totalDurationNs > b.totalDurationNs
+        ? -1
+        : 1;
+
+  return {
+    topLane: [...lanes.values()].sort(byDuration)[0] ?? null,
+    topSpan: update.groups[0] ?? null,
+    topOrigin: [...origins.values()].sort(byDuration)[0] ?? null,
+    originSpans,
+    linkedOriginSpans,
+  };
+}
+
+function TargetSummaryStrip({
+  summary,
+  strings,
+  threadName,
+  onSelectTid,
+  onSelectOrigin,
+}: {
+  summary: TargetSummary;
+  strings: string[];
+  threadName: (tid: number) => string | null;
+  onSelectTid: (tid: number) => void;
+  onSelectOrigin: (tid: number, address: bigint | null) => void;
+}) {
+  const laneName =
+    summary.topLane?.laneName != null
+      ? strings[summary.topLane.laneName]
+      : "(lane)";
+  const spanName =
+    summary.topSpan?.span_name != null
+      ? strings[summary.topSpan.span_name]
+      : "(span)";
+  const spanLaneName =
+    summary.topSpan?.lane_name != null
+      ? strings[summary.topSpan.lane_name]
+      : "(lane)";
+  const originFn =
+    summary.topOrigin?.originFunctionName != null
+      ? strings[summary.topOrigin.originFunctionName]
+      : null;
+  const originBin =
+    summary.topOrigin?.originBinary != null
+      ? strings[summary.topOrigin.originBinary]
+      : null;
+  const originThreadName =
+    summary.topOrigin != null ? threadName(summary.topOrigin.originTid) : null;
+  const originLabel =
+    originFn ??
+    (summary.topOrigin?.originLinked ? "(linked origin)" : "(unlinked origin)");
+
+  return (
+    <div className="target-summary-strip">
+      {summary.topLane ? (
+        <button
+          type="button"
+          className="target-summary-card clickable"
+          onClick={() => onSelectTid(summary.topLane!.tid)}
+          title={`tid ${summary.topLane.tid}`}
+        >
+          <span className="target-summary-label">top lane</span>
+          <span className="target-summary-value">{laneName}</span>
+          <span className="target-summary-meta">
+            {formatDuration(summary.topLane.totalDurationNs)} ·{" "}
+            {summary.topLane.count.toString()} spans
+          </span>
+        </button>
+      ) : null}
+      {summary.topSpan ? (
+        <div className="target-summary-card">
+          <span className="target-summary-label">top span</span>
+          <span className="target-summary-value">{spanName}</span>
+          <span className="target-summary-meta">
+            {spanLaneName} · {formatDuration(summary.topSpan.total_duration_ns)} ·{" "}
+            {summary.topSpan.count.toString()} spans
+          </span>
+        </div>
+      ) : null}
+      {summary.topOrigin ? (
+        <button
+          type="button"
+          className="target-summary-card clickable"
+          onClick={() =>
+            onSelectOrigin(
+              summary.topOrigin!.originTid,
+              summary.topOrigin!.originAddress,
+            )
+          }
+          title={
+            originBin
+              ? `${originLabel} · ${originBin}`
+              : `${originLabel} · ${originThreadName ?? `tid ${summary.topOrigin.originTid}`}`
+          }
+        >
+          <span className="target-summary-label">top origin</span>
+          <span className="target-summary-value">{originLabel}</span>
+          <span className="target-summary-meta">
+            {originThreadName ?? `tid ${summary.topOrigin.originTid}`} ·{" "}
+            {formatDuration(summary.topOrigin.totalDurationNs)}
+          </span>
+        </button>
+      ) : (
+        <div className="target-summary-card">
+          <span className="target-summary-label">top origin</span>
+          <span className="target-summary-value muted">(none)</span>
+          <span className="target-summary-meta">0 spans with origin</span>
+        </div>
+      )}
+      <div className="target-summary-card">
+        <span className="target-summary-label">origin coverage</span>
+        <span className="target-summary-value">
+          {summary.linkedOriginSpans.toString()} /{" "}
+          {summary.originSpans.toString()} linked
+        </span>
+        <span className="target-summary-meta">
+          {summary.originSpans.toString()} spans with origin
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function LaneCell({
+  tid,
+  lane,
+  onSelectTid,
+}: {
+  tid: number;
+  lane: string;
+  onSelectTid: (tid: number) => void;
+}) {
+  return (
+    <td className="col-lane">
+      <button
+        type="button"
+        className="target-lane-link"
+        onClick={() => onSelectTid(tid)}
+        title={`tid ${tid}`}
+      >
+        {lane}
+      </button>
+    </td>
   );
 }
 

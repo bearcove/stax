@@ -1914,6 +1914,67 @@ table.intervals-table td.col-origin.empty {
   color: var(--target-color);
 }
 
+.target-summary-strip {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--bg-pane);
+}
+
+.target-summary-card {
+  min-width: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  text-align: left;
+  font: inherit;
+  font-family: var(--font-mono);
+}
+
+button.target-summary-card.clickable {
+  cursor: pointer;
+}
+
+button.target-summary-card.clickable:hover {
+  border-color: color-mix(in srgb, var(--target-color) 55%, transparent);
+  color: var(--text-primary);
+}
+
+.target-summary-label {
+  color: var(--text-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.target-summary-value {
+  color: var(--text-primary);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.target-summary-value.muted {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.target-summary-meta {
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .target-groups-table {
   border-bottom: 1px solid var(--border-soft);
 }
@@ -1976,6 +2037,26 @@ button.waker-link {
 }
 
 button.waker-link:hover {
+  color: var(--accent);
+}
+
+button.target-lane-link {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  display: block;
+  font: inherit;
+  font-family: var(--font-mono);
+  max-width: 100%;
+  overflow: hidden;
+  padding: 0;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+button.target-lane-link:hover {
   color: var(--accent);
 }
 

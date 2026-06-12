@@ -49,7 +49,8 @@ demo-corpus:
 archive-smoke:
     #!/usr/bin/env bash
     set -euo pipefail
-    socket="$(mktemp -u "${TMPDIR:-/tmp}/stax-server.XXXXXX.sock")"
+    socket_dir="$(mktemp -d "${TMPDIR:-/tmp}/stax-server.XXXXXX")"
+    socket="$socket_dir/server.sock"
     archive="$(mktemp -d "${TMPDIR:-/tmp}/stax-demo-corpus.XXXXXX")"
     echo "archive: $archive"
     STAX_SERVER_SOCKET="$socket" STAX_SERVER_WS_BIND=127.0.0.1:0 cargo run -q -p stax-server &
@@ -57,7 +58,7 @@ archive-smoke:
     cleanup() {
         kill "$server_pid" 2>/dev/null || true
         wait "$server_pid" 2>/dev/null || true
-        rm -f "$socket"
+        rm -rf "$socket_dir"
     }
     trap cleanup EXIT
     for _ in {1..200}; do

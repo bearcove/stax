@@ -559,6 +559,10 @@ Implemented and deferred work:
 - Details panels:
   - done: target spans tab answers span count, total duration, max duration,
     lane/name, origin tid/link state, and most recent individual spans
+  - done: target spans tab has a compact top-lane, top-span, top-origin, and
+    origin-coverage strip before the detailed tables
+  - done: lane cells in target-span tables switch directly to the synthetic
+    lane tid
   - done: grouped origin cells show who queued linked work and switch to that
     CPU thread
   - done: linked origin cells focus the origin symbol's family tree after
