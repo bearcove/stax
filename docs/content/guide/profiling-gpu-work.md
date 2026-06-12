@@ -80,8 +80,9 @@ but it does not mean a CPU thread was busy.
   queued from that CPU thread. `--sort total` is useful for charging GPU time
   to dispatch callers; `--sort self` still shows the kernel/span names.
 - **`stax diagnose`** — target ingest counters: batches, recorded/dropped
-  spans, total target duration, lanes, and origin link/unlink counts. Use this
-  when spans are present but CPU-stack attribution is missing.
+  spans, no-active-run / wrong-pid drops, total target duration, lanes, and
+  origin link/unlink counts. Use this when spans are missing or CPU-stack
+  attribution is missing.
 
 ## Interpreting a GPU-bound target
 

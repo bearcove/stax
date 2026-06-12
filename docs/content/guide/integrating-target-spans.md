@@ -235,6 +235,7 @@ link, filtering flame/top to the CPU thread that queued work shows
 `stax diagnose` reports target ingest health:
 
 - batches and spans received/recorded
+- batches/spans dropped because no run was active or the pid did not match
 - dropped spans with invalid durations
 - per-lane duration and span totals
 - origin-linked and origin-unlinked counts

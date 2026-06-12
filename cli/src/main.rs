@@ -1284,6 +1284,32 @@ mod tests {
     }
 
     #[test]
+    fn target_ingest_hints_explain_no_active_run_drops() {
+        let hints = target_ingest_hints(&TargetIngestDiagnostics {
+            batches_dropped_no_active_run: 1,
+            spans_dropped_no_active_run: 3,
+            ..TargetIngestDiagnostics::default()
+        });
+
+        assert_eq!(hints.len(), 1);
+        assert!(hints[0].contains("no recording was active"));
+        assert!(hints[0].contains("stax record --pid <pid>"));
+    }
+
+    #[test]
+    fn target_ingest_hints_explain_wrong_pid_drops() {
+        let hints = target_ingest_hints(&TargetIngestDiagnostics {
+            batches_dropped_wrong_pid: 1,
+            spans_dropped_wrong_pid: 3,
+            ..TargetIngestDiagnostics::default()
+        });
+
+        assert_eq!(hints.len(), 1);
+        assert!(hints[0].contains("not the active run target"));
+        assert!(hints[0].contains("helper processes"));
+    }
+
+    #[test]
     fn target_ingest_hints_explain_bad_durations_and_missing_origins() {
         let hints = target_ingest_hints(&TargetIngestDiagnostics {
             batches: 1,
@@ -1436,6 +1462,7 @@ fn print_diagnostics(snapshot: &DiagnosticsSnapshot) {
     }
     let target = &snapshot.target_ingest;
     println!("target ingest:");
+    print_target_ingest_drop_counts(target);
     if target.batches == 0 {
         println!("  no target span batches ingested");
         print_target_ingest_hints(target);
@@ -1475,6 +1502,27 @@ fn print_diagnostics(snapshot: &DiagnosticsSnapshot) {
     print_target_ingest_hints(target);
 }
 
+fn print_target_ingest_drop_counts(target: &TargetIngestDiagnostics) {
+    if target.batches_dropped_no_active_run > 0 {
+        println!(
+            "  dropped while no run active: {} batch{} / {} span{}",
+            target.batches_dropped_no_active_run,
+            plural(target.batches_dropped_no_active_run),
+            target.spans_dropped_no_active_run,
+            plural(target.spans_dropped_no_active_run),
+        );
+    }
+    if target.batches_dropped_wrong_pid > 0 {
+        println!(
+            "  dropped wrong pid: {} batch{} / {} span{}",
+            target.batches_dropped_wrong_pid,
+            plural(target.batches_dropped_wrong_pid),
+            target.spans_dropped_wrong_pid,
+            plural(target.spans_dropped_wrong_pid),
+        );
+    }
+}
+
 fn print_target_ingest_hints(target: &TargetIngestDiagnostics) {
     for hint in target_ingest_hints(target) {
         println!("  hint: {hint}");
@@ -1483,11 +1531,37 @@ fn print_target_ingest_hints(target: &TargetIngestDiagnostics) {
 
 fn target_ingest_hints(target: &TargetIngestDiagnostics) -> Vec<String> {
     let mut hints = Vec::new();
-    if target.batches == 0 {
+    if target.batches_dropped_no_active_run > 0 {
         hints.push(
-            "if you expected target lanes, confirm the process links `stax-target`, polls `reporting_active()` while this pid is recorded, and can reach the `stax-server` socket"
-                .to_owned(),
+            concat!(
+                "target span batches arrived while no recording was active; ",
+                "start `stax record --pid <pid>` or launch under `stax record -- ...` ",
+                "before expecting spans to land",
+            )
+            .to_owned(),
         );
+    }
+    if target.batches_dropped_wrong_pid > 0 {
+        hints.push(
+            concat!(
+                "target span batches arrived from a pid that is not the active run target; ",
+                "make sure the instrumented process is the one stax is recording, ",
+                "especially across helper processes",
+            )
+            .to_owned(),
+        );
+    }
+    if target.batches == 0 {
+        if hints.is_empty() {
+            hints.push(
+                concat!(
+                    "if you expected target lanes, confirm the process links `stax-target`, ",
+                    "polls `reporting_active()` while this pid is recorded, ",
+                    "and can reach the `stax-server` socket",
+                )
+                .to_owned(),
+            );
+        }
         return hints;
     }
 

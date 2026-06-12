@@ -219,6 +219,8 @@ Already present:
   visually distinct from real sampled threads.
 - `diagnose` prints hints for:
   - no target batches
+  - batches/spans dropped while no run is active
+  - batches/spans dropped because the pid does not match the active run target
   - bad span durations
   - missing origins
   - unlinked origins
@@ -226,8 +228,6 @@ Already present:
 Remaining CLI work:
 
 - Teach `stax diagnose` about:
-  - wrong pid batches
-  - batches received while no run is active
   - queue drops in `stax-target`, if target-side counters are exposed
   - origin age/distance distribution, not just linked/unlinked totals
 - Add suggestions when all target spans are unlinked:

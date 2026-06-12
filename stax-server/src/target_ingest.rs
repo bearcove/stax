@@ -83,6 +83,10 @@ struct SpanEvent {
 #[derive(Clone, Copy, Default)]
 struct TargetIngestCounters {
     batches: u64,
+    batches_dropped_no_active_run: u64,
+    spans_dropped_no_active_run: u64,
+    batches_dropped_wrong_pid: u64,
+    spans_dropped_wrong_pid: u64,
     spans_received: u64,
     spans_recorded: u64,
     spans_dropped_bad_duration: u64,
@@ -116,9 +120,27 @@ impl TargetIngestCounters {
         self.spans_linked_origin = self.spans_linked_origin.saturating_add(spans_linked_origin);
         self.total_duration_ns = self.total_duration_ns.saturating_add(total_duration_ns);
     }
+
+    fn record_dropped_no_active_run(&mut self, spans: u64) {
+        self.batches_dropped_no_active_run = self.batches_dropped_no_active_run.saturating_add(1);
+        self.spans_dropped_no_active_run = self.spans_dropped_no_active_run.saturating_add(spans);
+    }
+
+    fn record_dropped_wrong_pid(&mut self, spans: u64) {
+        self.batches_dropped_wrong_pid = self.batches_dropped_wrong_pid.saturating_add(1);
+        self.spans_dropped_wrong_pid = self.spans_dropped_wrong_pid.saturating_add(spans);
+    }
 }
 
 impl TargetLaneRegistry {
+    fn record_dropped_no_active_run(&mut self, spans: u64) {
+        self.totals.record_dropped_no_active_run(spans);
+    }
+
+    fn record_dropped_wrong_pid(&mut self, spans: u64) {
+        self.totals.record_dropped_wrong_pid(spans);
+    }
+
     fn record_batch(
         &mut self,
         pid: u32,
@@ -178,6 +200,10 @@ impl TargetLaneRegistry {
         });
         TargetIngestDiagnostics {
             batches: self.totals.batches,
+            batches_dropped_no_active_run: self.totals.batches_dropped_no_active_run,
+            spans_dropped_no_active_run: self.totals.spans_dropped_no_active_run,
+            batches_dropped_wrong_pid: self.totals.batches_dropped_wrong_pid,
+            spans_dropped_wrong_pid: self.totals.spans_dropped_wrong_pid,
             spans_received: self.totals.spans_received,
             spans_recorded: self.totals.spans_recorded,
             spans_dropped_bad_duration: self.totals.spans_dropped_bad_duration,
@@ -267,14 +293,23 @@ impl TargetIngestService {
 
 impl TargetIngest for TargetIngestService {
     async fn ingest(&self, batch: TargetSpanBatch) {
+        if batch.spans.is_empty() {
+            return;
+        }
+        let spans_received = batch.spans.len() as u64;
         // Only the active run's target may land spans on the timeline.
         let Some(active_pid) = self.server.active_target_pid() else {
+            self.server
+                .target_lanes()
+                .lock()
+                .record_dropped_no_active_run(spans_received);
             return;
         };
         if active_pid != batch.pid {
-            return;
-        }
-        if batch.spans.is_empty() {
+            self.server
+                .target_lanes()
+                .lock()
+                .record_dropped_wrong_pid(spans_received);
             return;
         }
         let tid = self.lane_tid(batch.pid, &batch.lane);
@@ -293,7 +328,6 @@ impl TargetIngest for TargetIngestService {
             });
         }
         events.sort_by_key(|event| (event.start_ns, event.end_ns));
-        let spans_received = batch.spans.len() as u64;
         let recorded_spans = events.len() as u64;
         let dropped_bad_duration = spans_received.saturating_sub(recorded_spans);
         let spans_with_origin = events.iter().filter(|event| event.origin.is_some()).count() as u64;
@@ -516,6 +550,10 @@ mod tests {
 
         let diagnostics = server.target_lanes().lock().diagnostics();
         assert_eq!(diagnostics.batches, 1);
+        assert_eq!(diagnostics.batches_dropped_no_active_run, 1);
+        assert_eq!(diagnostics.spans_dropped_no_active_run, 1);
+        assert_eq!(diagnostics.batches_dropped_wrong_pid, 1);
+        assert_eq!(diagnostics.spans_dropped_wrong_pid, 1);
         assert_eq!(diagnostics.spans_received, 2);
         assert_eq!(diagnostics.spans_recorded, 2);
         assert_eq!(diagnostics.spans_dropped_bad_duration, 0);

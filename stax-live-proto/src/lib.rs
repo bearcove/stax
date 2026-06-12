@@ -918,6 +918,10 @@ pub struct TargetLaneDiagnostics {
 #[derive(Clone, Debug, Default, Facet)]
 pub struct TargetIngestDiagnostics {
     pub batches: u64,
+    pub batches_dropped_no_active_run: u64,
+    pub spans_dropped_no_active_run: u64,
+    pub batches_dropped_wrong_pid: u64,
+    pub spans_dropped_wrong_pid: u64,
     pub spans_received: u64,
     pub spans_recorded: u64,
     pub spans_dropped_bad_duration: u64,
