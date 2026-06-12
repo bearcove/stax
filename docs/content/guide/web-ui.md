@@ -80,7 +80,9 @@ there is nothing to reload. The layout, top to bottom:
   *family tree* (callers/callees around a symbol), and *intervals* (the
   individual off-CPU intervals, with reasons and wakers), and *target spans*
   (grouped target work by lane/span/origin, plus the most recent individual
-  spans with duration and origin thread/link status).
+  spans with duration and origin thread/link status). If a selected CPU thread
+  has no linked spans while synthetic lanes do have work, the target-span pane
+  points at those lanes directly.
 
 The UI and the CLI are interchangeable: a run started from the CLI shows up
 in the browser, and vice versa. They are both just clients of the same

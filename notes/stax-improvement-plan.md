@@ -529,11 +529,12 @@ Remaining work:
     CPU thread
   - next: focus the exact CPU stack/symbol after selecting the origin thread
 - Empty states:
-  - same guidance as CLI:
-    - no samples yet
-    - CPU idle/off-CPU
-    - target integration available
-    - target spans arriving but origins not linking
+  - started: target-span detail pane distinguishes no reported spans from
+    target lanes that exist outside the selected thread
+  - started: target-span detail pane offers direct lane selection when
+    synthetic lanes have spans
+  - remaining: mirror the CLI's off-CPU/no-samples guidance across the rest of
+    the web detail panes
 
 Acceptance criteria:
 

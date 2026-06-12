@@ -20,6 +20,8 @@ import {
 } from "./wire.ts";
 import { viewParams } from "./App.tsx";
 
+const SYNTH_TID_BASE = 0xfff00000;
+
 /// Drill-down view of every off-CPU interval attributed to the
 /// selected flame subtree. Each row carries: time the wait started,
 /// duration, reason classification, and the waker (which thread +
@@ -170,16 +172,32 @@ export function TargetSpansPanel({
   if (!update) {
     return <div className="placeholder">streaming target spans…</div>;
   }
-  if (update.entries.length === 0) {
-    return (
-      <div className="placeholder">
-        no target spans attributed to this view yet
-      </div>
-    );
-  }
 
   const threadName = (t: number) =>
     threads.find((th) => th.tid === t)?.name ?? null;
+  const targetLanes = threads
+    .filter((thread) => thread.tid >= SYNTH_TID_BASE && thread.target_spans > 0n)
+    .sort((a, b) => {
+      if (a.target_ns !== b.target_ns) {
+        return a.target_ns > b.target_ns ? -1 : 1;
+      }
+      if (a.target_spans !== b.target_spans) {
+        return a.target_spans > b.target_spans ? -1 : 1;
+      }
+      return a.tid - b.tid;
+    })
+    .slice(0, 4);
+
+  if (update.entries.length === 0 && update.groups.length === 0) {
+    return (
+      <TargetSpansEmptyState
+        tid={tid}
+        selectedName={tid == null ? null : threadName(tid)}
+        lanes={targetLanes}
+        onSelectTid={onSelectTid}
+      />
+    );
+  }
 
   return (
     <div className="intervals-pane target-spans-pane">
@@ -242,6 +260,58 @@ export function TargetSpansPanel({
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+function TargetSpansEmptyState({
+  tid,
+  selectedName,
+  lanes,
+  onSelectTid,
+}: {
+  tid: number | null;
+  selectedName: string | null;
+  lanes: ThreadInfo[];
+  onSelectTid: (tid: number) => void;
+}) {
+  const selectedLabel =
+    tid == null ? "this view" : `${selectedName ?? "tid"} ${tid}`;
+  const hasLanes = lanes.length > 0;
+  const realThreadSelected = tid != null && tid < SYNTH_TID_BASE;
+  const title = hasLanes
+    ? realThreadSelected
+      ? "no linked target spans for this CPU thread"
+      : "target spans are on another lane"
+    : "no target spans reported yet";
+  const detail = hasLanes
+    ? `Target lanes with spans exist outside ${selectedLabel}.`
+    : "A cooperating target has not reported spans for the active run.";
+  return (
+    <div className="placeholder target-empty-state">
+      <div className="target-empty-title">{title}</div>
+      <div className="target-empty-detail">{detail}</div>
+      {hasLanes ? (
+        <div className="target-empty-lanes">
+          {lanes.map((lane) => (
+            <button
+              key={lane.tid}
+              type="button"
+              className="target-empty-lane"
+              onClick={() => onSelectTid(lane.tid)}
+              title={`tid ${lane.tid}`}
+            >
+              <span className="target-empty-lane-name">
+                {lane.name ?? `tid ${lane.tid}`}
+              </span>
+              <span className="target-empty-lane-meta">
+                {formatDuration(lane.target_ns)} ·{" "}
+                {lane.target_spans.toString()} spans
+              </span>
+            </button>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }

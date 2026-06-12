@@ -1868,6 +1868,49 @@ table.intervals-table td.col-origin.empty {
   border-bottom: 1px solid var(--border-soft);
 }
 
+.target-empty-state {
+  align-items: flex-start;
+  gap: 8px;
+  padding: 16px;
+  text-align: left;
+}
+
+.target-empty-title {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.target-empty-detail {
+  color: var(--text-muted);
+}
+
+.target-empty-lanes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+button.target-empty-lane {
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--target-color) 35%, transparent);
+  color: var(--target-color);
+  cursor: pointer;
+  display: inline-flex;
+  gap: 6px;
+  max-width: 100%;
+  padding: 3px 6px;
+}
+
+.target-empty-lane-name {
+  max-width: 24em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.target-empty-lane-meta {
+  color: var(--text-muted);
+}
+
 button.waker-link {
   background: transparent;
   border: 0;
