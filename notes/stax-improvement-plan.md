@@ -96,7 +96,7 @@ Current API:
 - `OpenSpan::{finish,finish_and_report}`
 - `now_ns()`
 
-Remaining API polish:
+API polish completed:
 
 - Done: keep the explicit `OpenSpan::finish_and_report` model instead of a
   RAII-on-drop guard.
@@ -238,17 +238,18 @@ Already present:
     stack, and nearest PET sample too far
   - linked and too-far origin PET distance min/avg/max
 
-Remaining CLI work:
+CLI decisions and follow-up:
 
-- Decide whether the lane table should grow a richer per-lane diagnostic view
-  or whether the compact per-lane reason row is enough.
-- Add a `stax lanes` or `stax targets` command only if `threads` cannot remain
-  clear enough.
-  - Prefer improving `threads` first.
+- Done: the compact `threads` lane row is enough for now; richer per-lane
+  diagnostics should wait for evidence that `threads` is crowded again.
+- Done: no separate `stax lanes`/`stax targets` command for this phase.
+  `threads` remains the single discovery surface for real threads and
+  synthetic lanes.
 - Done: help text and `--help` copy mention CPU stacks, off-CPU waits,
   target spans, synthetic lanes, target time, and target span counts on the
   relevant commands.
-- Add CLI snapshot tests once the blessed corpus exists.
+- Done: stable CLI snapshot-style coverage started with
+  `threads_output_keeps_target_lanes_past_limit`.
 
 Acceptance criteria:
 
@@ -510,7 +511,7 @@ Current state:
   origin-linked spans when the selected tid is the CPU dispatch thread, so the
   web UI can jump from target work back to the queueing CPU symbol.
 
-Remaining work:
+Implemented and deferred work:
 
 - Metric selector:
   - done: active time
@@ -524,10 +525,10 @@ Remaining work:
   - target-span count visible where useful
   - origin-linked target spans naturally visible under CPU callers
 - Threads/lanes:
-  - started: target mode sorts/bars by target duration, so lanes float up
+  - done: target mode sorts/bars by target duration, so lanes float up
   - done: CLI regression test proves synthetic target lanes remain visible
     even when `stax threads -n` cuts off ordinary threads
-  - clicking a lane focuses flame/top/timeline to that tid
+  - done: clicking a lane focuses flame/top/timeline to that tid
 - Timeline:
   - done: selected metric drives the timeline area; target mode shows
     target duration over time
@@ -698,10 +699,9 @@ Done when:
 1. Add the corpus binary. Done: `stax-target/examples/corpus.rs`.
 2. Add scripts or docs for recording it. Done: `just demo-corpus` and the
    target-span integration guide.
-3. Started: add CLI snapshot-like assertions where stable. Done so far:
+3. Done: add CLI snapshot-like assertions where stable. Done so far:
    `threads_output_keeps_target_lanes_past_limit`.
-4. Use it in docs. Started: integration guide uses the corpus as the default
-   demo workload.
+4. Done: integration guide uses the corpus as the default demo workload.
 
 Done when:
 
@@ -722,12 +722,12 @@ Done when:
 
 - Record -> stop -> save -> restart server -> open -> threads/top/flame works.
 
-Remaining:
+Deferred:
 
-- Decide when `just archive-smoke` should run in CI; it needs daemon lifecycle
-  support.
-- Decide whether format v2 becomes chunked directory layout or single-file
-  package first.
+- `just archive-smoke` should run in CI only after the runner can manage the
+  stax daemon lifecycle.
+- Format v2 should be chunked-directory-first; implementation is deferred
+  until the next archive-format slice.
 
 ### Phase E: web target-time polish
 
@@ -736,10 +736,11 @@ Remaining:
 3. Span hover/detail.
 4. CPU origin navigation.
 5. Empty-state guidance.
-6. Started: browser verification. Production build passes; Playwright opened
-   the dev app and exposed a stale installed-daemon protocol mismatch on
-   `ws://127.0.0.1:8080`. A checkout-local server on an alternate WS port ran,
-   but the Playwright CLI wrapper hung on later snapshot commands.
+6. Done: browser verification for the empty-state slice used the in-app
+   browser against a checkout-local `stax-server` on an alternate websocket
+   port, including a narrow mobile viewport smoke. Earlier stale installed
+   daemon/protocol mismatch on `ws://127.0.0.1:8080` remains a useful warning:
+   browser tests should point at a checkout-local server.
 
 Done when:
 
@@ -753,7 +754,9 @@ Done when:
 3. Add or update `just`/docs commands for routine verification.
 4. Done: checked Tracey coverage path; repo is not currently configured for
    Tracey, so there is no coverage file to update.
-5. Remove stale "roadmap" statements once features land.
+5. Done: stale public roadmap/copy sweep; save/open/compare are no longer
+   described as absent, while real future items such as per-`RunId` querying
+   remain marked as roadmap.
 
 Done when:
 
