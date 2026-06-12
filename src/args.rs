@@ -35,8 +35,8 @@ pub enum Command {
     /// List every run stax-server has hosted (active + history).
     List,
 
-    /// Dump stax-server diagnostics, including target-span ingest and
-    /// origin-link counters.
+    /// Dump stax-server diagnostics, including target-span ingest,
+    /// origin-link reasons, and PET origin-distance counters.
     Diagnose,
 
     /// Ask running stax processes to dump SIGUSR1 telemetry/debug

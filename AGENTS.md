@@ -248,6 +248,20 @@ stax annotate 0x10004ad60      # 4. get per-instruction sample counts +
                                #    interleaved source for one function
 ```
 
+When you need a known-good target-span recording that proves stax is not just
+CPU sampling, use the blessed corpus:
+
+```
+just demo-corpus
+stax top --tid <corpus-executor-tid> --sort self
+stax flame --tid <cpu-tid> --threshold-pct 0
+```
+
+`just demo-corpus` records `stax-target/examples/corpus.rs`, then prints
+`stax threads -n 0` and `stax diagnose`. Expect CPU thread rows, off-CPU
+waits, synthetic target lanes (`corpus executor`, `corpus gpu`,
+`corpus bad origins`), linked origins, and intentional bad-origin diagnostics.
+
 If you need to abort:
 
 ```

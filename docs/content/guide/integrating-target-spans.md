@@ -225,22 +225,23 @@ The repo includes several target-span demos:
 | `model_runtime` | semantic model-runtime lanes with `SpanBuilder` |
 | `gpu_timestamps` | Metal-style timestamp-counter conversion without SDK dependencies |
 | `bad_origins` | intentionally missing/stale/wrong-thread origins for `stax diagnose` |
+| `corpus` | blessed CPU/off-CPU/target-span/origin diagnostics workload |
 
 For example:
 
 ```bash
-stax record -- cargo run -p stax-target --example executor
-stax threads
-stax top --tid <executor-demo-tid> --sort self
+just demo-corpus
+stax top --tid <corpus-executor-tid> --sort self
 stax top --tid <cpu-tid> --sort total
-stax flame --tid <cpu-tid>
+stax flame --tid <cpu-tid> --threshold-pct 0
 ```
 
-`stax threads` will show a synthetic lane named after the example, such as
-`executor demo` or `model attention`. The synthetic lane's `target ms` is the
-exact duration of reported work and `spans` is the span count. When origins
-link, filtering flame/top to the CPU thread that queued work shows
-`CPU caller -> lane -> job name`.
+`just demo-corpus` records `stax-target/examples/corpus.rs`, then prints
+`stax threads -n 0` and `stax diagnose`. The thread table will show synthetic
+lanes such as `corpus executor`, `corpus gpu`, and `corpus bad origins`. A
+synthetic lane's `target ms` is the exact duration of reported work and
+`spans` is the span count. When origins link, filtering flame/top to the CPU
+thread that queued work shows `CPU caller -> lane -> job name`.
 
 ## Diagnostics
 

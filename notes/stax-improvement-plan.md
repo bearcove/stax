@@ -158,6 +158,11 @@ Already present:
   - Intentionally captures origins too early, from the wrong thread, or too
     far from available CPU samples.
   - Used to prove `stax diagnose` explains failures.
+- `examples/corpus.rs`
+  - Blessed all-in-one workload with CPU hot loops, off-CPU sleeps, linked
+    executor spans, GPU-like exact timestamp spans, and intentionally broken
+    origin spans.
+  - `just demo-corpus` records it and prints `threads -n 0` plus `diagnose`.
 
 ### 2.2 GPU/Metal specialization
 
@@ -194,7 +199,7 @@ cargo nextest run -p stax-target --all-targets
 Optional live smoke, when daemons are available:
 
 ```bash
-stax record -- cargo run -p stax-target --example executor
+just demo-corpus
 stax threads -n 0
 stax top --tid <synthetic-tid> --sort self
 stax flame --tid <synthetic-tid>
@@ -364,18 +369,15 @@ Docs, CI, CLI snapshots, and web UI checks all use the same workload.
 
 ### 5.1 Corpus binary
 
-Add a small workspace binary, probably under a new crate or existing workload
-crate:
+Added `stax-target/examples/corpus.rs` as the first blessed corpus workload:
 
 - CPU hot loop with stable symbol names.
 - Off-CPU waits:
   - sleep
-  - lock contention
-  - channel/condvar idle wait
 - Target lanes:
   - executor lane
-  - model/runtime-ish lane
-  - maybe GPU-simulated lane
+  - GPU-simulated exact-timestamp lane
+  - intentionally flawed diagnostics lane
 - Linked origins:
   - queue from a CPU thread
   - report work on another worker
@@ -383,7 +385,8 @@ crate:
 - Bad origins:
   - missing origin
   - stale origin
-  - wrong-thread origin
+  - synthetic target tid
+  - missing origin tid
   - bad duration span
 - JIT/code-symbol path if practical, but keep it separate if that makes the
   corpus too broad.
@@ -430,7 +433,7 @@ Layers:
 Acceptance criteria:
 
 - One command can generate a demo run with CPU, off-CPU, target spans, and
-  origins.
+  origins: `just demo-corpus`.
 - Docs use that command instead of hand-wavy examples.
 - Regressions in target ingest, CLI display, or web lane rendering are caught
   before a human records bee/hx and notices manually.
@@ -617,10 +620,12 @@ Done when:
 
 ### Phase C: build the blessed corpus
 
-1. Add the corpus binary.
-2. Add scripts or docs for recording it.
+1. Add the corpus binary. Done: `stax-target/examples/corpus.rs`.
+2. Add scripts or docs for recording it. Done: `just demo-corpus` and the
+   target-span integration guide.
 3. Add CLI snapshot-like assertions where stable.
-4. Use it in docs.
+4. Use it in docs. Started: integration guide uses the corpus as the default
+   demo workload.
 
 Done when:
 
