@@ -15,7 +15,9 @@ diagnostic tools and the common errors.
 
 Dumps `stax-server`'s internals, including active run state and target-span
 ingest counters: batches, recorded/dropped spans, lane totals, and origin
-link/unlink counts.
+link/unlink counts. For target spans it also prints hints for the common
+integration failures: no batches, invalid start/end timestamps, spans without
+origins, and origins that do not link to a sampled CPU stack.
 
 ```bash
 stax diagnose

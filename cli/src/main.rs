@@ -13,8 +13,8 @@ use stax_core::cmd_setup_linux;
 use stax_core::cmd_setup_mac;
 use stax_live_proto::{
     DiagnosticsSnapshot, FlameNode, FlamegraphUpdate, LiveFilter, OffCpuBreakdown, ProfilerClient,
-    RunControlClient, RunSummary, ServerStatus, StopReason, ThreadsUpdate, TopEntry, TopSort,
-    TopUpdate, ViewParams, WaitCondition, WaitOutcome,
+    RunControlClient, RunSummary, ServerStatus, StopReason, TargetIngestDiagnostics, ThreadsUpdate,
+    TopEntry, TopSort, TopUpdate, ViewParams, WaitCondition, WaitOutcome,
 };
 
 #[cfg(target_os = "macos")]
@@ -1194,8 +1194,8 @@ fn mentions_metal_cooperation(function_name: Option<&str>, binary: Option<&str>)
 
 #[cfg(test)]
 mod tests {
-    use super::{SYNTH_TID_BASE, empty_view_hint, mentions_metal_cooperation};
-    use stax_live_proto::{OffCpuBreakdown, ThreadInfo, ThreadsUpdate};
+    use super::{SYNTH_TID_BASE, empty_view_hint, mentions_metal_cooperation, target_ingest_hints};
+    use stax_live_proto::{OffCpuBreakdown, TargetIngestDiagnostics, ThreadInfo, ThreadsUpdate};
 
     #[test]
     fn metal_hint_detects_dispatch_and_command_buffer_frames() {
@@ -1260,6 +1260,48 @@ mod tests {
 
         assert!(hint.contains("stax wait --for-samples 100"));
         assert!(hint.contains("stax threads -n 0"));
+    }
+
+    #[test]
+    fn target_ingest_hints_explain_missing_batches() {
+        let hints = target_ingest_hints(&TargetIngestDiagnostics::default());
+
+        assert_eq!(hints.len(), 1);
+        assert!(hints[0].contains("links `stax-target`"));
+        assert!(hints[0].contains("reporting_active()"));
+    }
+
+    #[test]
+    fn target_ingest_hints_explain_bad_durations_and_missing_origins() {
+        let hints = target_ingest_hints(&TargetIngestDiagnostics {
+            batches: 1,
+            spans_received: 4,
+            spans_recorded: 3,
+            spans_dropped_bad_duration: 1,
+            ..TargetIngestDiagnostics::default()
+        });
+
+        assert_eq!(hints.len(), 2);
+        assert!(hints[0].contains("end <= start"));
+        assert!(hints[1].contains("have no origins"));
+    }
+
+    #[test]
+    fn target_ingest_hints_explain_unlinked_origins() {
+        let hints = target_ingest_hints(&TargetIngestDiagnostics {
+            batches: 1,
+            spans_received: 3,
+            spans_recorded: 3,
+            spans_with_origin: 3,
+            spans_linked_origin: 1,
+            spans_unlinked_origin: 2,
+            ..TargetIngestDiagnostics::default()
+        });
+
+        assert_eq!(hints.len(), 1);
+        assert!(hints[0].contains("2 of 3"));
+        assert!(hints[0].contains("queue/submit time"));
+        assert!(hints[0].contains("stax flame --tid <cpu tid>"));
     }
 
     fn thread(
@@ -1375,6 +1417,7 @@ fn print_diagnostics(snapshot: &DiagnosticsSnapshot) {
     println!("target ingest:");
     if target.batches == 0 {
         println!("  no target span batches ingested");
+        print_target_ingest_hints(target);
         return;
     }
     println!(
@@ -1408,6 +1451,52 @@ fn print_diagnostics(snapshot: &DiagnosticsSnapshot) {
             );
         }
     }
+    print_target_ingest_hints(target);
+}
+
+fn print_target_ingest_hints(target: &TargetIngestDiagnostics) {
+    for hint in target_ingest_hints(target) {
+        println!("  hint: {hint}");
+    }
+}
+
+fn target_ingest_hints(target: &TargetIngestDiagnostics) -> Vec<String> {
+    let mut hints = Vec::new();
+    if target.batches == 0 {
+        hints.push(
+            "if you expected target lanes, confirm the process links `stax-target`, polls `reporting_active()` while this pid is recorded, and can reach the `stax-server` socket"
+                .to_owned(),
+        );
+        return hints;
+    }
+
+    if target.spans_dropped_bad_duration > 0 {
+        hints.push(format!(
+            "{} span{} had end <= start; target timestamps must use one monotonic nanosecond clock, e.g. `stax_target::now_ns()` or Metal 4 timestamps converted to mach time",
+            target.spans_dropped_bad_duration,
+            plural(target.spans_dropped_bad_duration),
+        ));
+    }
+
+    if target.spans_recorded > 0 && target.spans_with_origin == 0 {
+        hints.push(
+            "spans have no origins; synthetic lane views work, but CPU stack -> lane attribution needs `stax_target::current_span_origin()` captured at queue/dispatch time"
+                .to_owned(),
+        );
+    } else if target.spans_unlinked_origin > 0 {
+        hints.push(format!(
+            "{} of {} origin-carrying span{} did not link to a sampled CPU stack; capture origins on the dispatching OS thread immediately at queue/submit time, then inspect with `stax top --tid <cpu tid> --sort total` or `stax flame --tid <cpu tid>`",
+            target.spans_unlinked_origin,
+            target.spans_with_origin,
+            plural(target.spans_with_origin),
+        ));
+    }
+
+    hints
+}
+
+fn plural(count: u64) -> &'static str {
+    if count == 1 { "" } else { "s" }
 }
 
 fn print_run_one_line(run: &RunSummary) {

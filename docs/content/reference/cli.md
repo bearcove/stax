@@ -198,7 +198,9 @@ leaf-self functions; the hottest match wins.
 
 Dump `stax-server` diagnostics, including target-span ingest counters
 (batches, recorded/dropped spans, lane totals, and origin link/unlink counts).
-Takes no options. See
+It also prints target-ingest hints for missing batches, invalid span
+durations, missing origins, and origins that failed to link. Takes no options.
+See
 [Troubleshooting](@/guide/troubleshooting.md#diagnostic-commands--stax-diagnose).
 
 ## `stax dump`
