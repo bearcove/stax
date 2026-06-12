@@ -90,6 +90,116 @@ Use `stax_target::now_ns()` when your target-side timestamps should come from
 the same host clock stax expects. Use `SpanBuilder` when an integration wants
 to validate or attach origins before deciding where to report a span.
 
+## Recipes by integration style
+
+### Thread pools
+
+Capture at submission, carry the token in the work item, and open the span in
+the worker:
+
+```rust
+struct Job {
+    origin: stax_target::CapturedOrigin,
+}
+
+fn submit(pool: &Pool, lane: &stax_target::Lane) {
+    pool.push(Job {
+        origin: lane.capture_origin(),
+    });
+}
+
+fn worker(lane: &stax_target::Lane, job: Job) {
+    let open = lane.begin_span_with_captured_origin("run job", job.origin);
+    run_job();
+    if let Some(open) = open {
+        open.finish_and_report(lane);
+    }
+}
+```
+
+### Async executors
+
+Capture before the work crosses the async boundary. Open the span only when a
+task or worker actually starts doing the work:
+
+```rust
+async fn schedule(tx: &Queue, lane: &stax_target::Lane) {
+    tx.send(Job {
+        origin: lane.capture_origin(),
+    })
+    .await;
+}
+
+async fn run_worker(lane: &stax_target::Lane, job: Job) {
+    let open = lane.begin_span_with_captured_origin("poll work item", job.origin);
+    poll_work_item().await;
+    if let Some(open) = open {
+        open.finish_and_report(lane);
+    }
+}
+```
+
+### Exact timestamp APIs
+
+When an API gives exact start/end timestamps, capture the origin at dispatch
+and report after completion:
+
+```rust
+fn dispatch(lane: &stax_target::Lane) {
+    let origin = lane.capture_origin();
+    let completion = submit_to_runtime();
+
+    if let Some(span) = lane.span_with_captured_origin(
+        completion.name,
+        completion.start_ns,
+        completion.end_ns,
+        origin,
+    ) {
+        lane.report_one(span);
+    }
+}
+```
+
+### GPU timestamp counters
+
+For Metal 4 or similar APIs, the important boundary is the timestamp
+conversion. Convert the target timestamps into the same nanosecond clock domain
+stax expects, then report ordinary target spans:
+
+```rust
+fn encode_kernel(lane: &stax_target::Lane, command: &mut Command) {
+    let origin = lane.capture_origin();
+    command.encode_dispatch();
+    command.on_complete(move |timestamps| {
+        let start_ns = gpu_timestamp_to_stax_ns(timestamps.start);
+        let end_ns = gpu_timestamp_to_stax_ns(timestamps.end);
+        if let Some(span) = lane.span_with_captured_origin(
+            timestamps.kernel_name,
+            start_ns,
+            end_ns,
+            origin,
+        ) {
+            lane.report_one(span);
+        }
+    });
+}
+```
+
+### Bad-origin debugging
+
+If spans arrive but do not show under CPU callers, run:
+
+```bash
+stax diagnose
+```
+
+The usual fixes are:
+
+- capture at queue/dispatch time, not completion time
+- capture on the OS thread that queued the work
+- keep span timestamps in one monotonic nanosecond clock
+- keep span names semantic and low-cardinality
+
 ## Demo workload
 
 The repo includes several target-span demos:
