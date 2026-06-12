@@ -14,7 +14,8 @@
 mod recorder;
 mod target_ingest;
 
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -24,8 +25,8 @@ use stax_live::source::SourceResolver;
 use stax_live::{Aggregator, BinaryRegistry, LiveServer};
 use stax_live_proto::{
     DiagnosticsSnapshot, ProfilerDispatcher, RunConfig, RunControl, RunControlDispatcher,
-    RunControlError, RunId, RunState, RunSummary, ServerStatus, StopReason, TargetIngestDispatcher,
-    WaitCondition, WaitOutcome,
+    RunControlError, RunId, RunState, RunSummary, SavedRunArchive, ServerStatus, StopReason,
+    TargetIngestDispatcher, WaitCondition, WaitOutcome,
 };
 
 use crate::target_ingest::{TargetIngestService, TargetLaneRegistry};
@@ -34,6 +35,8 @@ use vox::VoxListener;
 const DEFAULT_SOCK_NAME: &str = "stax-server.sock";
 const DEFAULT_WS_BIND: &str = "127.0.0.1:8080";
 const STAX_SERVER_CHANNEL_CAPACITY: u32 = 64;
+const ARCHIVE_FORMAT_VERSION: u32 = 1;
+const ARCHIVE_FILE_NAME: &str = "archive.json";
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
@@ -369,6 +372,98 @@ impl ServerState {
         }
     }
 
+    fn queryable_run_summary(&self) -> Option<RunSummary> {
+        let inner = self.inner.lock();
+        inner
+            .active
+            .clone()
+            .or_else(|| inner.history.last().cloned())
+    }
+
+    fn save_current_archive(&self, path: PathBuf) -> Result<(), String> {
+        let run = self
+            .queryable_run_summary()
+            .ok_or_else(|| "no run is available to save".to_owned())?;
+        let archive = SavedRunArchive {
+            format_version: ARCHIVE_FORMAT_VERSION,
+            saved_at_unix_ns: now_unix_ns(),
+            runs: vec![run],
+            aggregator: self.aggregator.read().to_saved(),
+            binaries: self.binaries.read().to_saved(),
+            target_ingest: self.target_lanes.lock().diagnostics(),
+        };
+        write_archive(&path, &archive)
+    }
+
+    fn open_saved_archive(&self, path: PathBuf) -> Result<(), RunControlError> {
+        let archive =
+            read_archive(&path).map_err(|message| RunControlError::Internal { message })?;
+        if archive.format_version != ARCHIVE_FORMAT_VERSION {
+            return Err(RunControlError::Internal {
+                message: format!(
+                    "unsupported stax archive version {} (expected {})",
+                    archive.format_version, ARCHIVE_FORMAT_VERSION
+                ),
+            });
+        }
+        let Some(mut summary) = archive.runs.last().cloned() else {
+            return Err(RunControlError::Internal {
+                message: "archive has no run summary".to_owned(),
+            });
+        };
+        summary.state = RunState::Stopped;
+        if summary.stopped_at_unix_ns.is_none() {
+            summary.stopped_at_unix_ns = Some(archive.saved_at_unix_ns);
+        }
+
+        {
+            let mut inner = self.inner.lock();
+            if inner
+                .active
+                .as_ref()
+                .is_some_and(|active| active.state == RunState::Recording)
+            {
+                return Err(RunControlError::AlreadyActive);
+            }
+            if let Some(active) = inner.active.take()
+                && !inner.history.iter().any(|run| run.id == active.id)
+            {
+                inner.history.push(active);
+            }
+            inner.active = Some(summary.clone());
+            inner.recording_stop = None;
+        }
+
+        self.aggregator
+            .write()
+            .replace_from_saved(archive.aggregator);
+        self.binaries.write().replace_from_saved(archive.binaries);
+        {
+            let mut target_lanes = self.target_lanes.lock();
+            *target_lanes = TargetLaneRegistry::default();
+            target_lanes.restore_saved_diagnostics(archive.target_ingest);
+        }
+        self.attach_local_shared_cache();
+        self.advance_next_run_id(summary.id.0.saturating_add(1));
+        self.bump_revision();
+        Ok(())
+    }
+
+    fn advance_next_run_id(&self, next: u64) {
+        let mut current = self.next_run_id.load(Ordering::Relaxed);
+        while current < next {
+            match self.next_run_id.compare_exchange(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
     fn begin_run(&self, config: RunConfig) -> Result<RunId, String> {
         {
             let mut inner = self.inner.lock();
@@ -562,6 +657,40 @@ impl RunControl for ServerState {
         }
         Ok(snapshot)
     }
+
+    async fn save_current(&self, path: String) -> Result<(), RunControlError> {
+        self.save_current_archive(PathBuf::from(path))
+            .map_err(|message| RunControlError::Internal { message })
+    }
+
+    async fn open_saved(&self, path: String) -> Result<(), RunControlError> {
+        self.open_saved_archive(PathBuf::from(path))
+    }
+}
+
+fn write_archive(path: &Path, archive: &SavedRunArchive) -> Result<(), String> {
+    if path.exists() && !path.is_dir() {
+        return Err(format!(
+            "archive path {} exists and is not a directory",
+            path.display()
+        ));
+    }
+    fs::create_dir_all(path).map_err(|e| format!("create archive dir {}: {e}", path.display()))?;
+    let bytes = facet_json::to_vec_pretty(archive)
+        .map_err(|e| format!("serialize archive {}: {e}", path.display()))?;
+    let archive_path = path.join(ARCHIVE_FILE_NAME);
+    fs::write(&archive_path, bytes).map_err(|e| format!("write {}: {e}", archive_path.display()))
+}
+
+fn read_archive(path: &Path) -> Result<SavedRunArchive, String> {
+    let archive_path = if path.is_dir() {
+        path.join(ARCHIVE_FILE_NAME)
+    } else {
+        path.to_path_buf()
+    };
+    let bytes =
+        fs::read(&archive_path).map_err(|e| format!("read {}: {e}", archive_path.display()))?;
+    facet_json::from_slice(&bytes).map_err(|e| format!("parse {}: {e}", archive_path.display()))
 }
 
 fn init_logging() {
@@ -602,4 +731,155 @@ fn now_unix_ns() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use stax_live_proto::{
+        LiveFilter, Profiler as _, RunControl as _, TargetIngest as _, TargetReporterStats,
+        TargetSpan, TargetSpanBatch, TopSort, ViewParams,
+    };
+
+    use super::*;
+
+    const SYNTH_TID_BASE: u32 = 0xFFF0_0000;
+
+    #[tokio::test]
+    async fn save_open_restores_query_state_and_target_diagnostics() {
+        let server = ServerState::new_for_tests();
+        let service = TargetIngestService::new(server.clone());
+        let run_id = server
+            .begin_run(test_run_config("archive-source"))
+            .expect("begin source run");
+        server.apply_target_attached_in_process(run_id, 4242, 0);
+
+        service
+            .ingest(TargetSpanBatch {
+                pid: 4242,
+                lane: "GPU archive".to_owned(),
+                spans: vec![TargetSpan::new("archive_kernel", 10_000_000, 16_000_000)],
+            })
+            .await;
+        service
+            .reporter_stats(TargetReporterStats {
+                pid: 4242,
+                batches_dropped_queue_full: 2,
+                spans_dropped_queue_full: 9,
+                batches_dropped_worker_disconnected: 1,
+                spans_dropped_worker_disconnected: 4,
+            })
+            .await;
+
+        let archive_dir = temp_archive_dir("roundtrip");
+        let _ = std::fs::remove_dir_all(&archive_dir);
+        server
+            .save_current_archive(archive_dir.clone())
+            .expect("save current archive");
+
+        let busy = ServerState::new_for_tests();
+        busy.set_active_run_for_tests(9000);
+        assert!(matches!(
+            busy.open_saved_archive(archive_dir.clone()),
+            Err(RunControlError::AlreadyActive)
+        ));
+
+        let restored = ServerState::new_for_tests();
+        restored
+            .open_saved_archive(archive_dir.clone())
+            .expect("open saved archive");
+
+        let runs = restored.list_runs().await;
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].state, RunState::Stopped);
+        assert_eq!(runs[0].target_pid, Some(4242));
+        assert_eq!(runs[0].label, "archive-source");
+
+        let profiler = restored.profiler();
+        let top = profiler
+            .top(10, TopSort::BySelf, view_params(Some(SYNTH_TID_BASE)))
+            .await;
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].function_name.as_deref(), Some("archive_kernel"));
+        assert_eq!(top[0].self_on_cpu_ns, 6_000_000);
+        assert_eq!(top[0].self_target_ns, 6_000_000);
+        assert_eq!(top[0].self_pet_samples, 1);
+        assert_eq!(top[0].self_target_spans, 1);
+
+        let flame = profiler.flamegraph(view_params(Some(SYNTH_TID_BASE))).await;
+        assert_eq!(flame.total_on_cpu_ns, 6_000_000);
+        assert_eq!(flame.total_target_ns, 6_000_000);
+        assert_eq!(flame.total_target_spans, 1);
+        assert_eq!(flame.root.children.len(), 1);
+        let lane = &flame.root.children[0];
+        assert_eq!(flame_node_name(lane, &flame.strings), Some("GPU archive"));
+        assert_eq!(lane.children.len(), 1);
+        assert_eq!(
+            flame_node_name(&lane.children[0], &flame.strings),
+            Some("archive_kernel")
+        );
+
+        let threads = profiler.threads().await;
+        let thread = threads
+            .threads
+            .iter()
+            .find(|thread| thread.tid == SYNTH_TID_BASE)
+            .expect("restored synthetic lane");
+        assert_eq!(thread.name.as_deref(), Some("GPU archive"));
+        assert_eq!(thread.on_cpu_ns, 6_000_000);
+        assert_eq!(thread.target_ns, 6_000_000);
+        assert_eq!(thread.pet_samples, 1);
+        assert_eq!(thread.target_spans, 1);
+
+        let diagnostics = restored.diagnostics().await.target_ingest;
+        assert_eq!(diagnostics.batches, 1);
+        assert_eq!(diagnostics.spans_recorded, 1);
+        assert_eq!(diagnostics.total_duration_ns, 6_000_000);
+        assert_eq!(diagnostics.batches_dropped_target_queue_full, 2);
+        assert_eq!(diagnostics.spans_dropped_target_queue_full, 9);
+        assert_eq!(diagnostics.batches_dropped_target_worker_disconnected, 1);
+        assert_eq!(diagnostics.spans_dropped_target_worker_disconnected, 4);
+        assert_eq!(diagnostics.lanes.len(), 1);
+        assert_eq!(diagnostics.lanes[0].tid, SYNTH_TID_BASE);
+        assert_eq!(diagnostics.lanes[0].name, "GPU archive");
+
+        let _ = std::fs::remove_dir_all(&archive_dir);
+    }
+
+    fn test_run_config(label: &str) -> RunConfig {
+        RunConfig {
+            label: label.to_owned(),
+            frequency_hz: 900,
+            dwarf_unwind: false,
+        }
+    }
+
+    fn view_params(tid: Option<u32>) -> ViewParams {
+        ViewParams {
+            tid,
+            filter: LiveFilter {
+                time_range: None,
+                exclude_symbols: Vec::new(),
+            },
+        }
+    }
+
+    fn flame_node_name<'a>(
+        node: &stax_live_proto::FlameNode,
+        strings: &'a [String],
+    ) -> Option<&'a str> {
+        node.function_name
+            .and_then(|index| strings.get(index as usize))
+            .map(String::as_str)
+    }
+
+    fn temp_archive_dir(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!(
+            "stax-archive-{name}-{}-{nonce}",
+            std::process::id()
+        ))
+    }
 }

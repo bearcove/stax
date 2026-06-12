@@ -27,7 +27,10 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use stax_live_proto::OffCpuReason;
+use stax_live_proto::{
+    OffCpuReason, SavedAggregator, SavedInterval, SavedIntervalKind, SavedPetSample,
+    SavedPmuSample, SavedThread, SavedThreadName, SavedWakeup,
+};
 
 use crate::binaries::BinaryRegistry;
 use crate::classify::classify_offcpu;
@@ -319,6 +322,156 @@ pub struct Aggregator {
 }
 
 impl Aggregator {
+    pub fn to_saved(&self) -> SavedAggregator {
+        let mut thread_names: Vec<SavedThreadName> = self
+            .thread_names
+            .iter()
+            .map(|(&tid, name)| SavedThreadName {
+                tid,
+                name: name.clone(),
+            })
+            .collect();
+        thread_names.sort_by_key(|entry| entry.tid);
+
+        let mut threads: Vec<SavedThread> = self
+            .threads
+            .iter()
+            .map(|(&tid, stats)| SavedThread {
+                tid,
+                pet_samples: stats
+                    .pet_samples
+                    .iter()
+                    .map(|sample| SavedPetSample {
+                        timestamp_ns: sample.timestamp_ns,
+                        stack: sample.stack.to_vec(),
+                        kernel_stack: sample.kernel_stack.to_vec(),
+                        pmc: SavedPmuSample {
+                            cycles: sample.pmc.cycles,
+                            instructions: sample.pmc.instructions,
+                            l1d_misses: sample.pmc.l1d_misses,
+                            branch_mispreds: sample.pmc.branch_mispreds,
+                        },
+                    })
+                    .collect(),
+                intervals: stats
+                    .intervals
+                    .iter()
+                    .map(|interval| SavedInterval {
+                        start_ns: interval.start_ns,
+                        end_ns: interval.end_ns,
+                        kind: match &interval.kind {
+                            IntervalKind::OnCpu => SavedIntervalKind::OnCpu,
+                            IntervalKind::SyntheticSpan { stack, origin_tid } => {
+                                SavedIntervalKind::SyntheticSpan {
+                                    stack: stack.to_vec(),
+                                    origin_tid: *origin_tid,
+                                }
+                            }
+                            IntervalKind::OffCpu {
+                                stack,
+                                waker_tid,
+                                waker_user_stack,
+                            } => SavedIntervalKind::OffCpu {
+                                stack: stack.to_vec(),
+                                waker_tid: *waker_tid,
+                                waker_user_stack: waker_user_stack
+                                    .as_ref()
+                                    .map(|stack| stack.to_vec()),
+                            },
+                        },
+                    })
+                    .collect(),
+                wakeups: stats
+                    .wakeups
+                    .iter()
+                    .map(|wakeup| SavedWakeup {
+                        timestamp_ns: wakeup.timestamp_ns,
+                        waker_tid: wakeup.waker_tid,
+                        waker_user_stack: wakeup.waker_user_stack.to_vec(),
+                        waker_kernel_stack: wakeup.waker_kernel_stack.to_vec(),
+                    })
+                    .collect(),
+            })
+            .collect();
+        threads.sort_by_key(|thread| thread.tid);
+
+        SavedAggregator {
+            session_start_ns: self.session_start_ns,
+            last_event_ns: self.last_event_ns,
+            thread_names,
+            threads,
+        }
+    }
+
+    pub fn replace_from_saved(&mut self, saved: SavedAggregator) {
+        self.threads.clear();
+        self.thread_names.clear();
+        self.session_start_ns = saved.session_start_ns;
+        self.last_event_ns = saved.last_event_ns;
+
+        for name in saved.thread_names {
+            self.thread_names.insert(name.tid, name.name);
+        }
+        for thread in saved.threads {
+            self.threads.insert(
+                thread.tid,
+                ThreadStats {
+                    pet_samples: thread
+                        .pet_samples
+                        .into_iter()
+                        .map(|sample| PetSample {
+                            timestamp_ns: sample.timestamp_ns,
+                            stack: sample.stack.into_boxed_slice(),
+                            kernel_stack: sample.kernel_stack.into_boxed_slice(),
+                            pmc: PmuSample {
+                                cycles: sample.pmc.cycles,
+                                instructions: sample.pmc.instructions,
+                                l1d_misses: sample.pmc.l1d_misses,
+                                branch_mispreds: sample.pmc.branch_mispreds,
+                            },
+                        })
+                        .collect(),
+                    intervals: thread
+                        .intervals
+                        .into_iter()
+                        .map(|interval| RawInterval {
+                            start_ns: interval.start_ns,
+                            end_ns: interval.end_ns,
+                            kind: match interval.kind {
+                                SavedIntervalKind::OnCpu => IntervalKind::OnCpu,
+                                SavedIntervalKind::SyntheticSpan { stack, origin_tid } => {
+                                    IntervalKind::SyntheticSpan {
+                                        stack: stack.into_boxed_slice(),
+                                        origin_tid,
+                                    }
+                                }
+                                SavedIntervalKind::OffCpu {
+                                    stack,
+                                    waker_tid,
+                                    waker_user_stack,
+                                } => IntervalKind::OffCpu {
+                                    stack: stack.into_boxed_slice(),
+                                    waker_tid,
+                                    waker_user_stack: waker_user_stack.map(Vec::into_boxed_slice),
+                                },
+                            },
+                        })
+                        .collect(),
+                    wakeups: thread
+                        .wakeups
+                        .into_iter()
+                        .map(|wakeup| RawWakeup {
+                            timestamp_ns: wakeup.timestamp_ns,
+                            waker_tid: wakeup.waker_tid,
+                            waker_user_stack: wakeup.waker_user_stack.into_boxed_slice(),
+                            waker_kernel_stack: wakeup.waker_kernel_stack.into_boxed_slice(),
+                        })
+                        .collect(),
+                },
+            );
+        }
+    }
+
     pub fn record_pet_sample(
         &mut self,
         tid: u32,

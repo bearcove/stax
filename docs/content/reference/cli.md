@@ -81,8 +81,10 @@ the daemon started. Takes no options. See
 ## `stax list`
 
 List every run `stax-server` has hosted — active and history, oldest first.
-Takes no options. History is in-memory and does not survive a daemon
-restart. See [Run Lifecycle](@/guide/run-lifecycle.md#stax-list).
+Takes no options. History is server-memory history and does not survive a
+daemon restart unless you save the current queryable run with
+[`stax save`](#stax-save). See
+[Run Lifecycle](@/guide/run-lifecycle.md#stax-list).
 
 ## `stax wait`
 
@@ -110,6 +112,39 @@ exclusive** — pass at most one. `--timeout-ms` is independent. With no flags,
 Ask `stax-server` to stop the active run cleanly and print the final summary.
 Takes no options. Exits non-zero if there is no active run. See
 [Run Lifecycle](@/guide/run-lifecycle.md#stax-stop).
+
+## `stax save`
+
+Save the current or most recent queryable run to a directory archive. The
+archive contains `archive.json`, a versioned facet-json payload with the run
+summary, raw aggregator streams, binary/symbol metadata, and target-ingest
+diagnostics.
+
+```text
+stax save <PATH>
+```
+
+| arg      | type                | meaning                                      |
+|----------|---------------------|----------------------------------------------|
+| `<PATH>` | positional `String` | directory archive to create or overwrite into |
+
+`stax save` works while a run is active, and after `stax stop`, until the
+next recording resets the live aggregator.
+
+## `stax open`
+
+Open a saved run archive into `stax-server`'s current query state.
+
+```text
+stax open <PATH>
+```
+
+| arg      | type                | meaning                                                    |
+|----------|---------------------|------------------------------------------------------------|
+| `<PATH>` | positional `String` | archive directory, or the `archive.json` file inside it    |
+
+After `stax open`, `threads`, `top`, `flame`, and `diagnose` operate on the
+restored run. `open` refuses to replace state while a recording is active.
 
 ## `stax top`
 

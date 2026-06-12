@@ -41,7 +41,16 @@ stax record -- ./bench       # run 2 — aggregator reset; run 1's data is gone
 ```
 
 To keep an older run queryable, stop it and *don't* start a new recording
-until you're done looking. Per-`RunId` querying is on the roadmap.
+until you're done looking, or save it first:
+
+```bash
+stax stop
+stax save /tmp/stax-demo.staxdir
+stax open /tmp/stax-demo.staxdir
+```
+
+`stax open` loads the saved run back into the current query state. Per-`RunId`
+querying is still on the roadmap.
 
 ## stax status
 
@@ -60,7 +69,8 @@ active run:
 ## stax list
 
 Every run the daemon has hosted — active and finished, oldest first. History
-is in-memory only for now; it does not survive a daemon restart.
+is server-memory history; it does not survive a daemon restart unless you save
+the current queryable run with [`stax save`](#stax-save).
 
 ```bash
 stax list
@@ -127,6 +137,37 @@ stopped:
 discard its data — the aggregator stays queryable until the next recording
 (see [above](#which-run-do-queries-see)).
 
+## stax save
+
+Write the current or most recent queryable run to a directory archive.
+
+```bash
+stax save /tmp/stax-demo.staxdir
+```
+
+The archive contains `archive.json`, a versioned facet-json payload with the
+run summary, raw aggregator streams, binary/symbol metadata, and
+target-ingest diagnostics. It preserves target spans and origin-linked stacks
+for later `threads`, `top`, `flame`, and `diagnose` queries.
+
+`stax save` works while a run is active, and after `stax stop`, until the
+next `stax record` resets the live aggregator.
+
+## stax open
+
+Load a saved run archive into the daemon's current query state.
+
+```bash
+stax open /tmp/stax-demo.staxdir
+stax threads -n 0
+stax top -n 20
+stax flame --threshold-pct 0
+```
+
+`stax open` accepts either the archive directory or the `archive.json` inside
+it. It refuses to replace state while a recording is active; stop the active
+run first.
+
 ## Putting it together
 
 ```bash
@@ -137,4 +178,5 @@ stax wait --for-samples 10000 \
 }
 stax top -n 20
 stax stop
+stax save /tmp/stax-demo.staxdir
 ```

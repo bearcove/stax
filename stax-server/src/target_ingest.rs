@@ -62,6 +62,7 @@ pub(crate) struct TargetLaneRegistry {
     totals: TargetIngestCounters,
     lane_counters: HashMap<(u32, String), TargetIngestCounters>,
     reporter_stats: HashMap<u32, TargetReporterStats>,
+    saved_diagnostics: Option<TargetIngestDiagnostics>,
 }
 
 #[derive(Clone)]
@@ -206,19 +207,31 @@ impl TargetIngestCounters {
 }
 
 impl TargetLaneRegistry {
+    fn clear_saved_diagnostics(&mut self) {
+        self.saved_diagnostics = None;
+    }
+
+    pub(crate) fn restore_saved_diagnostics(&mut self, diagnostics: TargetIngestDiagnostics) {
+        self.saved_diagnostics = Some(diagnostics);
+    }
+
     fn record_dropped_no_active_run(&mut self, spans: u64) {
+        self.clear_saved_diagnostics();
         self.totals.record_dropped_no_active_run(spans);
     }
 
     fn record_dropped_wrong_pid(&mut self, spans: u64) {
+        self.clear_saved_diagnostics();
         self.totals.record_dropped_wrong_pid(spans);
     }
 
     fn record_reporter_stats(&mut self, stats: TargetReporterStats) {
+        self.clear_saved_diagnostics();
         self.reporter_stats.insert(stats.pid, stats);
     }
 
     fn record_batch(&mut self, pid: u32, lane: &str, batch: TargetBatchCounters) {
+        self.clear_saved_diagnostics();
         self.totals.record_batch(batch);
         self.lane_counters
             .entry((pid, lane.to_owned()))
@@ -227,6 +240,9 @@ impl TargetLaneRegistry {
     }
 
     pub(crate) fn diagnostics(&self) -> TargetIngestDiagnostics {
+        if let Some(diagnostics) = &self.saved_diagnostics {
+            return diagnostics.clone();
+        }
         let mut lanes: Vec<TargetLaneDiagnostics> = self
             .lane_counters
             .iter()

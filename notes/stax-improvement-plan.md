@@ -270,6 +270,31 @@ Goal: make runs saveable, reopenable, shareable, and comparable. The live
 aggregator is powerful, but users eventually need artifacts for bug reports,
 CI regressions, and before/after analysis.
 
+Status as of 2026-06-12:
+
+- Directory archive MVP is implemented:
+  - `stax save <PATH>` writes `archive.json` into a directory archive.
+  - `stax open <PATH>` loads that archive back into `stax-server`'s current
+    query state.
+  - `open` refuses to replace state while a recording is active.
+- The archive is facet-json and versioned (`format_version = 1`).
+- The MVP stores:
+  - run summary
+  - raw aggregator streams: PET samples, intervals, target synthetic spans,
+    wakeups, and thread names
+  - binary/symbol metadata, including inline text bytes when present
+  - target-ingest diagnostics, including origin-link counters and
+    target-side queue drops
+- Reopened archives are queryable through the normal `threads`, `top`,
+  `flame`, and `diagnose` surfaces.
+- Current deliberate non-goals:
+  - no per-`RunId` query selector yet
+  - no compare command yet
+  - no single-file `.stax` packaging yet
+  - no append-friendly chunked event log or `blobs/` layout yet
+  - annotate depends on saved/host-available bytes in the same way the live
+    binary registry does
+
 ### 4.1 Product surface
 
 Add commands along these lines:
@@ -277,9 +302,11 @@ Add commands along these lines:
 - `stax save <PATH>`
   - saves the current or most recent run
   - works after `stax stop` as long as the aggregator is still populated
+  - implemented as a directory archive containing `archive.json`
 - `stax open <PATH>`
   - loads a saved run into a queryable local server state
-  - or starts a read-only server if that fits the architecture better
+  - implemented by replacing the current server query state; active recordings
+    are rejected
 - `stax export <PATH> --format ...`
   - optional after the internal format exists
   - not a substitute for native persisted runs
@@ -356,11 +383,17 @@ Verification:
 ```bash
 stax record -- <blessed-demo>
 stax stop
-stax save /tmp/demo.stax
-stax open /tmp/demo.stax
+stax save /tmp/demo.staxdir
+stax open /tmp/demo.staxdir
 stax threads -n 0
 stax top -n 20 --sort self
 stax flame -d 8 --threshold-pct 0
+```
+
+Implemented test coverage:
+
+```bash
+cargo nextest run -p stax-server --all-targets -E 'test(save_open_restores_query_state_and_target_diagnostics)'
 ```
 
 ## Workstream 5: blessed integration test/demo corpus
@@ -636,16 +669,24 @@ Done when:
 
 ### Phase D: persistence and reopen
 
-1. Design typed event/archive schema.
-2. Save current run.
-3. Reopen saved run.
-4. Query saved run through CLI.
-5. Preserve target spans and origins.
-6. Document archive compatibility.
+1. Done: design typed directory archive schema.
+2. Done: save current or most recent run.
+3. Done: reopen saved run into server query state.
+4. Done: query saved run through existing CLI surfaces.
+5. Done: preserve target spans, origin-linked stacks, and ingest diagnostics.
+6. Started: document archive compatibility.
 
 Done when:
 
 - Record -> stop -> save -> restart server -> open -> threads/top/flame works.
+
+Remaining:
+
+- Add a live CLI smoke using the blessed demo corpus once daemon lifecycle is
+  stable in CI.
+- Make archive compatibility policy explicit in docs.
+- Decide whether format v2 becomes chunked directory layout or single-file
+  package first.
 
 ### Phase E: web target-time polish
 

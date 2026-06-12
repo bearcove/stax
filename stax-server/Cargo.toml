@@ -16,6 +16,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }
 parking_lot = "0.12"
 async-trait = "0.1"
+facet-json = "0.50.0-rc.0"
 
 eyre = "0.6"
 libc = "0.2"

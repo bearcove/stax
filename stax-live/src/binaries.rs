@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use object::{Object, ObjectSegment};
+use stax_live_proto::{SavedBinaryRegistry, SavedLiveSymbol, SavedLoadedBinary};
 
 /// One symbol from a binary's symtab, owned form (the borrowed
 /// `LiveSymbol` only lives for the duration of `on_binary_loaded`).
@@ -183,6 +184,58 @@ impl BinaryRegistry {
         if task_port != 0 {
             self.target_task_port = Some(task_port);
         }
+    }
+
+    pub fn to_saved(&self) -> SavedBinaryRegistry {
+        SavedBinaryRegistry {
+            binaries: self
+                .by_base
+                .iter()
+                .map(|binary| SavedLoadedBinary {
+                    path: binary.path.clone(),
+                    base_avma: binary.base_avma,
+                    avma_end: binary.avma_end,
+                    text_svma: binary.text_svma,
+                    arch: binary.arch.clone(),
+                    is_executable: binary.is_executable,
+                    symbols: binary
+                        .symbols
+                        .iter()
+                        .map(|symbol| SavedLiveSymbol {
+                            start_svma: symbol.start_svma,
+                            end_svma: symbol.end_svma,
+                            name: symbol.name.clone(),
+                        })
+                        .collect(),
+                    text_bytes: binary.text_bytes.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    pub fn replace_from_saved(&mut self, saved: SavedBinaryRegistry) {
+        let mut restored = Self::new();
+        for binary in saved.binaries {
+            restored.insert(LoadedBinary {
+                path: binary.path,
+                base_avma: binary.base_avma,
+                avma_end: binary.avma_end,
+                text_svma: binary.text_svma,
+                arch: binary.arch,
+                is_executable: binary.is_executable,
+                symbols: binary
+                    .symbols
+                    .into_iter()
+                    .map(|symbol| LiveSymbolOwned {
+                        start_svma: symbol.start_svma,
+                        end_svma: symbol.end_svma,
+                        name: symbol.name,
+                    })
+                    .collect(),
+                text_bytes: binary.text_bytes,
+            });
+        }
+        *self = restored;
     }
 
     #[cfg(target_os = "macos")]

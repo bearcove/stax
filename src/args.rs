@@ -50,6 +50,12 @@ pub enum Command {
     /// Ask stax-server to stop the active run cleanly.
     Stop,
 
+    /// Save the current or most recent queryable run to a directory archive.
+    Save(ArchiveArgs),
+
+    /// Open a saved run directory archive into stax-server's query state.
+    Open(ArchiveArgs),
+
     /// Snapshot top functions or target-span names from the active run.
     /// Output includes active time, target-executor time, PET samples,
     /// and target span counts.
@@ -64,6 +70,13 @@ pub enum Command {
 
     /// Per-thread and synthetic-lane CPU/target/off-CPU breakdown.
     Threads(ThreadsArgs),
+}
+
+#[derive(Facet, Debug)]
+pub struct ArchiveArgs {
+    /// Save/open archive directory or archive.json file.
+    #[facet(args::positional)]
+    pub path: String,
 }
 
 #[derive(Facet, Debug)]

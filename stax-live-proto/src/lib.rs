@@ -979,6 +979,108 @@ pub struct DiagnosticsSnapshot {
     pub target_ingest: TargetIngestDiagnostics,
 }
 
+#[derive(Clone, Debug, Facet)]
+pub struct SavedRunArchive {
+    pub format_version: u32,
+    pub saved_at_unix_ns: u64,
+    pub runs: Vec<RunSummary>,
+    pub aggregator: SavedAggregator,
+    pub binaries: SavedBinaryRegistry,
+    pub target_ingest: TargetIngestDiagnostics,
+}
+
+#[derive(Clone, Debug, Default, Facet)]
+pub struct SavedAggregator {
+    pub session_start_ns: Option<u64>,
+    pub last_event_ns: Option<u64>,
+    pub thread_names: Vec<SavedThreadName>,
+    pub threads: Vec<SavedThread>,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct SavedThreadName {
+    pub tid: u32,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Default, Facet)]
+pub struct SavedThread {
+    pub tid: u32,
+    pub pet_samples: Vec<SavedPetSample>,
+    pub intervals: Vec<SavedInterval>,
+    pub wakeups: Vec<SavedWakeup>,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct SavedPetSample {
+    pub timestamp_ns: u64,
+    pub stack: Vec<u64>,
+    pub kernel_stack: Vec<u64>,
+    pub pmc: SavedPmuSample,
+}
+
+#[derive(Clone, Copy, Debug, Default, Facet)]
+pub struct SavedPmuSample {
+    pub cycles: u64,
+    pub instructions: u64,
+    pub l1d_misses: u64,
+    pub branch_mispreds: u64,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct SavedInterval {
+    pub start_ns: u64,
+    pub end_ns: u64,
+    pub kind: SavedIntervalKind,
+}
+
+#[derive(Clone, Debug, Facet)]
+#[repr(u8)]
+pub enum SavedIntervalKind {
+    OnCpu,
+    SyntheticSpan {
+        stack: Vec<u64>,
+        origin_tid: Option<u32>,
+    },
+    OffCpu {
+        stack: Vec<u64>,
+        waker_tid: Option<u32>,
+        waker_user_stack: Option<Vec<u64>>,
+    },
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct SavedWakeup {
+    pub timestamp_ns: u64,
+    pub waker_tid: u32,
+    pub waker_user_stack: Vec<u64>,
+    pub waker_kernel_stack: Vec<u64>,
+}
+
+#[derive(Clone, Debug, Default, Facet)]
+pub struct SavedBinaryRegistry {
+    pub binaries: Vec<SavedLoadedBinary>,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct SavedLoadedBinary {
+    pub path: String,
+    pub base_avma: u64,
+    pub avma_end: u64,
+    pub text_svma: u64,
+    pub arch: Option<String>,
+    pub is_executable: bool,
+    pub symbols: Vec<SavedLiveSymbol>,
+    pub text_bytes: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct SavedLiveSymbol {
+    pub start_svma: u64,
+    pub end_svma: u64,
+    pub name: Vec<u8>,
+}
+
 /// Agent-side wait condition: which event makes `wait_active` return.
 /// First-fired wins; `wait_active` always also returns once the run
 /// transitions to `Stopped`, regardless of which condition was set.
@@ -1100,6 +1202,14 @@ pub trait RunControl {
     /// final `RunSummary` once the run has transitioned to `Stopped`.
     /// Errors if no run is active.
     async fn stop_active(&self) -> Result<RunSummary, RunControlError>;
+
+    /// Save the current or most recent queryable run into a directory
+    /// archive at `path`.
+    async fn save_current(&self, path: String) -> Result<(), RunControlError>;
+
+    /// Open a saved directory archive into the server's current query
+    /// state. Fails while a recording is active.
+    async fn open_saved(&self, path: String) -> Result<(), RunControlError>;
 }
 
 /// All service descriptors exposed by stax-live; the codegen iterates over

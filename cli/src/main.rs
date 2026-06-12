@@ -5,7 +5,7 @@ use std::process::exit;
 
 use figue as args;
 use stax_core::args::{
-    AnnotateArgs, Cli, Command, FlameArgs, RecordArgs, ThreadsArgs, TopArgs, WaitArgs,
+    AnnotateArgs, ArchiveArgs, Cli, Command, FlameArgs, RecordArgs, ThreadsArgs, TopArgs, WaitArgs,
 };
 #[cfg(target_os = "linux")]
 use stax_core::cmd_setup_linux;
@@ -67,6 +67,8 @@ fn main_impl() -> Result<(), Box<dyn Error>> {
         Command::Dump => run_dump()?,
         Command::Wait(args) => block_on_async(async { run_wait(args).await })?,
         Command::Stop => block_on_async(async { run_stop().await })?,
+        Command::Save(args) => block_on_async(async { run_save(args).await })?,
+        Command::Open(args) => block_on_async(async { run_open(args).await })?,
         Command::Top(args) => block_on_async(async { run_top(args).await })?,
         Command::Annotate(args) => block_on_async(async { run_annotate(args).await })?,
         Command::Flame(args) => block_on_async(async { run_flame(args).await })?,
@@ -695,6 +697,30 @@ async fn run_stop() -> Result<(), Box<dyn Error>> {
         Err(vox::VoxError::User(err)) => return Err(format!("{err:?}").into()),
         Err(e) => return Err(format!("{e:?}").into()),
     }
+    Ok(())
+}
+
+async fn run_save(args: ArchiveArgs) -> Result<(), Box<dyn Error>> {
+    let url = require_server_socket()?;
+    let client: RunControlClient = vox::connect(&url).await?;
+    let _debug_registration = register_run_control_client("save", &client);
+    client
+        .save_current(args.path.clone())
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+    println!("saved: {}", args.path);
+    Ok(())
+}
+
+async fn run_open(args: ArchiveArgs) -> Result<(), Box<dyn Error>> {
+    let url = require_server_socket()?;
+    let client: RunControlClient = vox::connect(&url).await?;
+    let _debug_registration = register_run_control_client("open", &client);
+    client
+        .open_saved(args.path.clone())
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+    println!("opened: {}", args.path);
     Ok(())
 }
 

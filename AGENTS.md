@@ -208,8 +208,10 @@ stax wait     # block until the active run stops
 stax stop     # ask stax-server to stop it now
 ```
 
-`stax list` shows every run the daemon has hosted (active + history,
-in-memory only for now — persistence is a follow-up).
+`stax list` shows every run the daemon has hosted (active + history).
+That list is still server-memory history; use `stax save <DIR>` to persist
+the current queryable run before starting another recording or restarting
+`stax-server`.
 
 ### Which run does `stax top` / `stax annotate` query?
 
@@ -228,8 +230,9 @@ stax record …           # NEW run resets the aggregator; the previous one is g
 ```
 
 If you need to query an older run later, you'll have to stop the active
-one first (so its data sticks around) and avoid starting a new recording
-until you're done. Per-`RunId` querying is on the roadmap.
+one first (so its data sticks around), save it with `stax save <DIR>`, and
+reopen it later with `stax open <DIR>`. Per-`RunId` querying is still on the
+roadmap.
 
 ## Lifecycle from an agent's POV
 
@@ -368,6 +371,39 @@ stopped:
 ```
 
 Exits non-zero if there's no active run.
+
+### `stax save <PATH>`
+
+Write the current or most recent queryable run to a directory archive. The
+archive contains `archive.json`, a versioned facet-json payload with the run
+summary, raw aggregator streams, binary/symbol metadata, and target-ingest
+diagnostics. It is meant for bug reports, handoff, and replaying
+`threads`/`top`/`flame` after the live process is gone.
+
+```
+$ stax save /tmp/stax-demo.staxdir
+saved: /tmp/stax-demo.staxdir
+```
+
+`stax save` needs some queryable run state. It works while a run is active,
+and after `stax stop`, until the next recording resets the live aggregator.
+
+### `stax open <PATH>`
+
+Load a saved directory archive into `stax-server`'s current query state.
+After opening, the usual views operate on the restored run:
+
+```
+$ stax open /tmp/stax-demo.staxdir
+opened: /tmp/stax-demo.staxdir
+$ stax threads -n 0
+$ stax top -n 20
+$ stax flame --threshold-pct 0
+```
+
+`stax open` refuses to replace state while a recording is active. Stop the
+run first. It accepts either the archive directory or the `archive.json` file
+inside it.
 
 ### `stax top [-n N] [--sort self|total] [--tid TID]`
 
