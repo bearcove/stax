@@ -43,26 +43,30 @@ if lane.reporting_active() {
 }
 ```
 
-`Lane::begin_span` and `Lane::begin_span_with_origin` perform the same gate,
-so worker-side timing can use `if let Some(open) = ...` directly.
+For executor-style code, prefer carrying a `CapturedOrigin` token. It remembers
+both "capture was active" and the optional OS-thread origin. If the platform
+cannot capture an origin, lane-only views still work.
+
+`Lane::begin_span`, `Lane::begin_span_with_origin`, and
+`Lane::begin_span_with_captured_origin` perform the active-recording gate, so
+worker-side timing can use `if let Some(open) = ...` directly.
 
 Capture the origin at the queue/dispatch site, then time/report the work where
 it actually runs:
 
 ```rust
 struct Work {
-    origin: Option<stax_target::TargetSpanOrigin>,
+    origin: stax_target::CapturedOrigin,
 }
 
 fn enqueue(lane: &stax_target::Lane) {
-    let origin = lane.reporting_active().then(|| lane.current_origin()).flatten();
-    submit(Work { origin });
+    submit(Work {
+        origin: lane.capture_origin(),
+    });
 }
 
 fn run_worker(lane: &stax_target::Lane, work: Work) {
-    let open = work
-        .origin
-        .and_then(|origin| lane.begin_span_with_origin("decode chunk", origin));
+    let open = lane.begin_span_with_captured_origin("decode chunk", work.origin);
 
     decode_chunk();
 
@@ -76,13 +80,15 @@ That is the general executor form. For APIs that already give exact start/end
 timestamps, build spans directly:
 
 ```rust
-if let Some(origin) = lane.current_origin() {
-    lane.report_one(lane.span_with_origin("kernel_name", start_ns, end_ns, origin));
+let origin = lane.capture_origin();
+if let Some(span) = lane.span_with_captured_origin("kernel_name", start_ns, end_ns, origin) {
+    lane.report_one(span);
 }
 ```
 
 Use `stax_target::now_ns()` when your target-side timestamps should come from
-the same host clock stax expects.
+the same host clock stax expects. Use `SpanBuilder` when an integration wants
+to validate or attach origins before deciding where to report a span.
 
 ## Demo workload
 

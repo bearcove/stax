@@ -34,22 +34,17 @@
 //! let lane = stax_target::Lane::new("decoder worker");
 //!
 //! // Queue side: capture provenance only while stax is recording us.
-//! let origin = lane
-//!     .reporting_active()
-//!     .then(|| lane.current_origin())
-//!     .flatten();
+//! let origin = lane.capture_origin();
 //!
 //! // Worker side: time the work where it actually runs.
-//! if let Some(origin) = origin {
-//!     if let Some(open) = lane.begin_span_with_origin("decode chunk", origin) {
-//!         // decode_chunk();
-//!         open.finish_and_report(&lane);
-//!     }
+//! if let Some(open) = lane.begin_span_with_captured_origin("decode chunk", origin) {
+//!     // decode_chunk();
+//!     open.finish_and_report(&lane);
 //! }
 //! ```
 //!
 //! For APIs that already return exact timestamps, use
-//! [`Lane::span_with_origin`] and [`Lane::report_one`].
+//! [`Lane::span_with_captured_origin`] and [`Lane::report_one`].
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -119,14 +114,30 @@ pub fn span_with_current_origin(name: impl Into<String>, start_ns: u64, end_ns: 
     }
 }
 
+/// Error returned by fallible reporting helpers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReportError {
+    /// The bounded in-process queue is full; this batch was dropped.
+    QueueFull,
+    /// The background worker has stopped, so no further batches can be
+    /// delivered.
+    WorkerDisconnected,
+}
+
 /// Report one lane's spans. Cheap and non-blocking; safe to call from
 /// hot paths. `lane` names the synthetic thread (e.g. "GPU tq1s").
 /// Batches sent while no recording is active are dropped server-side
 /// (and capture should be gated on [`reporting_active`] anyway, so the
 /// steady-state idle cost is nil).
 pub fn report(lane: &str, spans: Vec<TargetSpan>) {
+    let _ = try_report(lane, spans);
+}
+
+/// Fallible variant of [`report`] for integrations that want to count
+/// local queue drops.
+pub fn try_report(lane: &str, spans: Vec<TargetSpan>) -> Result<(), ReportError> {
     if spans.is_empty() {
-        return;
+        return Ok(());
     }
     let sender = worker_sender();
     let batch = TargetSpanBatch {
@@ -135,11 +146,125 @@ pub fn report(lane: &str, spans: Vec<TargetSpan>) {
         spans,
     };
     match sender.try_send(batch) {
-        Ok(()) => {}
+        Ok(()) => Ok(()),
         Err(TrySendError::Full(_)) => {
             tracing::debug!("stax-target queue full; dropping span batch");
+            Err(ReportError::QueueFull)
         }
-        Err(TrySendError::Disconnected(_)) => {}
+        Err(TrySendError::Disconnected(_)) => Err(ReportError::WorkerDisconnected),
+    }
+}
+
+/// Origin captured at a CPU-side queue/dispatch point and carried with
+/// work until it starts running on a target lane.
+///
+/// This token remembers both "capture was active" and the optional OS
+/// thread/timestamp origin. Some supported platforms may be able to
+/// report spans while failing to capture a thread origin; in that case
+/// the token stays active but has no origin, so lane-only views still
+/// work.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CapturedOrigin {
+    active: bool,
+    origin: Option<TargetSpanOrigin>,
+}
+
+impl CapturedOrigin {
+    /// Token representing "stax was not recording this process".
+    pub fn inactive() -> Self {
+        Self::default()
+    }
+
+    /// Token representing an active capture where no OS-thread origin
+    /// was available.
+    pub fn active_without_origin() -> Self {
+        Self {
+            active: true,
+            origin: None,
+        }
+    }
+
+    /// Token with a concrete CPU-side queue/dispatch origin.
+    pub fn from_origin(origin: TargetSpanOrigin) -> Self {
+        Self {
+            active: true,
+            origin: Some(origin),
+        }
+    }
+
+    /// Whether this token was captured while stax was recording this
+    /// process.
+    pub fn is_active(self) -> bool {
+        self.active
+    }
+
+    /// The captured OS-thread/timestamp origin, if available.
+    pub fn origin(self) -> Option<TargetSpanOrigin> {
+        self.origin
+    }
+}
+
+/// Builder for a target span whose timestamps came from an external
+/// API.
+#[derive(Clone, Debug)]
+pub struct SpanBuilder {
+    name: String,
+    start_ns: u64,
+    end_ns: u64,
+    active: bool,
+    origin: Option<TargetSpanOrigin>,
+}
+
+impl SpanBuilder {
+    /// Create a span builder. The builder is active by default; use
+    /// [`with_captured_origin`](Self::with_captured_origin) when the
+    /// span should be gated by a queue/dispatch token.
+    pub fn new(name: impl Into<String>, start_ns: u64, end_ns: u64) -> Self {
+        Self {
+            name: name.into(),
+            start_ns,
+            end_ns,
+            active: true,
+            origin: None,
+        }
+    }
+
+    /// Attach an explicit CPU-side queue/dispatch origin.
+    pub fn with_origin(mut self, origin: TargetSpanOrigin) -> Self {
+        self.origin = Some(origin);
+        self
+    }
+
+    /// Attach an origin carried in a [`CapturedOrigin`] token when one
+    /// was available, and make [`build`](Self::build) return `None`
+    /// when the token was captured while stax was inactive.
+    pub fn with_captured_origin(mut self, captured: CapturedOrigin) -> Self {
+        self.active = captured.active;
+        self.origin = captured.origin;
+        self
+    }
+
+    /// Attach the current thread/timestamp as origin when available.
+    pub fn with_current_origin(self) -> Self {
+        match current_span_origin() {
+            Some(origin) => self.with_origin(origin),
+            None => self,
+        }
+    }
+
+    /// Validate and construct the reportable span.
+    pub fn build(self) -> Option<TargetSpan> {
+        if !self.active {
+            return None;
+        }
+        if self.end_ns <= self.start_ns {
+            return None;
+        }
+        let span = TargetSpan::new(self.name, self.start_ns, self.end_ns);
+        Some(match self.origin {
+            Some(origin) => span.with_origin(origin),
+            None => span,
+        })
     }
 }
 
@@ -176,9 +301,34 @@ impl Lane {
         current_span_origin()
     }
 
+    /// Capture the current CPU-side origin only when this process is
+    /// actively being recorded.
+    pub fn origin_if_active(&self) -> Option<TargetSpanOrigin> {
+        self.reporting_active()
+            .then(|| self.current_origin())
+            .flatten()
+    }
+
+    /// Capture a typed token at the queue/dispatch site, to carry with
+    /// work until it starts running on this lane.
+    pub fn capture_origin(&self) -> CapturedOrigin {
+        if !self.reporting_active() {
+            return CapturedOrigin::inactive();
+        }
+        match self.current_origin() {
+            Some(origin) => CapturedOrigin::from_origin(origin),
+            None => CapturedOrigin::active_without_origin(),
+        }
+    }
+
     /// Construct a span for this lane without an origin.
     pub fn span(&self, name: impl Into<String>, start_ns: u64, end_ns: u64) -> TargetSpan {
         TargetSpan::new(name, start_ns, end_ns)
+    }
+
+    /// Construct a validating builder for a span on this lane.
+    pub fn span_builder(&self, name: impl Into<String>, start_ns: u64, end_ns: u64) -> SpanBuilder {
+        SpanBuilder::new(name, start_ns, end_ns)
     }
 
     /// Construct a span for this lane with an explicit queue/dispatch
@@ -191,6 +341,23 @@ impl Lane {
         origin: TargetSpanOrigin,
     ) -> TargetSpan {
         TargetSpan::new(name, start_ns, end_ns).with_origin(origin)
+    }
+
+    /// Construct a span from a captured queue/dispatch token. Returns
+    /// `None` when capture was inactive or the duration is invalid.
+    pub fn span_with_captured_origin(
+        &self,
+        name: impl Into<String>,
+        start_ns: u64,
+        end_ns: u64,
+        captured: CapturedOrigin,
+    ) -> Option<TargetSpan> {
+        if !captured.is_active() {
+            return None;
+        }
+        self.span_builder(name, start_ns, end_ns)
+            .with_captured_origin(captured)
+            .build()
     }
 
     /// Construct a span for this lane with the current thread/timestamp
@@ -220,14 +387,45 @@ impl Lane {
         OpenSpan::new(name, Some(origin))
     }
 
+    /// Begin timing work that carries a queue/dispatch origin token.
+    pub fn begin_span_with_captured_origin(
+        &self,
+        name: impl Into<String>,
+        captured: CapturedOrigin,
+    ) -> Option<OpenSpan> {
+        if !captured.is_active() {
+            return None;
+        }
+        OpenSpan::new(name, captured.origin())
+    }
+
     /// Report a batch of spans on this lane.
     pub fn report(&self, spans: Vec<TargetSpan>) {
         report(&self.name, spans);
     }
 
+    /// Fallible variant of [`Lane::report`] for integrations that want
+    /// to count local queue drops.
+    pub fn try_report(&self, spans: Vec<TargetSpan>) -> Result<(), ReportError> {
+        try_report(&self.name, spans)
+    }
+
+    /// Report a batch only while the capture gate is active.
+    pub fn report_if_active(&self, spans: Vec<TargetSpan>) -> Result<(), ReportError> {
+        if !self.reporting_active() {
+            return Ok(());
+        }
+        self.try_report(spans)
+    }
+
     /// Report one span on this lane.
     pub fn report_one(&self, span: TargetSpan) {
         self.report(vec![span]);
+    }
+
+    /// Report one span only while the capture gate is active.
+    pub fn report_one_if_active(&self, span: TargetSpan) -> Result<(), ReportError> {
+        self.report_if_active(vec![span])
     }
 }
 
@@ -484,4 +682,67 @@ fn clock_now_ns() -> Option<u64> {
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn clock_now_ns() -> Option<u64> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CapturedOrigin, Lane, SpanBuilder, TargetSpanOrigin};
+
+    #[test]
+    fn captured_origin_distinguishes_inactive_from_no_origin() {
+        let inactive = CapturedOrigin::inactive();
+        assert!(!inactive.is_active());
+        assert!(inactive.origin().is_none());
+
+        let active = CapturedOrigin::active_without_origin();
+        assert!(active.is_active());
+        assert!(active.origin().is_none());
+    }
+
+    #[test]
+    fn span_builder_rejects_invalid_duration() {
+        assert!(SpanBuilder::new("bad", 10, 10).build().is_none());
+        assert!(SpanBuilder::new("backwards", 11, 10).build().is_none());
+    }
+
+    #[test]
+    fn span_builder_attaches_captured_origin() {
+        let origin = TargetSpanOrigin {
+            tid: 123,
+            timestamp_ns: 456,
+        };
+        let span = SpanBuilder::new("work", 1, 2)
+            .with_captured_origin(CapturedOrigin::from_origin(origin))
+            .build()
+            .expect("valid span");
+
+        let got = span.origin.expect("origin attached");
+        assert_eq!(got.tid, origin.tid);
+        assert_eq!(got.timestamp_ns, origin.timestamp_ns);
+    }
+
+    #[test]
+    fn lane_span_with_captured_origin_gates_on_active_token() {
+        let lane = Lane::new("test lane");
+        assert!(
+            lane.span_with_captured_origin("work", 1, 2, CapturedOrigin::inactive())
+                .is_none()
+        );
+
+        let span = lane
+            .span_with_captured_origin("work", 1, 2, CapturedOrigin::active_without_origin())
+            .expect("active token without origin still reports lane span");
+        assert_eq!(span.name, "work");
+        assert!(span.origin.is_none());
+    }
+
+    #[test]
+    fn span_builder_with_captured_origin_honors_inactive_token() {
+        assert!(
+            SpanBuilder::new("work", 1, 2)
+                .with_captured_origin(CapturedOrigin::inactive())
+                .build()
+                .is_none()
+        );
+    }
 }

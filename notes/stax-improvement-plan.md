@@ -83,31 +83,19 @@ Current API:
 - `current_span_origin()`
 - `span_with_current_origin(...)`
 - `report(lane, spans)`
+- `try_report(lane, spans)`
+- `CapturedOrigin`
+- `SpanBuilder`
 - `Lane::new(name)`
-- `Lane::{reporting_active,current_origin,span,span_with_origin,span_with_current_origin}`
-- `Lane::{begin_span,begin_span_with_origin,report,report_one}`
+- `Lane::{reporting_active,current_origin,origin_if_active,capture_origin}`
+- `Lane::{span,span_builder,span_with_origin,span_with_captured_origin,span_with_current_origin}`
+- `Lane::{begin_span,begin_span_with_origin,begin_span_with_captured_origin}`
+- `Lane::{report,try_report,report_if_active,report_one,report_one_if_active}`
 - `OpenSpan::{finish,finish_and_report}`
 - `now_ns()`
 
 Remaining API polish:
 
-- Add an explicit enqueue/dequeue helper for executor-style code:
-  - capture origin at enqueue/dispatch
-  - carry a small typed token through user work
-  - open a span at dequeue/start
-  - finish/report at completion
-- Consider a `SpanBuilder` for APIs that already have timestamps:
-  - lane name fixed by `Lane`
-  - span name
-  - start/end
-  - optional origin
-  - validates monotonic duration before enqueueing
-- Expose a cheap "capture origin if active" helper:
-  - `Lane::origin_if_active() -> Option<TargetSpanOrigin>`
-  - keeps call sites from repeating `reporting_active().then(...).flatten()`
-- Expose batch helpers that preserve the "no work when inactive" rule:
-  - `Lane::report_if_active(...)`
-  - maybe `Lane::try_report(...)` if queue-full feedback becomes useful
 - Decide whether a RAII guard is worth adding.
   - Current explicit `OpenSpan::finish_and_report` is correct and avoids
     "drop is protocol" footguns.

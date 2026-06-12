@@ -10,8 +10,8 @@
 //!
 //! The important pattern is the split:
 //!
-//! - enqueue side captures `Lane::current_origin()`;
-//! - worker side times the actual work with `begin_span_with_origin`;
+//! - enqueue side captures `Lane::capture_origin()`;
+//! - worker side times the actual work with `begin_span_with_captured_origin`;
 //! - stax can then render `CPU enqueue stack -> executor lane -> job`.
 
 use std::sync::mpsc;
@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 #[derive(Clone, Copy)]
 struct Work {
     kind: usize,
-    origin: Option<stax_target::TargetSpanOrigin>,
+    origin: stax_target::CapturedOrigin,
     busy_for: Duration,
 }
 
@@ -46,10 +46,9 @@ fn main() {
         }
         was_active = active;
 
-        let origin = active.then(|| lane.current_origin()).flatten();
         let work = Work {
             kind: seq % 4,
-            origin,
+            origin: lane.capture_origin(),
             busy_for: Duration::from_millis(2 + (seq % 5) as u64),
         };
         if tx.send(work).is_err() {
@@ -66,9 +65,7 @@ fn main() {
 
 fn worker_loop(lane: stax_target::Lane, rx: mpsc::Receiver<Work>) {
     while let Ok(work) = rx.recv() {
-        let open = work
-            .origin
-            .and_then(|origin| lane.begin_span_with_origin(job_name(work.kind), origin));
+        let open = lane.begin_span_with_captured_origin(job_name(work.kind), work.origin);
         busy_wait(work.busy_for);
         if let Some(open) = open {
             open.finish_and_report(&lane);
