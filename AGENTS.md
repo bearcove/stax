@@ -453,6 +453,16 @@ temporary archive directory, reopens it, queries
 `threads`/`top`/`flame`/`diagnose`, and runs `stax compare` against the
 archive itself.
 
+For the browser surface, use the checkout-local web target smoke:
+
+```
+just web-target-smoke
+```
+
+That records the same corpus, reopens the saved archive, starts Vite, and
+uses a real browser to verify target lanes, target-time mode, target-span
+details, and desktop/mobile layout against the checkout server.
+
 ### `stax top [-n N] [--sort self|total] [--tid TID]`
 
 Snapshot the top-N hottest functions in the active run.

@@ -485,8 +485,10 @@ Layers:
   - runs where daemon privileges are available
   - produces a small artifact log for failures
 - Web UI smoke:
-  - Playwright or browser automation against a deterministic saved/demo run
-  - checks nonblank flame, target columns, lane visibility, click behavior
+  - done: `just web-target-smoke` uses browser automation against a
+    deterministic saved corpus run restored into a checkout-local server
+  - checks nonblank flame, target columns, lane visibility, target-span detail
+    rendering, and desktop/mobile overflow
 
 Acceptance criteria:
 
@@ -666,6 +668,8 @@ Tasks:
   - done: blessed demo run (`just demo-corpus`)
   - done: `just archive-smoke` for save/reopen/compare using the blessed
     target-span corpus through a checkout-local server/CLI
+  - done: `just web-target-smoke` for checkout-local browser verification of
+    target lanes, target display mode, and target-span details
 
 Acceptance criteria:
 
@@ -751,6 +755,9 @@ Deferred:
    port, including a narrow mobile viewport smoke. Earlier stale installed
    daemon/protocol mismatch on `ws://127.0.0.1:8080` remains a useful warning:
    browser tests should point at a checkout-local server.
+7. Done: add `just web-target-smoke`, which records and reopens the blessed
+   corpus into a checkout-local server, starts Vite, and drives a browser
+   through target mode and target-span details at desktop and mobile widths.
 
 Done when:
 
@@ -842,8 +849,8 @@ Still open:
 - Should append-friendly saved-run event logs land before per-`RunId` live
   querying, or should those land together so archives and live history share
   one query selector model?
-- Which web visual checks are stable enough for automated CI once the browser
-  smoke has a deterministic saved/demo run to load?
+- Whether `just web-target-smoke` should run in CI by default once the runner
+  can provide browser dependencies and stax daemon access.
 
 ## Working rule for future agents
 

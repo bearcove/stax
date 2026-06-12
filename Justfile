@@ -26,6 +26,9 @@ frontend-check:
     pnpm --dir frontend typecheck
     pnpm --dir frontend build
 
+web-target-smoke:
+    bash frontend/scripts/web-target-smoke.sh
+
 target-span-check: fmt check-target test-target check-cli test-cli-target-lanes docs frontend-check
 
 install:

@@ -91,6 +91,20 @@ The UI and the CLI are interchangeable: a run started from the CLI shows up
 in the browser, and vice versa. They are both just clients of the same
 daemon.
 
+## Checking Target UI Behavior
+
+For visual or target-span UI changes, run the browser smoke against a
+checkout-local server instead of whatever daemon is installed on the machine:
+
+```bash
+just web-target-smoke
+```
+
+That records the blessed `stax-target/examples/corpus.rs` workload through a
+temporary checkout-local `stax-server`, saves and reopens the archive, starts
+Vite, then drives a real browser through the target-time and target-span
+details surfaces at desktop and mobile widths.
+
 ## Regenerating the RPC bindings
 
 The frontend talks to `stax-server` through generated TypeScript bindings in
