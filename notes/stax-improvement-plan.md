@@ -98,11 +98,11 @@ Current API:
 
 Remaining API polish:
 
-- Decide whether a RAII guard is worth adding.
-  - Current explicit `OpenSpan::finish_and_report` is correct and avoids
-    "drop is protocol" footguns.
-  - A RAII guard could be convenient, but only if it is opt-in and clearly
-    documented as best-effort telemetry.
+- Done: keep the explicit `OpenSpan::finish_and_report` model instead of a
+  RAII-on-drop guard.
+  - `drop` is not a protocol action.
+  - Integrators may still build their own best-effort guard on top, but the
+    blessed API keeps completion/reporting explicit.
 - Add queue/backpressure observability from the target side:
   - done: local dropped-batch count is exposed through `ReporterStats` and
     `stax diagnose` while capture is active
@@ -642,10 +642,11 @@ Tasks:
   - corpus/live tests for end-to-end behavior
   - web visual tests for layout and target-lane navigation
 - Consider Tracey requirements for:
-  - target spans in existing views
-  - origin-linked attribution
-  - persistence/reopen semantics
-  - diagnostics/hints
+  - checked: this repo currently has no Tracey config/spec files or
+    `[impl ...]`/`[verify ...]` annotations to extend
+  - if Tracey is introduced later, first requirements should cover target
+    spans in existing views, origin-linked attribution, persistence/reopen
+    semantics, and diagnostics/hints
 - Add `just` recipes or documented commands for:
   - done: focused Rust checks (`just check-target`, `just test-target`,
     `just check-cli`, `just test-cli-target-lanes`)
@@ -750,7 +751,8 @@ Done when:
 1. Public docs and README reflect all shipped behavior.
 2. Agent manual reflects operational workflows and pitfalls.
 3. Add or update `just`/docs commands for routine verification.
-4. Add Tracey coverage if the repo is configured for it.
+4. Done: checked Tracey coverage path; repo is not currently configured for
+   Tracey, so there is no coverage file to update.
 5. Remove stale "roadmap" statements once features land.
 
 Done when:
@@ -793,20 +795,39 @@ plainly when they block broad verification.
 
 ## Open design decisions
 
-- Should format v2 become a chunked directory layout or a single `.stax`
-  package first?
-- Should archive-local CLI queries grow beyond `stax compare`, or should
-  detailed archive inspection continue to load into `stax-server` with
-  `stax open`?
-- Should target-side queue-drop counters be pushed to the server, exposed
-  locally through an API, or both?
-- Should there be a distinct `stax lanes` command, or should `stax threads`
-  remain the single discovery surface?
-- How much Metal-specific sample code belongs in this repo versus docs that
-  point at bee/hx?
-- Should RAII span guards exist, or should stax keep the explicit
-  finish/report model only?
-- Which corpus checks are stable enough for CI without making tests brittle?
+Resolved for this phase:
+
+- Format v2 should become a chunked directory layout before a single-file
+  `.stax` package. The directory shape keeps manifests, events, symbols, and
+  blobs inspectable while the schema settles; packaging can wrap it later.
+- Detailed archive inspection should continue through `stax open` and the
+  normal query surfaces. Direct archive-local CLI should stay focused on
+  `stax compare` until there is a clear use case for a second query engine.
+- Target-side queue-drop counters are both local and server-visible:
+  `stax_target::reporter_stats()` / `Lane::reporter_stats()` for in-process
+  health, and `stax diagnose` for run/recording health while capture is
+  active.
+- `stax threads` remains the lane discovery surface for now. Add `stax lanes`
+  only if `threads` becomes crowded again despite the `kind` column, target
+  counts, and always-visible synthetic lanes.
+- Metal-specific code in this repo should stay SDK-neutral and
+  compile-checked. The real Metal 4 integration belongs in consumers such as
+  bee/hx, with this repo documenting the contract and providing
+  `examples/gpu_timestamps.rs`.
+- No RAII span guard in the blessed API for now. Explicit finish/report keeps
+  completion semantics visible and avoids treating `drop` as a protocol
+  action.
+- Stable CI corpus checks should be compile/unit/CLI-format checks first.
+  Live `just demo-corpus` / `just archive-smoke` belongs in gated CI once the
+  runner can manage the stax daemon lifecycle.
+
+Still open:
+
+- Should saved-run format v2 be implemented before per-`RunId` live querying,
+  or should those land together so archives and live history share one query
+  selector model?
+- Which web visual checks are stable enough for automated CI once the browser
+  smoke has a deterministic saved/demo run to load?
 
 ## Working rule for future agents
 
