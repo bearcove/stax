@@ -799,6 +799,7 @@ struct TargetSpanGroupAccum {
     span_name: Option<u32>,
     origin_tid: Option<u32>,
     origin_linked: bool,
+    origin_address: Option<u64>,
     origin_function_name: Option<u32>,
     origin_binary: Option<u32>,
     count: u64,
@@ -822,6 +823,7 @@ impl TargetSpanGroupAccum {
             span_name: self.span_name,
             origin_tid: self.origin_tid,
             origin_linked: self.origin_linked,
+            origin_address: self.origin_address,
             origin_function_name: self.origin_function_name,
             origin_binary: self.origin_binary,
             count: self.count,
@@ -846,11 +848,17 @@ fn build_target_spans_update(
     let mut groups: HashMap<TargetSpanGroupKey, TargetSpanGroupAccum> = HashMap::new();
     let mut predicate = make_predicate(filter, session_start);
 
-    for (event_tid, raw) in agg.iter_intervals(tid) {
+    for (event_tid, raw) in agg.iter_intervals(None) {
         let (stack, origin_tid) = match &raw.kind {
             IntervalKind::SyntheticSpan { stack, origin_tid } => (stack, origin_tid),
             IntervalKind::OnCpu | IntervalKind::OffCpu { .. } => continue,
         };
+        if let Some(filter_tid) = tid
+            && event_tid != filter_tid
+            && *origin_tid != Some(filter_tid)
+        {
+            continue;
+        }
         if !predicate(EventCtx::Interval {
             tid: event_tid,
             interval: raw,
@@ -891,6 +899,7 @@ fn build_target_spans_update(
                 span_name,
                 origin_tid: *origin_tid,
                 origin_linked: origin_addr.is_some(),
+                origin_address: origin_addr,
                 origin_function_name,
                 origin_binary,
                 count: 0,
@@ -912,6 +921,7 @@ fn build_target_spans_update(
             span_name,
             origin_tid: *origin_tid,
             origin_linked: origin_addr.is_some(),
+            origin_address: origin_addr,
             origin_function_name,
             origin_binary,
         });

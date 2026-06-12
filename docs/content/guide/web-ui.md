@@ -82,7 +82,8 @@ there is nothing to reload. The layout, top to bottom:
   (grouped target work by lane/span/origin, plus the most recent individual
   spans with duration and origin thread/link status). If a selected CPU thread
   has no linked spans while synthetic lanes do have work, the target-span pane
-  points at those lanes directly.
+  points at those lanes directly; if origins are linked, clicking the origin
+  switches to the CPU thread and opens the origin symbol's family tree.
 
 The UI and the CLI are interchangeable: a run started from the CLI shows up
 in the browser, and vice versa. They are both just clients of the same

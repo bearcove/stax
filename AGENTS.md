@@ -584,7 +584,9 @@ directly. Both live in `stax-live-proto` and are exposed on the local socket
   `wakers`, … most with a
   `subscribe_*` variant that pushes periodic updates over a `vox::Tx<…>`
   (a one-shot call is the snapshot form). `target_spans` returns grouped
-  target work by lane/span/origin plus capped recent individual spans.
+  target work by lane/span/origin plus capped recent individual spans; linked
+  origins include the CPU symbol address for navigation back to the queueing
+  stack.
 
 There is no separate ingest service — recording runs in-process inside
 `stax-server`.

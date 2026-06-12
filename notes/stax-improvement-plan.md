@@ -502,6 +502,9 @@ Current state:
 - The target-span detail RPC/web tab now also groups target work by
   lane/span/origin, with count, total duration, max duration, and newest
   occurrence.
+- Target-span details now include origin symbol addresses and include
+  origin-linked spans when the selected tid is the CPU dispatch thread, so the
+  web UI can jump from target work back to the queueing CPU symbol.
 
 Remaining work:
 
@@ -535,7 +538,8 @@ Remaining work:
     lane/name, origin tid/link state, and most recent individual spans
   - done: grouped origin cells show who queued linked work and switch to that
     CPU thread
-  - next: focus the exact CPU stack/symbol after selecting the origin thread
+  - done: linked origin cells focus the origin symbol's family tree after
+    selecting the CPU thread
 - Empty states:
   - started: target-span detail pane distinguishes no reported spans from
     target lanes that exist outside the selected thread
@@ -760,6 +764,7 @@ ddc build
 For frontend changes:
 
 ```bash
+pnpm --dir frontend typecheck
 pnpm --dir frontend build
 ```
 

@@ -60,7 +60,9 @@ There is also `set_paused` / `is_paused` to freeze and resume ingestion.
 
 `target_spans` / `subscribe_target_spans` return both grouped target work
 (lane + span name + origin, with count and total/max duration) and capped
-recent individual spans for detail panes.
+recent individual spans for detail panes. When an origin links to a sampled CPU
+stack, entries include the origin tid, origin symbol address, function name,
+and binary so clients can navigate back to the queueing CPU stack.
 
 Every query takes a `ViewParams` (thread filter, time range, exclude-symbol
 list), so any view can be scoped — the equivalent of the CLI's `--tid`.

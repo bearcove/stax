@@ -556,6 +556,7 @@ pub struct TargetSpanGroup {
     pub span_name: Option<u32>,
     pub origin_tid: Option<u32>,
     pub origin_linked: bool,
+    pub origin_address: Option<u64>,
     pub origin_function_name: Option<u32>,
     pub origin_binary: Option<u32>,
     pub count: u64,
@@ -576,6 +577,7 @@ pub struct TargetSpanEntry {
     pub span_name: Option<u32>,
     pub origin_tid: Option<u32>,
     pub origin_linked: bool,
+    pub origin_address: Option<u64>,
     pub origin_function_name: Option<u32>,
     pub origin_binary: Option<u32>,
 }

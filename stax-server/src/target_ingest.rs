@@ -870,6 +870,16 @@ mod tests {
         assert_eq!(span.on_cpu_ns, 3_000_000);
         assert_eq!(span.target_ns, 3_000_000);
 
+        let target_spans = profiler
+            .target_spans("r".to_owned(), view_params(Some(CPU_TID)))
+            .await;
+        assert_eq!(target_spans.groups.len(), 1);
+        assert_eq!(target_spans.groups[0].origin_tid, Some(CPU_TID));
+        assert_eq!(target_spans.groups[0].origin_address, Some(CPU_LEAF));
+        assert_eq!(target_spans.entries.len(), 1);
+        assert_eq!(target_spans.entries[0].origin_tid, Some(CPU_TID));
+        assert_eq!(target_spans.entries[0].origin_address, Some(CPU_LEAF));
+
         let threads = profiler.threads().await;
         let cpu_thread = threads
             .threads

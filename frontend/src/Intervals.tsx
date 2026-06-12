@@ -141,6 +141,7 @@ export function TargetSpansPanel({
   filter,
   threads,
   onSelectTid,
+  onSelectOrigin,
 }: {
   client: ProfilerClient;
   flameKey: string;
@@ -148,6 +149,7 @@ export function TargetSpansPanel({
   filter: LiveFilter;
   threads: ThreadInfo[];
   onSelectTid: (tid: number) => void;
+  onSelectOrigin: (tid: number, address: bigint | null) => void;
 }) {
   const [update, setUpdate] = useState<TargetSpanListUpdate | null>(null);
 
@@ -231,7 +233,7 @@ export function TargetSpansPanel({
                 group={group}
                 strings={update.strings}
                 threadName={threadName}
-                onSelectTid={onSelectTid}
+                onSelectOrigin={onSelectOrigin}
               />
             ))}
           </tbody>
@@ -254,7 +256,7 @@ export function TargetSpansPanel({
                 entry={e}
                 strings={update.strings}
                 threadName={threadName}
-                onSelectTid={onSelectTid}
+                onSelectOrigin={onSelectOrigin}
               />
             ))}
           </tbody>
@@ -320,12 +322,12 @@ function TargetSpanGroupRow({
   group,
   strings,
   threadName,
-  onSelectTid,
+  onSelectOrigin,
 }: {
   group: TargetSpanGroup;
   strings: string[];
   threadName: (tid: number) => string | null;
-  onSelectTid: (tid: number) => void;
+  onSelectOrigin: (tid: number, address: bigint | null) => void;
 }) {
   const lane = group.lane_name != null ? strings[group.lane_name] : "(lane)";
   const span = group.span_name != null ? strings[group.span_name] : "(span)";
@@ -341,11 +343,12 @@ function TargetSpanGroupRow({
       <OriginCell
         originTid={group.origin_tid}
         originLinked={group.origin_linked}
+        originAddress={group.origin_address}
         originFunctionName={group.origin_function_name}
         originBinary={group.origin_binary}
         strings={strings}
         threadName={threadName}
-        onSelectTid={onSelectTid}
+        onSelectOrigin={onSelectOrigin}
       />
     </tr>
   );
@@ -355,12 +358,12 @@ function TargetSpanRow({
   entry,
   strings,
   threadName,
-  onSelectTid,
+  onSelectOrigin,
 }: {
   entry: TargetSpanEntry;
   strings: string[];
   threadName: (tid: number) => string | null;
-  onSelectTid: (tid: number) => void;
+  onSelectOrigin: (tid: number, address: bigint | null) => void;
 }) {
   const startSec = (Number(entry.start_ns) / 1e9).toFixed(3);
   const lane = entry.lane_name != null ? strings[entry.lane_name] : "(lane)";
@@ -374,11 +377,12 @@ function TargetSpanRow({
       <OriginCell
         originTid={entry.origin_tid}
         originLinked={entry.origin_linked}
+        originAddress={entry.origin_address}
         originFunctionName={entry.origin_function_name}
         originBinary={entry.origin_binary}
         strings={strings}
         threadName={threadName}
-        onSelectTid={onSelectTid}
+        onSelectOrigin={onSelectOrigin}
       />
     </tr>
   );
@@ -387,19 +391,21 @@ function TargetSpanRow({
 function OriginCell({
   originTid,
   originLinked,
+  originAddress,
   originFunctionName,
   originBinary,
   strings,
   threadName,
-  onSelectTid,
+  onSelectOrigin,
 }: {
   originTid: number | null;
   originLinked: boolean;
+  originAddress: bigint | null;
   originFunctionName: number | null;
   originBinary: number | null;
   strings: string[];
   threadName: (tid: number) => string | null;
-  onSelectTid: (tid: number) => void;
+  onSelectOrigin: (tid: number, address: bigint | null) => void;
 }) {
   const originFn =
     originFunctionName != null ? strings[originFunctionName] : null;
@@ -411,7 +417,7 @@ function OriginCell({
         <button
           type="button"
           className="waker-link"
-          onClick={() => onSelectTid(originTid)}
+          onClick={() => onSelectOrigin(originTid, originAddress)}
           title={
             originBin
               ? `${originFn ?? "(unresolved)"} · ${originBin}`

@@ -261,6 +261,13 @@ export function App() {
   const [displayMode, setDisplayMode] = useState<DisplayMode>("on_cpu");
   const [theme, setTheme] = useState<Theme>(initialTheme);
   const [paused, setPaused] = useState(false);
+  const selectOrigin = (tid: number, address: bigint | null) => {
+    setSelectedTid(tid);
+    if (address !== null && address !== 0n) {
+      setSelected(address);
+      setPaneTab("neighbors");
+    }
+  };
 
   // Reflect the theme onto the <html> element so the CSS tokens flip,
   // and persist the user's choice across reloads.
@@ -737,6 +744,7 @@ export function App() {
                     filter={effectiveFilter}
                     threads={threads}
                     onSelectTid={setSelectedTid}
+                    onSelectOrigin={selectOrigin}
                   />
                 ) : (
                   <div className="placeholder">
