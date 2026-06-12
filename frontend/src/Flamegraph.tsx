@@ -6,6 +6,7 @@ import type {
   ProfilerClient,
 } from "./generated/profiler.generated.ts";
 import {
+  cpuOnlyNs,
   formatDuration,
   hydrateFlamegraph,
   offCpuTotal,
@@ -81,12 +82,15 @@ function findByKey(node: FlameView, target: string): FlameView | null {
 
 /// Pick the metric that drives flame box width for the active
 /// display mode. active = CPU time plus cooperating target spans;
-/// off-CPU = waiting time, broken down further by reason stripes;
-/// wall = active + off, the whole time the stack was active.
+/// cpu = sampled CPU time only; off-CPU = waiting time, broken down
+/// further by reason stripes; wall = active + off, the whole time
+/// the stack was active.
 export function widthOf(node: FlameView, mode: DisplayMode): bigint {
   switch (mode) {
     case "on_cpu":
       return node.on_cpu_ns;
+    case "cpu":
+      return cpuOnlyNs(node.on_cpu_ns, node.target_ns);
     case "target":
       return node.target_ns;
     case "off_cpu":
@@ -166,7 +170,7 @@ export function Flamegraph({
   filter: LiveFilter;
   matchText: ((t: string) => boolean) | null;
   hiddenKinds: Set<ObjKind>;
-  /// Drives flame box widths: active only, off-CPU only, or wall.
+  /// Drives flame box widths: active, CPU-only, target, off-CPU, or wall.
   displayMode: DisplayMode;
   /// Absolute flame key (relative to `update.root`) of the currently
   /// focused subtree, or null when there's no focus.
@@ -321,12 +325,15 @@ export function Flamegraph({
     : { boxes: [], depth: 0 };
   const innerHeight = (depth + 1) * ROW_H;
   const totalOn = update?.total_on_cpu_ns ?? 0n;
+  const totalTarget = update?.total_target_ns ?? 0n;
   const totalOff = update ? offCpuTotal(update.total_off_cpu) : 0n;
   const total =
     displayMode === "on_cpu"
       ? totalOn
+      : displayMode === "cpu"
+        ? cpuOnlyNs(totalOn, totalTarget)
       : displayMode === "target"
-        ? update?.total_target_ns ?? 0n
+        ? totalTarget
       : displayMode === "off_cpu"
         ? totalOff
         : totalOn + totalOff;
@@ -403,6 +410,10 @@ export function Flamegraph({
               {formatDuration(widthOf(hover.node, displayMode))} /{" "}
               {formatDuration(total)} ·{" "}
               {pct(widthOf(hover.node, displayMode), total)}
+              {" · "}CPU{" "}
+              {formatDuration(
+                cpuOnlyNs(hover.node.on_cpu_ns, hover.node.target_ns),
+              )}
               {" · "}active {formatDuration(hover.node.on_cpu_ns)}
               {hover.node.target_ns > 0n
                 ? ` (${formatDuration(hover.node.target_ns)} target, ${hover.node.target_spans.toString()} spans)`
@@ -471,12 +482,15 @@ function tooltipFor(
 ): string {
   const w = widthOf(node, mode);
   const offTotal = offCpuTotal(node.off_cpu);
+  const cpuOnly = cpuOnlyNs(node.on_cpu_ns, node.target_ns);
   const head = `${labelFor(node)} · ${formatDuration(w)} / ${formatDuration(total)} (${pct(w, total)})`;
   const target =
     node.target_ns > 0n
       ? ` · target ${formatDuration(node.target_ns)} (${node.target_spans.toString()} spans)`
       : "";
-  const split = `active ${formatDuration(node.on_cpu_ns)}${target} · off ${formatDuration(offTotal)}`;
+  const split =
+    `CPU ${formatDuration(cpuOnly)} · active ${formatDuration(node.on_cpu_ns)}` +
+    `${target} · off ${formatDuration(offTotal)}`;
   const segs = reasonSegments(node.off_cpu);
   const reasonLine = segs.length
     ? "\n" +
@@ -493,6 +507,8 @@ function modeLabel(mode: DisplayMode): string {
   switch (mode) {
     case "on_cpu":
       return "active time";
+    case "cpu":
+      return "CPU time";
     case "target":
       return "target time";
     case "off_cpu":

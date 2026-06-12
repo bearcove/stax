@@ -42,6 +42,7 @@ import { IntervalsPanel, TargetSpansPanel } from "./Intervals.tsx";
 import { Neighbors } from "./Neighbors.tsx";
 import { Timeline } from "./Timeline.tsx";
 import {
+  cpuOnlyNs,
   formatDuration,
   offCpuTotal,
   reasonSegments,
@@ -552,7 +553,11 @@ export function App() {
           <span className="spacer" />
           <span className="meta">
             {displayed
-              ? `${formatDuration(displayed.total_on_cpu_ns)} active · ${formatDuration(displayed.total_target_ns)} target · ${formatDuration(offCpuTotal(displayed.total_off_cpu))} off-CPU · ${displayed.entries.length} symbols`
+              ? `${formatDuration(cpuOnlyNs(displayed.total_on_cpu_ns, displayed.total_target_ns))} CPU · ` +
+                `${formatDuration(displayed.total_on_cpu_ns)} active · ` +
+                `${formatDuration(displayed.total_target_ns)} target · ` +
+                `${formatDuration(offCpuTotal(displayed.total_off_cpu))} off-CPU · ` +
+                `${displayed.entries.length} symbols`
               : "waiting for samples..."}
           </span>
         </div>
@@ -903,10 +908,10 @@ export type LangKind = "rust" | "c" | "cpp" | "swift" | "asm" | "unknown";
 export type ObjKind = "main" | "system" | "dylib" | "unknown";
 type PaneTab = "asm" | "neighbors" | "intervals" | "target-spans";
 
-/// What visual widths/ordering represent: active time, target time,
-/// off-CPU waiting time, or wall (active + off). Display-only; the
-/// wire carries every dimension on every node.
-export type DisplayMode = "on_cpu" | "target" | "off_cpu" | "wall";
+/// What visual widths/ordering represent: active time, sampled CPU
+/// time, target time, off-CPU waiting time, or wall (active + off).
+/// Display-only; the wire carries every dimension on every node.
+export type DisplayMode = "on_cpu" | "cpu" | "target" | "off_cpu" | "wall";
 
 export type EmptyRunContext = {
   displayMode: DisplayMode;
@@ -914,9 +919,11 @@ export type EmptyRunContext = {
   selectedLabel: string;
   selectedIsTargetLane: boolean;
   selectedActiveNs: bigint;
+  selectedCpuNs: bigint;
   selectedTargetNs: bigint;
   selectedOffCpuNs: bigint;
   totalActiveNs: bigint;
+  totalCpuNs: bigint;
   totalTargetNs: bigint;
   totalOffCpuNs: bigint;
   threadCount: number;
@@ -937,6 +944,7 @@ function buildEmptyRunContext(
   const totalTargetNs =
     displayed?.total_target_ns ??
     threads.reduce((sum, t) => sum + t.target_ns, 0n);
+  const totalCpuNs = cpuOnlyNs(totalActiveNs, totalTargetNs);
   const totalOffCpuNs =
     (displayed ? offCpuTotal(displayed.total_off_cpu) : null) ??
     threads.reduce((sum, t) => sum + offCpuTotal(t.off_cpu), 0n);
@@ -944,6 +952,7 @@ function buildEmptyRunContext(
     selectedThread?.on_cpu_ns ?? (selectedTid == null ? totalActiveNs : 0n);
   const selectedTargetNs =
     selectedThread?.target_ns ?? (selectedTid == null ? totalTargetNs : 0n);
+  const selectedCpuNs = cpuOnlyNs(selectedActiveNs, selectedTargetNs);
   const selectedOffCpuNs =
     selectedThread == null
       ? selectedTid == null
@@ -972,9 +981,11 @@ function buildEmptyRunContext(
           : `tid ${selectedTid}`,
     selectedIsTargetLane: selectedTid != null && selectedTid >= SYNTH_TID_BASE,
     selectedActiveNs,
+    selectedCpuNs,
     selectedTargetNs,
     selectedOffCpuNs,
     totalActiveNs,
+    totalCpuNs,
     totalTargetNs,
     totalOffCpuNs,
     threadCount: threads.length,
@@ -1090,9 +1101,10 @@ function WakersPanel({
 }
 
 /// Pill row that picks what flame-box widths represent. UI-only:
-/// every flame node carries active time, target-executor time, and a
-/// per-reason off-CPU breakdown, so flipping the mode just changes
-/// which dimension drives layout (and the flame-status footer).
+/// every flame node carries active time, sampled CPU time derivable
+/// from active-minus-target, target-executor time, and a per-reason
+/// off-CPU breakdown, so flipping the mode just changes which
+/// dimension drives layout (and the flame-status footer).
 function DisplayModeFilter({
   mode,
   onChange,
@@ -1105,6 +1117,11 @@ function DisplayModeFilter({
       id: "on_cpu",
       label: "active",
       title: "flame width = CPU time plus cooperating target spans (default)",
+    },
+    {
+      id: "cpu",
+      label: "cpu",
+      title: "flame width = sampled CPU time only, excluding target spans",
     },
     {
       id: "target",
@@ -1572,6 +1589,10 @@ function topMetricNs(
   switch (mode) {
     case "on_cpu":
       return self ? entry.self_on_cpu_ns : entry.total_on_cpu_ns;
+    case "cpu":
+      return self
+        ? cpuOnlyNs(entry.self_on_cpu_ns, entry.self_target_ns)
+        : cpuOnlyNs(entry.total_on_cpu_ns, entry.total_target_ns);
     case "target":
       return self ? entry.self_target_ns : entry.total_target_ns;
     case "off_cpu":
@@ -1764,7 +1785,13 @@ function ThreadSwitcher({
                     key={t.tid}
                     className={`thread-row${sel ? " selected" : ""}`}
                     onClick={() => pick(t.tid)}
-                    title={`${formatDuration(metricValue)} ${displayModeLabel(displayMode)} (${rPct}%) · ${formatDuration(t.on_cpu_ns)} active · ${formatDuration(t.target_ns)} target · ${formatDuration(offTotal)} off-CPU`}
+                    title={
+                      `${formatDuration(metricValue)} ${displayModeLabel(displayMode)} (${rPct}%) · ` +
+                      `${formatDuration(cpuOnlyNs(t.on_cpu_ns, t.target_ns))} CPU · ` +
+                      `${formatDuration(t.on_cpu_ns)} active · ` +
+                      `${formatDuration(t.target_ns)} target · ` +
+                      `${formatDuration(offTotal)} off-CPU`
+                    }
                   >
                     <span className="thread-check">{sel && <LuCheck />}</span>
                     <span className="thread-name">
@@ -1808,6 +1835,8 @@ function threadMetricNs(thread: ThreadInfo, mode: DisplayMode): bigint {
   switch (mode) {
     case "on_cpu":
       return thread.on_cpu_ns;
+    case "cpu":
+      return cpuOnlyNs(thread.on_cpu_ns, thread.target_ns);
     case "target":
       return thread.target_ns;
     case "off_cpu":
@@ -1821,6 +1850,8 @@ function displayModeLabel(mode: DisplayMode): string {
   switch (mode) {
     case "on_cpu":
       return "active time";
+    case "cpu":
+      return "CPU time";
     case "target":
       return "target time";
     case "off_cpu":
@@ -1848,6 +1879,8 @@ export function EmptyRunHint({
         ? context.selectedOffCpuNs
         : context.displayMode === "wall"
           ? context.selectedActiveNs + context.selectedOffCpuNs
+          : context.displayMode === "cpu"
+            ? context.selectedCpuNs
           : context.selectedActiveNs;
   const hasTargetElsewhere =
     context.targetLanes.length > 0 &&
@@ -1878,14 +1911,14 @@ export function EmptyRunHint({
     title = "no off-CPU time in this selection";
     detail = `${context.selectedLabel} has active time but no recorded waits in this view.`;
   } else if (
-    context.displayMode === "on_cpu" &&
+    (context.displayMode === "on_cpu" || context.displayMode === "cpu") &&
     selectedMetric === 0n &&
     context.selectedOffCpuNs > 0n
   ) {
     title = "this selection is wait-bound";
     detail = `${context.selectedLabel} has ${formatDuration(context.selectedOffCpuNs)} off-CPU time and no active stack samples in this view.`;
   } else if (
-    context.displayMode === "on_cpu" &&
+    context.displayMode === "cpu" &&
     selectedMetric === 0n &&
     context.selectedTargetNs > 0n
   ) {

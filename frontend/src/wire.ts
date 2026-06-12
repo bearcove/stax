@@ -132,6 +132,15 @@ export function offCpuTotal(b: OffCpuBreakdown): bigint {
   );
 }
 
+/// Active time minus cooperating target span time, saturated at zero.
+///
+/// Server-side `on_cpu_ns` intentionally includes target spans so old
+/// views and the default active mode show the whole execution lane. The
+/// web UI also offers a CPU-only mode that peels target time back out.
+export function cpuOnlyNs(activeNs: bigint, targetNs: bigint): bigint {
+  return activeNs > targetNs ? activeNs - targetNs : 0n;
+}
+
 /// One entry per reason that is non-zero, in display order.
 export type ReasonKey =
   | "idle"

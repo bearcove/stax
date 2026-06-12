@@ -56,21 +56,23 @@ there is nothing to reload. The layout, top to bottom:
 
 - **Topbar** — connection status, a pause toggle for ingestion, a thread
   switcher, a symbol search (substring or regex), display-mode pills
-  (active / target / off-CPU / wall), PMU-metric pills (IPC / L1-d misses /
-  branch mispredicts), a binary-kind filter, and a light/dark toggle.
-- **Timeline** — the selected display metric per bucket. In target mode the
-  strip is target-span duration over time; in wall mode it is active plus
-  off-CPU. Drag-to-brush time-range selection scopes every other panel.
+  (active / CPU / target / off-CPU / wall), PMU-metric pills (IPC / L1-d
+  misses / branch mispredicts), a binary-kind filter, and a light/dark toggle.
+- **Timeline** — the selected display metric per bucket. Active mode includes
+  sampled CPU time plus cooperating target spans; CPU mode peels target spans
+  back out; target mode shows target-span duration over time; wall mode is
+  active plus off-CPU. Drag-to-brush time-range selection scopes every other
+  panel.
 - **Off-CPU reason legend** and a **wakers panel** — what threads were
   blocked on, and who woke them.
 - **Flamegraph** — the active tree (CPU time plus cooperating target spans),
   the same data as
   [`stax flame`](@/guide/inspecting-a-run.md#stax-flame), rendered as a
   zoomable graph with focus / drop-symbol / Esc keyboard shortcuts and
-  off-CPU reason stripes. Target mode makes flame width equal exact
-  target-span duration. Hover text breaks out target time and span counts.
-  Origin-linked target spans appear under the CPU stack that queued them when
-  that thread is selected.
+  off-CPU reason stripes. CPU mode makes flame width sampled CPU time only;
+  target mode makes flame width exact target-span duration. Hover text breaks
+  out CPU, active, target time, and span counts. Origin-linked target spans
+  appear under the CPU stack that queued them when that thread is selected.
 - **Top-N table** — the hot-leaf or target-span leaderboard, the same data as
   [`stax top`](@/guide/inspecting-a-run.md#stax-top), sortable by self or
   total. Its bar and primary duration follow the same display metric as the

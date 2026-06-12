@@ -515,10 +515,10 @@ Implemented and deferred work:
 
 - Metric selector:
   - done: active time
+  - done: CPU-only time
   - done: target time
   - done: off-CPU time
   - done: wall time
-  - later: pure CPU time if useful as a separate metric
   - later: wait-reason-specific modes
 - Flamegraph:
   - done: target-time width mode

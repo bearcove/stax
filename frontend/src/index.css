@@ -453,6 +453,10 @@ body {
   background: var(--target-color);
 }
 
+.thread-bar-fill[data-mode="cpu"] {
+  background: var(--kind-main-color);
+}
+
 .thread-bar-fill[data-mode="off_cpu"] {
   background: var(--reason-lock);
 }
@@ -721,6 +725,11 @@ table.top-table tr.match {
 .timeline-area.mode-target {
   fill: var(--target-bg-soft);
   stroke: var(--target-color);
+}
+
+.timeline-area.mode-cpu {
+  fill: color-mix(in srgb, var(--kind-main-color) 20%, transparent);
+  stroke: var(--kind-main-color);
 }
 
 .timeline-area.mode-off_cpu {
@@ -1246,6 +1255,10 @@ table.top-table td.num .num-bar-fill.metric-target {
   background: var(--target-color);
 }
 
+table.top-table td.num .num-bar-fill.metric-cpu {
+  background: var(--kind-main-color);
+}
+
 table.top-table td.num .num-bar-fill.metric-off_cpu {
   background: var(--reason-lock);
 }
@@ -1744,8 +1757,12 @@ table.asm tr:not(.src-header) td.asm-line {
   font-family: var(--font-mono);
 }
 
-/* === Display-mode pill (on-CPU / off-CPU / wall) =============== */
+/* === Display-mode pill (active / CPU / target / off-CPU / wall) === */
 .kind-pill.mode-on_cpu {
+  color: var(--kind-main-color);
+  border-color: color-mix(in srgb, var(--kind-main-color) 35%, transparent);
+}
+.kind-pill.mode-cpu {
   color: var(--kind-main-color);
   border-color: color-mix(in srgb, var(--kind-main-color) 35%, transparent);
 }

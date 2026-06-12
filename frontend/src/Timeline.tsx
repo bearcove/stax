@@ -7,6 +7,7 @@ import type {
   TimelineUpdate,
 } from "./generated/profiler.generated.ts";
 import type { DisplayMode } from "./App.tsx";
+import { cpuOnlyNs } from "./wire.ts";
 
 /// Compact timeline strip across the top of the page. Each bucket is
 /// drawn as a compact area; height is proportional to the selected
@@ -156,6 +157,10 @@ export function Timeline({
       </svg>
       <div className="timeline-footer">
         {displayModeLabel(displayMode)} ·{" "}
+        {(
+          Number(cpuOnlyNs(update.total_on_cpu_ns, update.total_target_ns)) / 1e9
+        ).toFixed(2)}
+        s CPU ·{" "}
         {(Number(update.total_on_cpu_ns) / 1e9).toFixed(2)}s active ·{" "}
         {(Number(update.total_target_ns) / 1e9).toFixed(2)}s target ·{" "}
         {(Number(update.total_off_cpu_ns) / 1e9).toFixed(2)}s off-CPU ·{" "}
@@ -185,6 +190,8 @@ function bucketMetricNs(bucket: TimelineBucket, mode: DisplayMode): bigint {
   switch (mode) {
     case "on_cpu":
       return bucket.on_cpu_ns;
+    case "cpu":
+      return cpuOnlyNs(bucket.on_cpu_ns, bucket.target_ns);
     case "target":
       return bucket.target_ns;
     case "off_cpu":
@@ -198,6 +205,8 @@ function displayModeLabel(mode: DisplayMode): string {
   switch (mode) {
     case "on_cpu":
       return "active";
+    case "cpu":
+      return "CPU";
     case "target":
       return "target";
     case "off_cpu":
