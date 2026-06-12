@@ -386,20 +386,21 @@ worth flaming.
 
 ```
 $ stax threads -n 5
-    cpu ms  target ms off-CPU ms  samples    spans   blocked  tid    name
-   1240.20       0.00      31.40     1102        0      lock  501    main
-    860.00       0.00      99.00      710        0     sleep  592    tokio-runtime-worker
-      0.00     220.10       0.00      198      198         -  4293918720 GPU tq1s
+    cpu ms  target ms off-CPU ms  samples    spans    kind   blocked  tid    name
+   1240.20       0.00      31.40     1102        0  thread      lock  501    main
+    860.00       0.00      99.00      710        0  thread     sleep  592    tokio-runtime-worker
+      0.00     220.10       0.00      198      198  target         -  4293918720 GPU tq1s
     …
 ```
 
 The `cpu ms` column is real on-CPU time. `target ms` is exact duration from
 cooperating target spans: for synthetic lanes it is lane active time; for CPU
 threads it is origin-linked target work queued by that thread. `samples` is PET
-sample count and `spans` is target span count. The `blocked` column names the
-largest off-CPU bucket for that thread (`idle`, `lock`, `sem`, `ipc`, `ioR`,
-`ioW`, `ready`, `sleep`, `conn`, `other`). Off-CPU intervals are recorded on
-both macOS and Linux.
+sample count and `spans` is target span count. The `kind` column is `thread`
+for real sampled threads and `target` for synthetic target lanes. The `blocked`
+column names the largest off-CPU bucket for that thread (`idle`, `lock`, `sem`,
+`ipc`, `ioR`, `ioW`, `ready`, `sleep`, `conn`, `other`). Off-CPU intervals are
+recorded on both macOS and Linux.
 
 `-n 0` prints every thread. Default 20. Synthetic target lanes with spans are
 included even when they would otherwise fall past the cutoff.

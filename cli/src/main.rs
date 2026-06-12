@@ -829,8 +829,8 @@ fn print_threads(update: &ThreadsUpdate, limit: u32) {
         return;
     }
     println!(
-        "{:>10} {:>10} {:>10} {:>8} {:>8} {:>9}  tid    name",
-        "cpu ms", "target ms", "off-CPU ms", "samples", "spans", "blocked",
+        "{:>10} {:>10} {:>10} {:>8} {:>8} {:>7} {:>9}  tid    name",
+        "cpu ms", "target ms", "off-CPU ms", "samples", "spans", "kind", "blocked",
     );
     let take = if limit == 0 {
         threads.len()
@@ -853,12 +853,13 @@ fn print_threads(update: &ThreadsUpdate, limit: u32) {
         let dominant = dominant_off_cpu_reason(&t.off_cpu);
         let cpu_ns = t.on_cpu_ns.saturating_sub(t.target_ns);
         println!(
-            "{:>10.2} {:>10.2} {:>10.2} {:>8} {:>8} {:>9}  {:<6} {}",
+            "{:>10.2} {:>10.2} {:>10.2} {:>8} {:>8} {:>7} {:>9}  {:<6} {}",
             cpu_ns as f64 / 1e6,
             t.target_ns as f64 / 1e6,
             off_total as f64 / 1e6,
             t.pet_samples,
             t.target_spans,
+            thread_kind(t),
             dominant,
             t.tid,
             t.name.as_deref().unwrap_or("(unnamed)"),
@@ -866,6 +867,14 @@ fn print_threads(update: &ThreadsUpdate, limit: u32) {
     }
     if threads.len() > visible.len() {
         println!("…{} more non-target threads", threads.len() - visible.len());
+    }
+}
+
+fn thread_kind(thread: &stax_live_proto::ThreadInfo) -> &'static str {
+    if thread.tid >= SYNTH_TID_BASE {
+        "target"
+    } else {
+        "thread"
     }
 }
 
@@ -1194,7 +1203,10 @@ fn mentions_metal_cooperation(function_name: Option<&str>, binary: Option<&str>)
 
 #[cfg(test)]
 mod tests {
-    use super::{SYNTH_TID_BASE, empty_view_hint, mentions_metal_cooperation, target_ingest_hints};
+    use super::{
+        SYNTH_TID_BASE, empty_view_hint, mentions_metal_cooperation, target_ingest_hints,
+        thread_kind,
+    };
     use stax_live_proto::{OffCpuBreakdown, TargetIngestDiagnostics, ThreadInfo, ThreadsUpdate};
 
     #[test]
@@ -1302,6 +1314,15 @@ mod tests {
         assert!(hints[0].contains("2 of 3"));
         assert!(hints[0].contains("queue/submit time"));
         assert!(hints[0].contains("stax flame --tid <cpu tid>"));
+    }
+
+    #[test]
+    fn thread_kind_labels_synthetic_target_lanes() {
+        let cpu = thread(123, Some("main"), 1, 0, 1, 0);
+        let target = thread(SYNTH_TID_BASE, Some("gpu"), 1, 0, 0, 1);
+
+        assert_eq!(thread_kind(&cpu), "thread");
+        assert_eq!(thread_kind(&target), "target");
     }
 
     fn thread(

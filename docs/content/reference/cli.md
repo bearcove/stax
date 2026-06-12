@@ -166,7 +166,9 @@ synthetic target lane has reported spans. Empty flame views also get the same
 Per-thread and synthetic-lane CPU/target/off-CPU breakdown for the current
 run, sorted by total activity. CPU thread rows include origin-linked target
 spans queued from that thread, and synthetic target lanes with spans are
-included even if they fall past the normal `-n` cutoff. See
+included even if they fall past the normal `-n` cutoff. The output includes a
+`kind` column: `thread` for real sampled threads and `target` for synthetic
+target lanes. See
 [Inspecting a Run](@/guide/inspecting-a-run.md#stax-threads).
 
 ```text

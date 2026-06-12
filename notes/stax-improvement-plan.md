@@ -215,6 +215,8 @@ Already present:
   - thread activity with no frames yet
 - `threads` always includes synthetic target lanes with spans past the normal
   limit.
+- `threads` has a `kind` column (`thread` / `target`) so synthetic lanes are
+  visually distinct from real sampled threads.
 - `diagnose` prints hints for:
   - no target batches
   - bad span durations
@@ -223,10 +225,6 @@ Already present:
 
 Remaining CLI work:
 
-- Make `stax threads` visually separate real threads from synthetic lanes:
-  - add a `kind` or marker column if the output stays readable
-  - or print target lanes first/under a separate heading
-  - do not bury zero-on-CPU target lanes
 - Teach `stax diagnose` about:
   - wrong pid batches
   - batches received while no run is active
