@@ -43,7 +43,7 @@ archive-smoke:
     socket="$(mktemp -u "${TMPDIR:-/tmp}/stax-server.XXXXXX.sock")"
     archive="$(mktemp -d "${TMPDIR:-/tmp}/stax-demo-corpus.XXXXXX")"
     echo "archive: $archive"
-    STAX_SERVER_SOCKET="$socket" STAX_SERVER_WS_BIND=127.0.0.1:0 cargo run -p stax-server &
+    STAX_SERVER_SOCKET="$socket" STAX_SERVER_WS_BIND=127.0.0.1:0 cargo run -q -p stax-server &
     server_pid=$!
     cleanup() {
         kill "$server_pid" 2>/dev/null || true
@@ -61,12 +61,12 @@ archive-smoke:
         echo "stax-server socket did not appear: $socket" >&2
         exit 1
     fi
-    STAX_SERVER_SOCKET="$socket" cargo run -p stax -- record -- cargo run -p stax-target --example corpus
-    STAX_SERVER_SOCKET="$socket" cargo run -p stax -- save "$archive"
+    STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- record -- cargo run -q -p stax-target --example corpus
+    STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- save "$archive"
     ls -1 "$archive"
-    STAX_SERVER_SOCKET="$socket" cargo run -p stax -- open "$archive"
-    STAX_SERVER_SOCKET="$socket" cargo run -p stax -- threads -n 0
-    STAX_SERVER_SOCKET="$socket" cargo run -p stax -- top -n 20 --sort self
-    STAX_SERVER_SOCKET="$socket" cargo run -p stax -- flame --threshold-pct 0 -d 6
-    STAX_SERVER_SOCKET="$socket" cargo run -p stax -- diagnose
-    STAX_SERVER_SOCKET="$socket" cargo run -p stax -- compare "$archive" "$archive"
+    STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- open "$archive"
+    STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- threads -n 20
+    STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- top -n 20 --sort self
+    STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- flame --threshold-pct 2 -d 4
+    STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- diagnose
+    STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- compare "$archive" "$archive"
