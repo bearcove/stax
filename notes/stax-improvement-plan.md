@@ -725,8 +725,10 @@ Tasks:
     the run selector, target lanes, target display mode, and target-span
     details
   - done: GitHub Actions focused target-span workflow, with `bearcove/vox`
-    checked out as the required sibling and live archive/browser smokes gated
-    behind manual dispatch
+    checked out as the required sibling
+  - done: live archive/browser smokes run on the `bearcove-ubuntu-24.04`
+    runner for normal push/PR checks, with manual `workflow_dispatch`
+    retained for explicit reruns
 
 Acceptance criteria:
 
@@ -813,12 +815,6 @@ Done when:
   `stax diagnose --run <ID>` works for stopped in-memory history.
 - A macOS corpus run reports linked origins with sane PET distances instead
   of every good origin being `too_far`.
-
-Deferred:
-
-- `just archive-smoke` / `just web-target-smoke` are wired as manual
-  `workflow_dispatch` checks; making them required by default waits until the
-  runner contract for local stax server/browser/profiling access is settled.
 
 ### Phase E: web target-time polish
 
@@ -915,11 +911,11 @@ Resolved for this phase:
 - No RAII span guard in the blessed API for now. Explicit finish/report keeps
   completion semantics visible and avoids treating `drop` as a protocol
   action.
-- Stable CI corpus checks should be compile/unit/CLI-format checks first.
-  Done: focused checks run on PRs/pushes in `.github/workflows/target-spans.yml`.
-  Live `just archive-smoke` / `just web-target-smoke` are gated by manual
-  workflow dispatch until the runner contract for recording and browser access
-  is settled.
+- Stable CI corpus checks should cover both compile/unit/CLI-format behavior
+  and the checkout-local live path. Done: focused checks plus live
+  archive/browser smokes run on PRs/pushes in
+  `.github/workflows/target-spans.yml`; manual workflow dispatch remains for
+  explicit reruns.
 - Saved-run format v2 is implemented as a chunked directory layout and a
   single-file `.stax` package for new saves, with an append-friendly
   `events.jsonl` sidecar in the directory form, embedded event records in the
@@ -929,10 +925,7 @@ Resolved for this phase:
   selector via `select-run` and non-mutating per-RPC `RunId` selectors for
   reporting surfaces.
 
-Still open:
-
-- Whether the manual live smokes should become required checks once the runner
-  can provide browser dependencies and stax daemon/profiling access.
+Still open: none for the scope of this plan.
 
 ## Working rule for future agents
 

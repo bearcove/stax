@@ -108,7 +108,7 @@ jobs:
 
   live-smokes:
     name: Live archive and web smokes
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.live_smokes }}
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.live_smokes }}
     runs-on: bearcove-ubuntu-24.04
     timeout-minutes: 45
     defaults:

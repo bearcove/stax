@@ -298,9 +298,9 @@ just target-span-check       # all focused target-span checks above
 GitHub Actions runs the same focused target-span verifier in
 `.github/workflows/target-spans.yml`. That workflow checks out `bearcove/vox`
 as a sibling of stax because this workspace patches the vox crates to
-`../vox/rust/*`. Its live archive/browser smokes are manual
-`workflow_dispatch` checks; enable `live_smokes` only on a runner that can run
-checkout-local stax servers, recording, Vite, and Playwright.
+`../vox/rust/*`. The same workflow also runs live archive/browser smokes on
+the `bearcove-ubuntu-24.04` runner for normal push/PR checks; manual
+`workflow_dispatch` keeps the `live_smokes` switch for explicit reruns.
 
 If you need to abort:
 

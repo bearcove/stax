@@ -258,9 +258,10 @@ queries the restored run through `threads`/`top`/`flame`/`diagnose`, and runs
 text plus JSON `stax compare` across the saved artifacts.
 
 The focused target-span workflow runs the static verifier on normal PRs. The
-archive and web smokes are available as manual `workflow_dispatch` checks in
-`.github/workflows/target-spans.yml` because they need a runner that can
-manage local stax servers, recording, Vite, and Playwright.
+same workflow also runs the archive and web smokes on the
+`bearcove-ubuntu-24.04` runner, which can manage local stax servers,
+recording, Vite, and Playwright. Manual `workflow_dispatch` keeps the
+`live_smokes` switch for explicit reruns.
 
 ## Putting it together
 
