@@ -133,7 +133,10 @@ span count, and function/span name. For a synthetic target lane,
 includes those spans under the CPU dispatch stack; `--sort total` then charges
 the target duration to dispatch callers. If Metal command/dispatch frames are
 visible but no target lane is present, `stax top` prints a stderr hint about
-`stax-target` Metal 4 timestamp-counter cooperation.
+`stax-target` Metal 4 timestamp-counter cooperation. If the view is empty but
+the run has off-CPU/thread activity or target lanes outside a `--tid` filter,
+`top` prints a discovery hint for `stax threads -n 0`, target-lane tids, or
+`stax-target` integration.
 
 ## `stax flame`
 
@@ -155,7 +158,8 @@ active time, target time, span count, and percent columns. When target spans
 carry origins, `--tid <cpu tid>` can render
 `(all) -> CPU caller -> lane -> span name`. Like `top`, `flame` prints a Metal
 cooperation hint when Metal command/dispatch frames are visible but no
-synthetic target lane has reported spans.
+synthetic target lane has reported spans. Empty flame views also get the same
+`threads` / target-lane / `stax-target` discovery hints as `top`.
 
 ## `stax threads`
 

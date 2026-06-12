@@ -54,7 +54,10 @@ that CPU thread; `--sort total` charges it to the dispatch stack, while
 
 When `stax top` sees Metal command/dispatch frames but no synthetic target
 lane, it prints a hint to stderr suggesting Metal 4 timestamp-counter
-cooperation through `stax-target`.
+cooperation through `stax-target`. Empty `top` views also print discovery
+hints when the run has off-CPU/thread activity or target lanes outside a
+`--tid` filter, pointing you at `stax threads -n 0`, the relevant lane tid, or
+generic `stax-target` span integration.
 
 ## stax flame
 
@@ -94,7 +97,9 @@ carry origins, filtering to the origin CPU tid can render
 The flamegraph the server holds is unbounded; `--max-depth` only controls
 how much the CLI prints. Like `top`, `flame` prints a Metal cooperation hint
 to stderr when Metal command/dispatch frames are visible but no target lane
-has reported spans.
+has reported spans. If the flame root is otherwise empty while the run has
+off-CPU/thread activity or target lanes elsewhere, it prints the same
+discovery hints as `top`.
 
 ## stax threads
 

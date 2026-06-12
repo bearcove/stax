@@ -547,7 +547,10 @@ TypeScript bindings are generated into `frontend/src/generated/` by
   either no run is active, or the run hasn't ingested any PET samples or
   target spans yet (very early in the lifecycle). Try `stax status` to
   confirm a run exists, or `stax wait --for-samples 100` to block until CPU
-  samples are in.
+  samples are in. If the CLI prints an extra hint about off-CPU/thread
+  activity, target lanes, or `stax-target`, follow that hint first: the CPU
+  view may be empty because the interesting work is waiting, hidden behind an
+  executor, or filtered away from an existing synthetic lane.
 
 - **Hardened-runtime targets** (macOS) are out of scope. The attachment
   helper is same-uid and intended for normal local developer processes.

@@ -14,7 +14,7 @@ use stax_core::cmd_setup_mac;
 use stax_live_proto::{
     DiagnosticsSnapshot, FlameNode, FlamegraphUpdate, LiveFilter, OffCpuBreakdown, ProfilerClient,
     RunControlClient, RunSummary, ServerStatus, StopReason, ThreadsUpdate, TopEntry, TopSort,
-    ViewParams, WaitCondition, WaitOutcome,
+    TopUpdate, ViewParams, WaitCondition, WaitOutcome,
 };
 
 #[cfg(target_os = "macos")]
@@ -723,12 +723,12 @@ async fn run_top(args: TopArgs) -> Result<(), Box<dyn Error>> {
         )
         .await
         .map_err(|e| format!("{e:?}"))?;
-    let entries = update.entries;
-    if entries.is_empty() {
-        println!("(no samples or target spans yet — is a recording in progress?)");
+    let threads = client.threads().await.ok();
+    if update.entries.is_empty() {
+        print_empty_top(&update, threads.as_ref(), args.tid, args.limit);
         return Ok(());
     }
-    let threads = client.threads().await.ok();
+    let entries = update.entries;
     println!(
         "{:>10} {:>10} {:>8} {:>8}  function",
         "active ms", "target ms", "samples", "spans",
@@ -910,6 +910,9 @@ async fn run_flame(args: FlameArgs) -> Result<(), Box<dyn Error>> {
         .map_err(|e| format!("{e:?}"))?;
     let threads = client.threads().await.ok();
     print_flame(&update, args.max_depth, args.threshold_pct);
+    if update.root.children.is_empty() {
+        maybe_print_empty_view_hint("flame", &update.total_off_cpu, threads.as_ref(), args.tid);
+    }
     maybe_print_metal_target_hint(
         threads.as_ref(),
         flame_mentions_metal_cooperation(&update.root, &update.strings),
@@ -958,6 +961,102 @@ fn off_cpu_total_ns(b: &OffCpuBreakdown) -> u64 {
         + b.sleep_ns
         + b.connect_ns
         + b.other_ns
+}
+
+fn print_empty_top(
+    update: &TopUpdate,
+    threads: Option<&ThreadsUpdate>,
+    tid: Option<u32>,
+    limit: u32,
+) {
+    if limit == 0 {
+        println!("(no entries requested — --limit is 0)");
+        return;
+    }
+    println!("(no CPU samples or target spans in this view yet — is a recording in progress?)");
+    maybe_print_empty_view_hint("top", &update.total_off_cpu, threads, tid);
+}
+
+fn maybe_print_empty_view_hint(
+    command: &str,
+    off_cpu: &OffCpuBreakdown,
+    threads: Option<&ThreadsUpdate>,
+    tid: Option<u32>,
+) {
+    if let Some(hint) = empty_view_hint(command, off_cpu, threads, tid) {
+        eprintln!("{hint}");
+    }
+}
+
+fn empty_view_hint(
+    command: &str,
+    off_cpu: &OffCpuBreakdown,
+    threads: Option<&ThreadsUpdate>,
+    tid: Option<u32>,
+) -> Option<String> {
+    let target_lanes = threads.map(target_lane_summaries).unwrap_or_default();
+    if !target_lanes.is_empty() {
+        let first_tid = target_lanes[0].0;
+        let lanes = format_target_lane_summaries(&target_lanes);
+        let filter = tid
+            .map(|tid| format!(" outside `--tid {tid}`"))
+            .unwrap_or_default();
+        return Some(format!(
+            "hint: target lanes exist{filter}: {lanes}. Try `stax {command} --tid {first_tid}` or `stax threads -n 0`."
+        ));
+    }
+
+    let off_cpu_ns = off_cpu_total_ns(off_cpu);
+    if off_cpu_ns > 0 {
+        return Some(format!(
+            "hint: this {command} view has no CPU or target-span frames, but the run has {:.3}s off-CPU time. Run `stax threads -n 0`; if the interesting work runs on a GPU, accelerator, executor, or runtime lane, link `stax-target` and report spans.",
+            off_cpu_ns as f64 / 1e9
+        ));
+    }
+
+    if threads.map(threads_have_activity).unwrap_or(false) {
+        return Some(format!(
+            "hint: thread activity exists but no CPU or target-span frames landed in this {command} view. Try `stax wait --for-samples 100`, then `stax threads -n 0`; for executor/GPU/accelerator work, add `stax-target` spans."
+        ));
+    }
+
+    None
+}
+
+fn threads_have_activity(threads: &ThreadsUpdate) -> bool {
+    threads.threads.iter().any(|thread| {
+        thread.on_cpu_ns > 0
+            || off_cpu_total_ns(&thread.off_cpu) > 0
+            || thread.pet_samples > 0
+            || thread.target_spans > 0
+    })
+}
+
+fn target_lane_summaries(threads: &ThreadsUpdate) -> Vec<(u32, String)> {
+    threads
+        .threads
+        .iter()
+        .filter(|thread| thread.tid >= SYNTH_TID_BASE && thread.target_spans > 0)
+        .map(|thread| {
+            (
+                thread.tid,
+                thread
+                    .name
+                    .as_deref()
+                    .unwrap_or("(unnamed target lane)")
+                    .to_owned(),
+            )
+        })
+        .take(3)
+        .collect()
+}
+
+fn format_target_lane_summaries(lanes: &[(u32, String)]) -> String {
+    lanes
+        .iter()
+        .map(|(tid, name)| format!("{tid} {name}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn print_flame_node(
@@ -1095,7 +1194,8 @@ fn mentions_metal_cooperation(function_name: Option<&str>, binary: Option<&str>)
 
 #[cfg(test)]
 mod tests {
-    use super::mentions_metal_cooperation;
+    use super::{SYNTH_TID_BASE, empty_view_hint, mentions_metal_cooperation};
+    use stax_live_proto::{OffCpuBreakdown, ThreadInfo, ThreadsUpdate};
 
     #[test]
     fn metal_hint_detects_dispatch_and_command_buffer_frames() {
@@ -1115,6 +1215,73 @@ mod tests {
             Some("std::thread::park"),
             Some("libstd")
         ));
+    }
+
+    #[test]
+    fn empty_view_hint_points_to_existing_target_lanes() {
+        let threads = ThreadsUpdate {
+            threads: vec![thread(
+                SYNTH_TID_BASE + 7,
+                Some("executor demo"),
+                5,
+                0,
+                0,
+                1,
+            )],
+        };
+        let hint = empty_view_hint("top", &OffCpuBreakdown::default(), Some(&threads), Some(42))
+            .expect("target lane hint");
+
+        assert!(hint.contains("outside `--tid 42`"));
+        assert!(hint.contains("4293918727 executor demo"));
+        assert!(hint.contains("stax top --tid 4293918727"));
+    }
+
+    #[test]
+    fn empty_view_hint_points_off_cpu_runs_to_threads_and_target_spans() {
+        let off_cpu = OffCpuBreakdown {
+            sleep_ns: 2_000_000_000,
+            ..OffCpuBreakdown::default()
+        };
+        let hint = empty_view_hint("flame", &off_cpu, None, None).expect("off-cpu discovery hint");
+
+        assert!(hint.contains("2.000s off-CPU"));
+        assert!(hint.contains("stax threads -n 0"));
+        assert!(hint.contains("stax-target"));
+    }
+
+    #[test]
+    fn empty_view_hint_suggests_waiting_when_only_thread_metadata_landed() {
+        let threads = ThreadsUpdate {
+            threads: vec![thread(123, Some("main"), 0, 0, 1, 0)],
+        };
+        let hint = empty_view_hint("top", &OffCpuBreakdown::default(), Some(&threads), None)
+            .expect("thread activity hint");
+
+        assert!(hint.contains("stax wait --for-samples 100"));
+        assert!(hint.contains("stax threads -n 0"));
+    }
+
+    fn thread(
+        tid: u32,
+        name: Option<&str>,
+        on_cpu_ns: u64,
+        off_cpu_ns: u64,
+        pet_samples: u64,
+        target_spans: u64,
+    ) -> ThreadInfo {
+        ThreadInfo {
+            tid,
+            name: name.map(str::to_owned),
+            on_cpu_ns,
+            target_ns: if target_spans > 0 { on_cpu_ns } else { 0 },
+            off_cpu: OffCpuBreakdown {
+                sleep_ns: off_cpu_ns,
+                ..OffCpuBreakdown::default()
+            },
+            pet_samples,
+            target_spans,
+        }
     }
 }
 
