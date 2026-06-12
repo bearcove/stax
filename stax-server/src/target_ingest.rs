@@ -559,8 +559,8 @@ impl TargetIngest for TargetIngestService {
 #[cfg(test)]
 mod tests {
     use stax_live_proto::{
-        FlameNode, LiveFilter, Profiler as _, RunConfig, StopReason, TargetIngest as _, TargetSpan,
-        TargetSpanBatch, TopSort, ViewParams,
+        FlameNode, LiveFilter, Profiler as _, RunConfig, RunId, RunViewParams, StopReason,
+        TargetIngest as _, TargetSpan, TargetSpanBatch, TimelineParams, TopSort, ViewParams,
     };
 
     use super::*;
@@ -682,7 +682,7 @@ mod tests {
         assert_eq!(lane.children[1].target_ns, 500_000);
         assert_eq!(lane.children[1].target_spans, 1);
 
-        let threads = profiler.threads().await;
+        let threads = profiler.threads(run_view_params(None)).await;
         let thread = threads
             .threads
             .iter()
@@ -880,7 +880,7 @@ mod tests {
         assert_eq!(target_spans.entries[0].origin_tid, Some(CPU_TID));
         assert_eq!(target_spans.entries[0].origin_address, Some(CPU_LEAF));
 
-        let threads = profiler.threads().await;
+        let threads = profiler.threads(run_view_params(None)).await;
         let cpu_thread = threads
             .threads
             .iter()
@@ -900,7 +900,9 @@ mod tests {
         assert_eq!(lane_thread.pet_samples, 1);
         assert_eq!(lane_thread.target_spans, 1);
 
-        let cpu_timeline = profiler.timeline(Some(CPU_TID)).await;
+        let cpu_timeline = profiler
+            .timeline(timeline_params(None, Some(CPU_TID)))
+            .await;
         assert_eq!(cpu_timeline.total_on_cpu_ns, 3_000_000);
         assert_eq!(cpu_timeline.total_target_ns, 3_000_000);
         assert_eq!(cpu_timeline.target_lanes.len(), 1);
@@ -916,7 +918,9 @@ mod tests {
             Some("GPU test")
         );
 
-        let synthetic_timeline = profiler.timeline(Some(SYNTH_TID_BASE)).await;
+        let synthetic_timeline = profiler
+            .timeline(timeline_params(None, Some(SYNTH_TID_BASE)))
+            .await;
         assert_eq!(synthetic_timeline.total_target_ns, 3_000_000);
         assert_eq!(synthetic_timeline.target_lanes.len(), 1);
         assert_eq!(synthetic_timeline.target_lanes[0].tid, SYNTH_TID_BASE);
@@ -1093,12 +1097,21 @@ mod tests {
 
     fn view_params(tid: Option<u32>) -> ViewParams {
         ViewParams {
+            run: None,
             tid,
             filter: LiveFilter {
                 time_range: None,
                 exclude_symbols: Vec::new(),
             },
         }
+    }
+
+    fn run_view_params(run: Option<RunId>) -> RunViewParams {
+        RunViewParams { run }
+    }
+
+    fn timeline_params(run: Option<RunId>, tid: Option<u32>) -> TimelineParams {
+        TimelineParams { run, tid }
     }
 
     fn flame_node_name<'a>(node: &FlameNode, strings: &'a [String]) -> Option<&'a str> {

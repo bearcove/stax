@@ -26,9 +26,11 @@ import {
   type AnnotatedView,
   type LiveFilter,
   type ProfilerClient,
+  type RunViewParams,
   type SymbolRef,
   type ThreadInfo,
   type ThreadsUpdate,
+  type TimelineParams,
   type Token,
   type TokenClass,
   type TopEntry,
@@ -208,7 +210,15 @@ export function viewParams(
   tid: number | null,
   filter: LiveFilter = EMPTY_FILTER,
 ): ViewParams {
-  return { tid, filter };
+  return { run: null, tid, filter };
+}
+
+export function runViewParams(): RunViewParams {
+  return { run: null };
+}
+
+export function timelineParams(tid: number | null): TimelineParams {
+  return { run: null, tid };
 }
 
 function defaultUrl(): string {
@@ -426,7 +436,7 @@ export function App() {
     if (!client) return;
     let cancelled = false;
     const [tx, rx] = channel<ThreadsUpdate>();
-    client.subscribeThreads(tx).catch(() => {});
+    client.subscribeThreads(runViewParams(), tx).catch(() => {});
     (async () => {
       for await (const next of rx) {
         if (cancelled) break;
@@ -446,7 +456,7 @@ export function App() {
     if (!client || selectedTid === null) return;
     let cancelled = false;
     const [tx, rx] = channel<WakersUpdate>();
-    client.subscribeWakers(selectedTid, tx).catch(() => {});
+    client.subscribeWakers(selectedTid, runViewParams(), tx).catch(() => {});
     (async () => {
       for await (const next of rx) {
         if (cancelled) break;

@@ -24,11 +24,14 @@ use parking_lot::{Mutex, RwLock};
 use stax_live::source::SourceResolver;
 use stax_live::{Aggregator, BinaryRegistry, LiveServer};
 use stax_live_proto::{
-    DiagnosticsSnapshot, ProfilerDispatcher, RunConfig, RunControl, RunControlDispatcher,
-    RunControlError, RunId, RunState, RunSummary, SavedAggregator, SavedBinaryRegistry,
-    SavedRunArchive, SavedRunArchiveFiles, SavedRunArchiveManifest, SavedRunArchiveProvenance,
-    ServerStatus, StopReason, TargetIngestDiagnostics, TargetIngestDispatcher, WaitCondition,
-    WaitOutcome,
+    AnnotatedView, CfgUpdate, DiagnosticsSnapshot, FlamegraphUpdate, IntervalListUpdate,
+    NeighborsUpdate, PetSampleListUpdate, Profiler, ProfilerDispatcher, RunConfig, RunControl,
+    RunControlDispatcher, RunControlError, RunId, RunState, RunSummary, RunViewParams,
+    SavedAggregator, SavedBinaryRegistry, SavedRunArchive, SavedRunArchiveFiles,
+    SavedRunArchiveManifest, SavedRunArchiveProvenance, ServerStatus, StopReason,
+    TargetIngestDiagnostics, TargetIngestDispatcher, TargetSpanListUpdate, ThreadsUpdate,
+    TimelineParams, TimelineUpdate, TopEntry, TopSort, TopUpdate, ViewParams, WaitCondition,
+    WaitOutcome, WakersUpdate,
 };
 
 use crate::target_ingest::{TargetIngestService, TargetLaneRegistry};
@@ -206,10 +209,10 @@ fn resolve_socket_path() -> PathBuf {
     PathBuf::from(format!("/tmp/stax-server-{uid}.sock"))
 }
 
-/// Shared state. The aggregator + binary registry persist across
-/// runs (a new run resets them); historical Profiler queries aren't
-/// addressable yet — that ships when `Profiler` learns to take a
-/// `RunId`.
+/// Shared state. The current aggregator + binary registry are the live query
+/// state. Stopped runs keep in-memory snapshots; `ViewParams.run` and
+/// `RunViewParams.run` query those snapshots without replacing the current
+/// state.
 #[derive(Clone)]
 pub(crate) struct ServerState {
     inner: Arc<Mutex<Inner>>,
@@ -275,11 +278,10 @@ impl ServerState {
     /// but doesn't ship bytes; the server has to open the cache
     /// itself to back disassembly.
     #[cfg(target_os = "macos")]
-    fn attach_local_shared_cache(&self) {
+    fn attach_local_shared_cache_to_registry(binaries: &mut BinaryRegistry) {
         match stax_mac_shared_cache::SharedCache::for_host() {
             Some(cache) => {
                 let cache = Arc::new(cache);
-                let mut binaries = self.binaries.write();
                 binaries.set_macho_byte_source(cache.clone());
                 binaries.set_shared_cache(cache);
                 tracing::info!(
@@ -296,15 +298,118 @@ impl ServerState {
     }
 
     #[cfg(not(target_os = "macos"))]
-    fn attach_local_shared_cache(&self) {}
+    fn attach_local_shared_cache_to_registry(_binaries: &mut BinaryRegistry) {}
 
-    fn profiler(&self) -> LiveServer {
+    fn attach_local_shared_cache(&self) {
+        Self::attach_local_shared_cache_to_registry(&mut self.binaries.write());
+    }
+
+    fn current_profiler(&self) -> LiveServer {
         LiveServer {
             aggregator: self.aggregator.clone(),
             binaries: self.binaries.clone(),
             revision: self.revision.clone(),
             source: self.source.clone(),
             paused: self.paused.clone(),
+        }
+    }
+
+    fn profiler(&self) -> ServerProfiler {
+        ServerProfiler {
+            server: self.clone(),
+        }
+    }
+
+    fn snapshot_for_run(&self, run_id: RunId) -> Option<RunSnapshot> {
+        let inner = self.inner.lock();
+        inner
+            .history
+            .iter()
+            .find(|snapshot| snapshot.summary.id == run_id)
+            .cloned()
+    }
+
+    fn is_active_run(&self, run_id: RunId) -> bool {
+        self.inner
+            .lock()
+            .active
+            .as_ref()
+            .is_some_and(|active| active.id == run_id)
+    }
+
+    fn should_stream_run(&self, run: Option<RunId>) -> bool {
+        match run {
+            None => true,
+            Some(run_id) => self.is_active_run(run_id),
+        }
+    }
+
+    fn profiler_for_run(&self, run: Option<RunId>) -> LiveServer {
+        match run {
+            None => self.current_profiler(),
+            Some(run_id) if self.is_active_run(run_id) => self.current_profiler(),
+            Some(run_id) => self
+                .snapshot_for_run(run_id)
+                .map(|snapshot| self.profiler_from_archive(snapshot.archive))
+                .unwrap_or_else(|| self.empty_profiler()),
+        }
+    }
+
+    fn profiler_from_archive(&self, archive: SavedRunArchive) -> LiveServer {
+        let mut aggregator = Aggregator::default();
+        aggregator.replace_from_saved(archive.aggregator);
+        let mut binaries = BinaryRegistry::new();
+        binaries.replace_from_saved(archive.binaries);
+        Self::attach_local_shared_cache_to_registry(&mut binaries);
+        LiveServer {
+            aggregator: Arc::new(RwLock::new(aggregator)),
+            binaries: Arc::new(RwLock::new(binaries)),
+            revision: Arc::new(AtomicU64::new(1)),
+            source: self.source.clone(),
+            paused: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn empty_profiler(&self) -> LiveServer {
+        LiveServer {
+            aggregator: Arc::new(RwLock::new(Aggregator::default())),
+            binaries: Arc::new(RwLock::new(BinaryRegistry::new())),
+            revision: Arc::new(AtomicU64::new(1)),
+            source: self.source.clone(),
+            paused: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn diagnostics_for_run(&self, run: Option<RunId>) -> DiagnosticsSnapshot {
+        match run {
+            None => {
+                let inner = self.inner.lock();
+                DiagnosticsSnapshot {
+                    server_started_at_unix_ns: self.started_at_unix_ns,
+                    active: inner.active.clone().into_iter().collect(),
+                    target_ingest: self.target_lanes.lock().diagnostics(),
+                }
+            }
+            Some(run_id) if self.is_active_run(run_id) => {
+                let inner = self.inner.lock();
+                DiagnosticsSnapshot {
+                    server_started_at_unix_ns: self.started_at_unix_ns,
+                    active: inner.active.clone().into_iter().collect(),
+                    target_ingest: self.target_lanes.lock().diagnostics(),
+                }
+            }
+            Some(run_id) => self
+                .snapshot_for_run(run_id)
+                .map(|snapshot| DiagnosticsSnapshot {
+                    server_started_at_unix_ns: self.started_at_unix_ns,
+                    active: Vec::new(),
+                    target_ingest: snapshot.archive.target_ingest,
+                })
+                .unwrap_or_else(|| DiagnosticsSnapshot {
+                    server_started_at_unix_ns: self.started_at_unix_ns,
+                    active: Vec::new(),
+                    target_ingest: TargetIngestDiagnostics::default(),
+                }),
         }
     }
 
@@ -654,6 +759,285 @@ impl ServerState {
     }
 }
 
+#[derive(Clone)]
+struct ServerProfiler {
+    server: ServerState,
+}
+
+impl Profiler for ServerProfiler {
+    async fn top(&self, limit: u32, sort: TopSort, params: ViewParams) -> Vec<TopEntry> {
+        self.top_update(limit, sort, params).await.entries
+    }
+
+    async fn top_update(&self, limit: u32, sort: TopSort, params: ViewParams) -> TopUpdate {
+        self.server
+            .profiler_for_run(params.run)
+            .top_update(limit, sort, params)
+            .await
+    }
+
+    async fn subscribe_top(
+        &self,
+        limit: u32,
+        sort: TopSort,
+        params: ViewParams,
+        output: vox::Tx<TopUpdate>,
+    ) {
+        let run = params.run;
+        if self.server.should_stream_run(run) {
+            self.server
+                .profiler_for_run(run)
+                .subscribe_top(limit, sort, params, output)
+                .await;
+        } else {
+            let update = self.top_update(limit, sort, params).await;
+            let _ = output.send(update).await;
+        }
+    }
+
+    async fn total_on_cpu_ns(&self, params: RunViewParams) -> u64 {
+        self.server
+            .profiler_for_run(params.run)
+            .total_on_cpu_ns(params)
+            .await
+    }
+
+    async fn annotated(&self, address: u64, params: ViewParams) -> AnnotatedView {
+        self.server
+            .profiler_for_run(params.run)
+            .annotated(address, params)
+            .await
+    }
+
+    async fn subscribe_annotated(
+        &self,
+        address: u64,
+        params: ViewParams,
+        output: vox::Tx<AnnotatedView>,
+    ) {
+        let run = params.run;
+        if self.server.should_stream_run(run) {
+            self.server
+                .profiler_for_run(run)
+                .subscribe_annotated(address, params, output)
+                .await;
+        } else {
+            let update = self.annotated(address, params).await;
+            let _ = output.send(update).await;
+        }
+    }
+
+    async fn cfg(&self, address: u64, params: ViewParams) -> CfgUpdate {
+        self.server
+            .profiler_for_run(params.run)
+            .cfg(address, params)
+            .await
+    }
+
+    async fn subscribe_cfg(&self, address: u64, params: ViewParams, output: vox::Tx<CfgUpdate>) {
+        let run = params.run;
+        if self.server.should_stream_run(run) {
+            self.server
+                .profiler_for_run(run)
+                .subscribe_cfg(address, params, output)
+                .await;
+        } else {
+            let update = self.cfg(address, params).await;
+            let _ = output.send(update).await;
+        }
+    }
+
+    async fn flamegraph(&self, params: ViewParams) -> FlamegraphUpdate {
+        self.server
+            .profiler_for_run(params.run)
+            .flamegraph(params)
+            .await
+    }
+
+    async fn subscribe_flamegraph(&self, params: ViewParams, output: vox::Tx<FlamegraphUpdate>) {
+        let run = params.run;
+        if self.server.should_stream_run(run) {
+            self.server
+                .profiler_for_run(run)
+                .subscribe_flamegraph(params, output)
+                .await;
+        } else {
+            let update = self.flamegraph(params).await;
+            let _ = output.send(update).await;
+        }
+    }
+
+    async fn threads(&self, params: RunViewParams) -> ThreadsUpdate {
+        self.server
+            .profiler_for_run(params.run)
+            .threads(params)
+            .await
+    }
+
+    async fn subscribe_threads(&self, params: RunViewParams, output: vox::Tx<ThreadsUpdate>) {
+        if self.server.should_stream_run(params.run) {
+            self.server
+                .profiler_for_run(params.run)
+                .subscribe_threads(params, output)
+                .await;
+        } else {
+            let update = self.threads(params).await;
+            let _ = output.send(update).await;
+        }
+    }
+
+    async fn timeline(&self, params: TimelineParams) -> TimelineUpdate {
+        self.server
+            .profiler_for_run(params.run)
+            .timeline(params)
+            .await
+    }
+
+    async fn subscribe_timeline(&self, params: TimelineParams, output: vox::Tx<TimelineUpdate>) {
+        if self.server.should_stream_run(params.run) {
+            self.server
+                .profiler_for_run(params.run)
+                .subscribe_timeline(params, output)
+                .await;
+        } else {
+            let update = self.timeline(params).await;
+            let _ = output.send(update).await;
+        }
+    }
+
+    async fn neighbors(&self, address: u64, params: ViewParams) -> NeighborsUpdate {
+        self.server
+            .profiler_for_run(params.run)
+            .neighbors(address, params)
+            .await
+    }
+
+    async fn subscribe_neighbors(
+        &self,
+        address: u64,
+        params: ViewParams,
+        output: vox::Tx<NeighborsUpdate>,
+    ) {
+        let run = params.run;
+        if self.server.should_stream_run(run) {
+            self.server
+                .profiler_for_run(run)
+                .subscribe_neighbors(address, params, output)
+                .await;
+        } else {
+            let update = self.neighbors(address, params).await;
+            let _ = output.send(update).await;
+        }
+    }
+
+    async fn wakers(&self, wakee_tid: u32, params: RunViewParams) -> WakersUpdate {
+        self.server
+            .profiler_for_run(params.run)
+            .wakers(wakee_tid, params)
+            .await
+    }
+
+    async fn subscribe_wakers(
+        &self,
+        wakee_tid: u32,
+        params: RunViewParams,
+        output: vox::Tx<WakersUpdate>,
+    ) {
+        if self.server.should_stream_run(params.run) {
+            self.server
+                .profiler_for_run(params.run)
+                .subscribe_wakers(wakee_tid, params, output)
+                .await;
+        } else {
+            let update = self.wakers(wakee_tid, params).await;
+            let _ = output.send(update).await;
+        }
+    }
+
+    async fn intervals(&self, flame_key: String, params: ViewParams) -> IntervalListUpdate {
+        self.server
+            .profiler_for_run(params.run)
+            .intervals(flame_key, params)
+            .await
+    }
+
+    async fn subscribe_intervals(
+        &self,
+        flame_key: String,
+        params: ViewParams,
+        output: vox::Tx<IntervalListUpdate>,
+    ) {
+        let run = params.run;
+        if self.server.should_stream_run(run) {
+            self.server
+                .profiler_for_run(run)
+                .subscribe_intervals(flame_key, params, output)
+                .await;
+        } else {
+            let update = self.intervals(flame_key, params).await;
+            let _ = output.send(update).await;
+        }
+    }
+
+    async fn pet_samples(&self, flame_key: String, params: ViewParams) -> PetSampleListUpdate {
+        self.server
+            .profiler_for_run(params.run)
+            .pet_samples(flame_key, params)
+            .await
+    }
+
+    async fn subscribe_pet_samples(
+        &self,
+        flame_key: String,
+        params: ViewParams,
+        output: vox::Tx<PetSampleListUpdate>,
+    ) {
+        let run = params.run;
+        if self.server.should_stream_run(run) {
+            self.server
+                .profiler_for_run(run)
+                .subscribe_pet_samples(flame_key, params, output)
+                .await;
+        } else {
+            let update = self.pet_samples(flame_key, params).await;
+            let _ = output.send(update).await;
+        }
+    }
+
+    async fn target_spans(&self, flame_key: String, params: ViewParams) -> TargetSpanListUpdate {
+        self.server
+            .profiler_for_run(params.run)
+            .target_spans(flame_key, params)
+            .await
+    }
+
+    async fn subscribe_target_spans(
+        &self,
+        flame_key: String,
+        params: ViewParams,
+        output: vox::Tx<TargetSpanListUpdate>,
+    ) {
+        let run = params.run;
+        if self.server.should_stream_run(run) {
+            self.server
+                .profiler_for_run(run)
+                .subscribe_target_spans(flame_key, params, output)
+                .await;
+        } else {
+            let update = self.target_spans(flame_key, params).await;
+            let _ = output.send(update).await;
+        }
+    }
+
+    async fn set_paused(&self, paused: bool) {
+        self.server.current_profiler().set_paused(paused).await;
+    }
+
+    async fn is_paused(&self) -> bool {
+        self.server.current_profiler().is_paused().await
+    }
+}
+
 impl RunControl for ServerState {
     async fn status(&self) -> ServerStatus {
         let inner = self.inner.lock();
@@ -676,13 +1060,8 @@ impl RunControl for ServerState {
         out
     }
 
-    async fn diagnostics(&self) -> DiagnosticsSnapshot {
-        let inner = self.inner.lock();
-        DiagnosticsSnapshot {
-            server_started_at_unix_ns: self.started_at_unix_ns,
-            active: inner.active.clone().into_iter().collect(),
-            target_ingest: self.target_lanes.lock().diagnostics(),
-        }
+    async fn diagnostics(&self, params: RunViewParams) -> DiagnosticsSnapshot {
+        self.diagnostics_for_run(params.run)
     }
 
     async fn start_attach(
@@ -998,8 +1377,8 @@ fn now_unix_ns() -> u64 {
 #[cfg(test)]
 mod tests {
     use stax_live_proto::{
-        LiveFilter, Profiler as _, RunControl as _, TargetIngest as _, TargetReporterStats,
-        TargetSpan, TargetSpanBatch, TopSort, ViewParams,
+        LiveFilter, Profiler as _, RunControl as _, RunViewParams, TargetIngest as _,
+        TargetReporterStats, TargetSpan, TargetSpanBatch, TopSort, ViewParams,
     };
 
     use super::*;
@@ -1126,7 +1505,7 @@ mod tests {
             Some("archive_kernel")
         );
 
-        let threads = profiler.threads().await;
+        let threads = profiler.threads(run_view_params(None)).await;
         let thread = threads
             .threads
             .iter()
@@ -1138,7 +1517,10 @@ mod tests {
         assert_eq!(thread.pet_samples, 1);
         assert_eq!(thread.target_spans, 1);
 
-        let diagnostics = restored.diagnostics().await.target_ingest;
+        let diagnostics = restored
+            .diagnostics(run_view_params(None))
+            .await
+            .target_ingest;
         assert_eq!(diagnostics.batches, 1);
         assert_eq!(diagnostics.spans_recorded, 1);
         assert_eq!(diagnostics.total_duration_ns, 6_000_000);
@@ -1210,10 +1592,92 @@ mod tests {
         assert_eq!(top[0].self_target_ns, 2_000_000);
         assert_eq!(top[0].self_target_spans, 1);
 
-        let diagnostics = server.diagnostics().await.target_ingest;
+        let diagnostics = server
+            .diagnostics(run_view_params(None))
+            .await
+            .target_ingest;
         assert_eq!(diagnostics.lanes.len(), 1);
         assert_eq!(diagnostics.lanes[0].name, "GPU first");
         assert_eq!(diagnostics.total_duration_ns, 2_000_000);
+    }
+
+    #[tokio::test]
+    async fn run_params_query_history_without_selecting_it() {
+        let server = ServerState::new_for_tests();
+        let service = TargetIngestService::new(server.clone());
+
+        let first = server
+            .begin_run(test_run_config("first-run"))
+            .expect("begin first run");
+        server.apply_target_attached_in_process(first, 1111, 0);
+        service
+            .ingest(TargetSpanBatch {
+                pid: 1111,
+                lane: "GPU first".to_owned(),
+                spans: vec![TargetSpan::new("first_kernel", 1_000_000, 3_000_000)],
+            })
+            .await;
+        server.finalize_run(first, StopReason::TargetExited);
+
+        let second = server
+            .begin_run(test_run_config("second-run"))
+            .expect("begin second run");
+        server.apply_target_attached_in_process(second, 2222, 0);
+        service
+            .ingest(TargetSpanBatch {
+                pid: 2222,
+                lane: "GPU second".to_owned(),
+                spans: vec![TargetSpan::new("second_kernel", 10_000_000, 16_000_000)],
+            })
+            .await;
+        server.finalize_run(second, StopReason::TargetExited);
+
+        let profiler = server.profiler();
+        let current_top = profiler
+            .top(10, TopSort::BySelf, view_params(Some(SYNTH_TID_BASE)))
+            .await;
+        assert_eq!(
+            current_top[0].function_name.as_deref(),
+            Some("second_kernel")
+        );
+
+        let first_top = profiler
+            .top(
+                10,
+                TopSort::BySelf,
+                view_params_for_run(Some(first), Some(SYNTH_TID_BASE)),
+            )
+            .await;
+        assert_eq!(first_top.len(), 1);
+        assert_eq!(first_top[0].function_name.as_deref(), Some("first_kernel"));
+        assert_eq!(first_top[0].self_target_ns, 2_000_000);
+
+        let first_threads = profiler.threads(run_view_params(Some(first))).await;
+        let first_lane = first_threads
+            .threads
+            .iter()
+            .find(|thread| thread.tid == SYNTH_TID_BASE)
+            .expect("first synthetic lane");
+        assert_eq!(first_lane.name.as_deref(), Some("GPU first"));
+
+        let first_diagnostics = server
+            .diagnostics(run_view_params(Some(first)))
+            .await
+            .target_ingest;
+        assert_eq!(first_diagnostics.lanes[0].name, "GPU first");
+
+        let current_top = profiler
+            .top(10, TopSort::BySelf, view_params(Some(SYNTH_TID_BASE)))
+            .await;
+        assert_eq!(
+            current_top[0].function_name.as_deref(),
+            Some("second_kernel")
+        );
+        let current_diagnostics = server
+            .diagnostics(run_view_params(None))
+            .await
+            .target_ingest;
+        assert_eq!(current_diagnostics.lanes[0].name, "GPU second");
     }
 
     fn test_run_config(label: &str) -> RunConfig {
@@ -1225,13 +1689,22 @@ mod tests {
     }
 
     fn view_params(tid: Option<u32>) -> ViewParams {
+        view_params_for_run(None, tid)
+    }
+
+    fn view_params_for_run(run: Option<RunId>, tid: Option<u32>) -> ViewParams {
         ViewParams {
+            run,
             tid,
             filter: LiveFilter {
                 time_range: None,
                 exclude_symbols: Vec::new(),
             },
         }
+    }
+
+    fn run_view_params(run: Option<RunId>) -> RunViewParams {
+        RunViewParams { run }
     }
 
     fn flame_node_name<'a>(

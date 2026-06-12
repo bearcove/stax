@@ -14,9 +14,11 @@ import type {
 
 const url = process.argv[2] ?? "ws://127.0.0.1:8080";
 const params: ViewParams = {
+  run: null,
   tid: null,
   filter: { time_range: null, exclude_symbols: [] },
 };
+const runParams = { run: null };
 const bySelf: TopSort = { tag: "BySelf" };
 
 function die(msg: string): never {
@@ -27,7 +29,7 @@ function die(msg: string): never {
 const client = await connectProfiler(url);
 
 // 1. threads
-const threads = await client.threads();
+const threads = await client.threads(runParams);
 console.log(`threads: ${threads.threads.length}`);
 if (threads.threads.length === 0) die("no threads");
 

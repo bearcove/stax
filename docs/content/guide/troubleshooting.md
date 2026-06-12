@@ -166,8 +166,8 @@ outside `~/Library`.
 - **Run list history is in-memory.** `stax list` shows active/history rows,
   and `stax select-run <ID>` can restore a stopped row into the current query
   state, but that list does not survive a `stax-server` restart. The reporting
-  commands also accept `--run <ID>` as a shorthand for selecting a stopped
-  in-memory run before querying it. Use `stax save <DIR>` before restart, then
+  commands also accept `--run <ID>` for non-mutating one-off queries of
+  stopped in-memory runs. Use `stax save <DIR>` before restart, then
   `stax open <DIR>` to restore the saved run into the current query state.
 
 ## Still stuck?

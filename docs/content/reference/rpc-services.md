@@ -65,8 +65,13 @@ recent individual spans for detail panes. When an origin links to a sampled CPU
 stack, entries include the origin tid, origin symbol address, function name,
 and binary so clients can navigate back to the queueing CPU stack.
 
-Every query takes a `ViewParams` (thread filter, time range, exclude-symbol
-list), so any view can be scoped — the equivalent of the CLI's `--tid`.
+Most query calls take a `ViewParams` (optional run id, thread filter, time
+range, exclude-symbol list), so any view can be scoped — the equivalent of the
+CLI's `--run`, `--tid`, and timeline/filter controls. Thread, timeline, waker,
+and diagnostics calls use the lighter `RunViewParams` or `TimelineParams`
+where no symbol filter is needed. A `run` of `None` means the live/current
+query state; `Some(RunId)` queries stopped in-memory history without changing
+the selected run.
 
 ## Connecting
 
@@ -94,7 +99,8 @@ them.
 `stax-live-proto` exports a generated client per service —
 `RunControlClient` and `ProfilerClient` — alongside the shared types
 (`ServerStatus`, `RunSummary`, `WaitCondition`, `WaitOutcome`, `TopSort`,
-`ViewParams`, `FlamegraphUpdate`, `FlameNode`, `ThreadsUpdate`,
+`ViewParams`, `RunViewParams`, `TimelineParams`, `FlamegraphUpdate`,
+`FlameNode`, `ThreadsUpdate`,
 `DiagnosticsSnapshot`, …). The `stax` CLI is itself a straightforward
 consumer of these clients — `cli/src/main.rs` is the worked example to read.
 

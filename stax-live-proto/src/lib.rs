@@ -362,9 +362,28 @@ pub struct LiveFilter {
 /// bound caps method arities at 4.
 #[derive(Clone, Debug, Facet)]
 pub struct ViewParams {
+    /// Optional historical run id to query without changing the server's
+    /// selected query state. `None` means the live/current query state.
+    pub run: Option<RunId>,
     /// Filter to one thread's samples; `None` aggregates across all.
     pub tid: Option<u32>,
     pub filter: LiveFilter,
+}
+
+#[derive(Clone, Copy, Debug, Facet)]
+pub struct RunViewParams {
+    /// Optional historical run id to query without changing the server's
+    /// selected query state. `None` means the live/current query state.
+    pub run: Option<RunId>,
+}
+
+#[derive(Clone, Copy, Debug, Facet)]
+pub struct TimelineParams {
+    /// Optional historical run id to query without changing the server's
+    /// selected query state. `None` means the live/current query state.
+    pub run: Option<RunId>,
+    /// Filter to one thread or synthetic lane; `None` aggregates all lanes.
+    pub tid: Option<u32>,
 }
 
 #[derive(Clone, Debug, Facet)]
@@ -804,7 +823,7 @@ pub trait Profiler {
     /// Bounded by `cores × wall_time` (you can't be on more than one
     /// CPU at a time, and there are only so many CPUs). Useful for
     /// "X CPU-seconds across the recording" displays.
-    async fn total_on_cpu_ns(&self) -> u64;
+    async fn total_on_cpu_ns(&self, params: RunViewParams) -> u64;
 
     async fn annotated(&self, address: u64, params: ViewParams) -> AnnotatedView;
 
@@ -827,17 +846,17 @@ pub trait Profiler {
 
     async fn subscribe_flamegraph(&self, params: ViewParams, output: vox::Tx<FlamegraphUpdate>);
 
-    async fn threads(&self) -> ThreadsUpdate;
+    async fn threads(&self, params: RunViewParams) -> ThreadsUpdate;
 
-    async fn subscribe_threads(&self, output: vox::Tx<ThreadsUpdate>);
-
-    /// Always relative to the full recording (no `filter`); brush
-    /// selection happens on top of the unfiltered timeline.
-    async fn timeline(&self, tid: Option<u32>) -> TimelineUpdate;
+    async fn subscribe_threads(&self, params: RunViewParams, output: vox::Tx<ThreadsUpdate>);
 
     /// Always relative to the full recording (no `filter`); brush
     /// selection happens on top of the unfiltered timeline.
-    async fn subscribe_timeline(&self, tid: Option<u32>, output: vox::Tx<TimelineUpdate>);
+    async fn timeline(&self, params: TimelineParams) -> TimelineUpdate;
+
+    /// Always relative to the full recording (no `filter`); brush
+    /// selection happens on top of the unfiltered timeline.
+    async fn subscribe_timeline(&self, params: TimelineParams, output: vox::Tx<TimelineUpdate>);
 
     async fn neighbors(&self, address: u64, params: ViewParams) -> NeighborsUpdate;
 
@@ -853,14 +872,19 @@ pub trait Profiler {
     /// MACH_MAKERUNNABLE wakeup edges. The wakee's tid is required;
     /// `None` produces an empty update (we don't aggregate across
     /// threads).
-    async fn wakers(&self, wakee_tid: u32) -> WakersUpdate;
+    async fn wakers(&self, wakee_tid: u32, params: RunViewParams) -> WakersUpdate;
 
     /// Stream "who woke this thread?" updates: top wakers grouped by
     /// (waker_tid, waker_function), aggregated from the kperf
     /// MACH_MAKERUNNABLE wakeup edges. The wakee's tid is required;
     /// `None` produces an empty update (we don't aggregate across
     /// threads).
-    async fn subscribe_wakers(&self, wakee_tid: u32, output: vox::Tx<WakersUpdate>);
+    async fn subscribe_wakers(
+        &self,
+        wakee_tid: u32,
+        params: RunViewParams,
+        output: vox::Tx<WakersUpdate>,
+    );
 
     /// Stream the off-CPU intervals attributed to a single stack
     /// node, in chronological order. Lets the UI drill into a flame
@@ -1277,9 +1301,10 @@ pub trait RunControl {
     /// (in-memory only for now; on-disk persistence is a follow-up).
     async fn list_runs(&self) -> Vec<RunSummary>;
 
-    /// Point-in-time server diagnostics: current run plus target-span
-    /// ingest counters and origin-link health.
-    async fn diagnostics(&self) -> DiagnosticsSnapshot;
+    /// Point-in-time diagnostics: current run plus target-span ingest
+    /// counters and origin-link health, or a stopped in-memory run when
+    /// `params.run` is set.
+    async fn diagnostics(&self, params: RunViewParams) -> DiagnosticsSnapshot;
 
     /// Start a recording by attaching to an existing pid. For
     /// `stax record -- <argv>`, the CLI `posix_spawn`s the target
@@ -1312,10 +1337,10 @@ pub trait RunControl {
     async fn open_saved(&self, path: String) -> Result<(), RunControlError>;
 
     /// Restore one stopped in-memory run into the server's current query
-    /// state. CLI reporting commands use this as their `--run <ID>` shorthand;
-    /// a future non-mutating Profiler `RunId` parameter would be a separate
-    /// query model. Fails while a recording is active, because the live
-    /// aggregator belongs to that recording.
+    /// state. Reporting commands prefer non-mutating `RunViewParams` /
+    /// `ViewParams.run`; keep this for explicit "make this the current run"
+    /// workflows and older clients. Fails while a recording is active, because
+    /// the live aggregator belongs to that recording.
     async fn select_run(&self, run_id: RunId) -> Result<RunSummary, RunControlError>;
 }
 

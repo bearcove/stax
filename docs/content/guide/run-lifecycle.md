@@ -41,7 +41,7 @@ stax top                     # still works — same data
 stax record -- ./bench       # run 2 — current query state switches to run 2
 stax stop
 stax select-run 1            # restore run 1 into the current query state
-stax top --run 1             # shorthand: select run 1, then query it
+stax top --run 1             # one-off query of run 1; current state unchanged
 ```
 
 In-memory run history does not survive a daemon restart. To keep a run beyond
@@ -55,9 +55,9 @@ stax open /tmp/stax-demo.staxdir
 
 `stax open` loads the saved run back into the current query state. For
 stopped in-memory history, `top`, `flame`, `threads`, `annotate`, and
-`diagnose` also accept `--run <ID>` as a shorthand for selecting that run
-before querying it. It has the same lifetime as `select-run`: save anything
-that must survive a daemon restart.
+`diagnose` also accept `--run <ID>` for a non-mutating one-off query. It has
+the same server-memory lifetime as `select-run`: save anything that must
+survive a daemon restart.
 
 ## stax status
 
@@ -204,8 +204,8 @@ server-memory selector, not persistence: after a daemon restart, use
 [`stax open`](#stax-open) on a saved archive instead.
 For one-off inspection, `stax threads --run 1`, `stax top --run 1`,
 `stax flame --run 1`, `stax annotate --run 1 …`, and
-`stax diagnose --run 1` are equivalent shorthands for selecting the stopped
-run before the query.
+`stax diagnose --run 1` query the stopped run without changing the current
+query state.
 
 ## stax compare
 
@@ -243,7 +243,7 @@ just archive-smoke
 That recipe starts a checkout-local `stax-server` on a temporary socket,
 records `stax-target/examples/corpus.rs` with the checkout CLI, saves the run
 to a temporary archive directory, reopens it, exercises `stax select-run` and
-per-command `--run`, queries the restored run through
+non-mutating per-command `--run`, queries the restored run through
 `threads`/`top`/`flame`/`diagnose`, and runs text plus JSON `stax compare`
 against itself.
 

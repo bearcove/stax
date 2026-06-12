@@ -37,8 +37,9 @@ nothing depends on it.
 
 - **Live first, saveable when needed.** The aggregator updates continuously;
   `stax top`, `stax flame`, and the web UI all read the *current* state of a
-  run that is still going. Use `stax select-run` or per-command `--run` for
-  stopped in-memory history, and `stax save`, `stax open`, `stax compare`,
+  run that is still going. Use `stax select-run` to restore stopped
+  in-memory history, per-command `--run` to query it without changing state,
+  and `stax save`, `stax open`, `stax compare`,
   and `stax compare --json` when you need durable artifacts, before/after
   notes, or CI-readable deltas. `compare` threshold flags such as
   `--fail-target-delta-ms` and `--fail-unlinked-origins-delta` turn saved

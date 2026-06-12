@@ -51,6 +51,10 @@ test-server-target-ingest:
     cargo nextest list -p stax-server --all-targets -E 'test(ingest_links_spans_to_origin_cpu_stack)'
     cargo nextest run -p stax-server --all-targets -E 'test(ingest_links_spans_to_origin_cpu_stack)'
 
+test-server-run-params:
+    cargo nextest list -p stax-server --all-targets -E 'test(run_params_query_history_without_selecting_it)'
+    cargo nextest run -p stax-server --all-targets -E 'test(run_params_query_history_without_selecting_it)'
+
 test-mac-kperf-timebase:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -71,7 +75,7 @@ frontend-check:
 web-target-smoke:
     bash frontend/scripts/web-target-smoke.sh
 
-target-span-check: fmt-check check-target check-live-proto check-live check-server check-mac-kperf-parse test-target test-cli-target-lanes test-cli-compare-json test-server-target-ingest test-mac-kperf-timebase check-cli docs frontend-check diff-check
+target-span-check: fmt-check check-target check-live-proto check-live check-server check-mac-kperf-parse test-target test-cli-target-lanes test-cli-compare-json test-server-target-ingest test-server-run-params test-mac-kperf-timebase check-cli docs frontend-check diff-check
 
 install:
     cargo xtask install

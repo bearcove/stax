@@ -312,10 +312,9 @@ Status as of 2026-06-12:
 - Stopped/opened runs now keep an in-memory query snapshot while
   `stax-server` stays alive. `stax select-run <ID>` restores one stopped run
   from `stax list` into the current query state. `top`, `flame`, `threads`,
-  `annotate`, and `diagnose` accept `--run <ID>` as a stateful shorthand for
-  selecting that stopped run before querying.
+  `annotate`, and `diagnose` accept `--run <ID>` as a non-mutating one-off
+  query against stopped in-memory history.
 - Current deliberate non-goals:
-  - no non-mutating per-RPC `RunId` query parameter yet
   - no single-file `.stax` packaging yet
   - no append-friendly event log or `blobs/` layout yet
   - annotate depends on saved/host-available bytes in the same way the live
@@ -399,10 +398,12 @@ Add per-run querying:
 - Saved runs imply explicit run identity in CLI and RPC:
   - done: `stax select-run <ID>` restores stopped in-memory history into the
     current query state
-  - done: reporting commands accept `--run <ID>` as a stateful shorthand for
-    selecting stopped in-memory history before querying
-  - later: non-mutating per-RPC `RunId` selectors if web/API clients need
-    concurrent comparisons without changing server query state
+  - done: reporting commands accept `--run <ID>` as a non-mutating one-off
+    query against stopped in-memory history
+  - done: `ViewParams.run`, `RunViewParams.run`, and `TimelineParams.run`
+    provide non-mutating per-RPC `RunId` selectors for Profiler snapshots,
+    subscriptions, timeline, wakers, threads, target-span details, and
+    diagnostics
   - `--archive <PATH>` or `stax open`
 - Web UI should be able to inspect a saved run without a live target.
 
@@ -689,8 +690,8 @@ Tasks:
   - done: focused Rust checks (`just check-target`, `just test-target`,
     `just check-cli`, `just test-cli-target-lanes`, `just check-live-proto`,
     `just check-live`, `just check-server`, `just test-cli-compare-json`,
-    `just test-server-target-ingest`, `just check-mac-kperf-parse`,
-    `just test-mac-kperf-timebase`)
+    `just test-server-target-ingest`, `just test-server-run-params`,
+    `just check-mac-kperf-parse`, `just test-mac-kperf-timebase`)
   - done: docs build (`just docs`)
   - done: frontend build/typecheck (`just frontend-check`)
   - done: aggregate focused target-span verification (`just target-span-check`)
@@ -766,9 +767,9 @@ Done when:
    through a checkout-local server/CLI.
 8. Done: add stopped-run query snapshots plus `stax select-run <ID>` for
    restoring in-memory history into the current query state.
-9. Done: add reporting-command `--run <ID>` shorthands for `threads`, `top`,
-   `flame`, `annotate`, and `diagnose`, backed by the same stopped-run
-   selector.
+9. Done: add reporting-command `--run <ID>` query selectors for `threads`, `top`,
+   `flame`, `annotate`, and `diagnose`, backed by non-mutating per-RPC run
+   selectors.
 10. Done: normalize macOS kdebug mach tick timestamps to nanoseconds at the
     parser pipeline boundary, so `stax-target` origin timestamps and PET
     sample timestamps share one clock domain on Intel and Apple Silicon Macs.
@@ -819,9 +820,8 @@ Done when:
 3. Add or update `just`/docs commands for routine verification.
 4. Done: checked Tracey coverage path; repo is not currently configured for
    Tracey, so there is no coverage file to update.
-5. Done: stale public roadmap/copy sweep; save/open/compare are no longer
-   described as absent, while real future items such as per-`RunId` querying
-   remain marked as roadmap.
+5. Done: stale public roadmap/copy sweep; save/open/compare and per-`RunId`
+   query selectors are no longer described as absent.
 
 Done when:
 
@@ -891,16 +891,15 @@ Resolved for this phase:
   workflow dispatch until the runner contract for recording and browser access
   is settled.
 - Saved-run format v2 is implemented as a chunked directory layout for new
-  saves. Stopped-run history has an in-memory selector via `select-run` plus
-  stateful CLI `--run` shorthands. The next persistence question is whether
-  append-friendly event logs and non-mutating per-RPC `RunId` selectors should
-  share a single query model.
+  saves. Stopped-run history has both a state-changing selector via
+  `select-run` and non-mutating per-RPC `RunId` selectors for reporting
+  surfaces. The next persistence question is how far the aggregate snapshot
+  archive can go before append-friendly event logs are needed.
 
 Still open:
 
-- Should append-friendly saved-run event logs land before non-mutating
-  per-RPC `RunId` querying, or should those land together so archives and live
-  history share one query selector model?
+- Whether append-friendly saved-run event logs should replace or augment the
+  current aggregate snapshot chunks for future archive questions.
 - Whether the manual live smokes should become required checks once the runner
   can provide browser dependencies and stax daemon/profiling access.
 

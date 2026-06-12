@@ -17,7 +17,7 @@ use stax_core::cmd_setup_linux;
 use stax_core::cmd_setup_mac;
 use stax_live_proto::{
     DiagnosticsSnapshot, FlameNode, FlamegraphUpdate, LiveFilter, OffCpuBreakdown, ProfilerClient,
-    RunControlClient, RunId, RunSummary, SavedIntervalKind, SavedRunArchive,
+    RunControlClient, RunId, RunSummary, RunViewParams, SavedIntervalKind, SavedRunArchive,
     SavedRunArchiveManifest, ServerStatus, StopReason, TargetIngestDiagnostics, ThreadsUpdate,
     TopEntry, TopSort, TopUpdate, ViewParams, WaitCondition, WaitOutcome,
 };
@@ -643,10 +643,13 @@ async fn run_list() -> Result<(), Box<dyn Error>> {
 
 async fn run_diagnose(args: DiagnoseArgs) -> Result<(), Box<dyn Error>> {
     let url = require_server_socket()?;
-    select_query_run_if_requested(&url, "diagnose --run", args.run).await?;
+    ensure_query_run_if_requested(&url, "diagnose --run", args.run).await?;
     let client: RunControlClient = vox::connect(&url).await?;
     let _debug_registration = register_run_control_client("diagnose", &client);
-    let snapshot = client.diagnostics().await.map_err(|e| format!("{e:?}"))?;
+    let snapshot = client
+        .diagnostics(run_view_params(args.run))
+        .await
+        .map_err(|e| format!("{e:?}"))?;
     print_diagnostics(&snapshot);
     Ok(())
 }
@@ -745,7 +748,7 @@ async fn run_select_run(args: stax_core::args::SelectRunArgs) -> Result<(), Box<
     Ok(())
 }
 
-async fn select_query_run_if_requested(
+async fn ensure_query_run_if_requested(
     url: &str,
     surface: &'static str,
     run_id: Option<u64>,
@@ -755,11 +758,28 @@ async fn select_query_run_if_requested(
     };
     let client: RunControlClient = vox::connect(url).await?;
     let _debug_registration = register_run_control_client(surface, &client);
-    client
-        .select_run(RunId(run_id))
-        .await
-        .map_err(|e| format!("{e:?}"))?;
+    let runs = client.list_runs().await.map_err(|e| format!("{e:?}"))?;
+    if !runs.iter().any(|run| run.id == RunId(run_id)) {
+        return Err(format!("run {run_id} is not in stax-server history").into());
+    }
     Ok(())
+}
+
+fn run_view_params(run: Option<u64>) -> RunViewParams {
+    RunViewParams {
+        run: run.map(RunId),
+    }
+}
+
+fn view_params(run: Option<u64>, tid: Option<u32>) -> ViewParams {
+    ViewParams {
+        run: run.map(RunId),
+        tid,
+        filter: LiveFilter {
+            time_range: None,
+            exclude_symbols: Vec::new(),
+        },
+    }
 }
 
 fn run_compare(args: CompareArgs) -> Result<(), Box<dyn Error>> {
@@ -1512,7 +1532,7 @@ fn truncate_label(label: &str, max_chars: usize) -> String {
 
 async fn run_top(args: TopArgs) -> Result<(), Box<dyn Error>> {
     let url = require_server_socket()?;
-    select_query_run_if_requested(&url, "top --run", args.run).await?;
+    ensure_query_run_if_requested(&url, "top --run", args.run).await?;
     let sort = match args.sort.as_str() {
         "self" => TopSort::BySelf,
         "total" => TopSort::ByTotal,
@@ -1523,20 +1543,10 @@ async fn run_top(args: TopArgs) -> Result<(), Box<dyn Error>> {
     let client: ProfilerClient = vox::connect(&url).await?;
     let _debug_registration = register_profiler_client("top", &client);
     let update = client
-        .top_update(
-            args.limit,
-            sort,
-            ViewParams {
-                tid: args.tid,
-                filter: LiveFilter {
-                    time_range: None,
-                    exclude_symbols: Vec::new(),
-                },
-            },
-        )
+        .top_update(args.limit, sort, view_params(args.run, args.tid))
         .await
         .map_err(|e| format!("{e:?}"))?;
-    let threads = client.threads().await.ok();
+    let threads = client.threads(run_view_params(args.run)).await.ok();
     if update.entries.is_empty() {
         print_empty_top(&update, threads.as_ref(), args.tid, args.limit);
         return Ok(());
@@ -1582,16 +1592,10 @@ async fn run_top(args: TopArgs) -> Result<(), Box<dyn Error>> {
 
 async fn run_annotate(args: AnnotateArgs) -> Result<(), Box<dyn Error>> {
     let url = require_server_socket()?;
-    select_query_run_if_requested(&url, "annotate --run", args.run).await?;
+    ensure_query_run_if_requested(&url, "annotate --run", args.run).await?;
     let client: ProfilerClient = vox::connect(&url).await?;
     let _debug_registration = register_profiler_client("annotate", &client);
-    let view_params = ViewParams {
-        tid: args.tid,
-        filter: LiveFilter {
-            time_range: None,
-            exclude_symbols: Vec::new(),
-        },
-    };
+    let view_params = view_params(args.run, args.tid);
     let address = resolve_target(&client, &args.target, view_params.clone()).await?;
     let view = client
         .annotated(address, view_params)
@@ -1620,10 +1624,13 @@ async fn run_annotate(args: AnnotateArgs) -> Result<(), Box<dyn Error>> {
 
 async fn run_threads(args: ThreadsArgs) -> Result<(), Box<dyn Error>> {
     let url = require_server_socket()?;
-    select_query_run_if_requested(&url, "threads --run", args.run).await?;
+    ensure_query_run_if_requested(&url, "threads --run", args.run).await?;
     let client: ProfilerClient = vox::connect(&url).await?;
     let _debug_registration = register_profiler_client("threads", &client);
-    let update = client.threads().await.map_err(|e| format!("{e:?}"))?;
+    let update = client
+        .threads(run_view_params(args.run))
+        .await
+        .map_err(|e| format!("{e:?}"))?;
     print_threads(&update, args.limit);
     Ok(())
 }
@@ -1734,20 +1741,14 @@ fn dominant_off_cpu_reason(b: &OffCpuBreakdown) -> &'static str {
 
 async fn run_flame(args: FlameArgs) -> Result<(), Box<dyn Error>> {
     let url = require_server_socket()?;
-    select_query_run_if_requested(&url, "flame --run", args.run).await?;
+    ensure_query_run_if_requested(&url, "flame --run", args.run).await?;
     let client: ProfilerClient = vox::connect(&url).await?;
     let _debug_registration = register_profiler_client("flame", &client);
     let update = client
-        .flamegraph(ViewParams {
-            tid: args.tid,
-            filter: LiveFilter {
-                time_range: None,
-                exclude_symbols: Vec::new(),
-            },
-        })
+        .flamegraph(view_params(args.run, args.tid))
         .await
         .map_err(|e| format!("{e:?}"))?;
-    let threads = client.threads().await.ok();
+    let threads = client.threads(run_view_params(args.run)).await.ok();
     print_flame(&update, args.max_depth, args.threshold_pct);
     if update.root.children.is_empty() {
         maybe_print_empty_view_hint("flame", &update.total_off_cpu, threads.as_ref(), args.tid);

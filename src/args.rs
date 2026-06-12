@@ -146,8 +146,7 @@ pub struct SelectRunArgs {
 
 #[derive(Facet, Debug)]
 pub struct DiagnoseArgs {
-    /// Select a stopped in-memory run from `stax list` before querying.
-    /// Equivalent to `stax select-run <ID>` followed by `stax diagnose`.
+    /// Query a run from `stax list` without changing the selected query state.
     #[facet(args::named, default)]
     pub run: Option<u64>,
 }
@@ -178,8 +177,7 @@ pub struct WaitArgs {
 
 #[derive(Facet, Debug)]
 pub struct TopArgs {
-    /// Select a stopped in-memory run from `stax list` before querying.
-    /// Equivalent to `stax select-run <ID>` followed by `stax top`.
+    /// Query a run from `stax list` without changing the selected query state.
     #[facet(args::named, default)]
     pub run: Option<u64>,
 
@@ -201,8 +199,7 @@ pub struct TopArgs {
 
 #[derive(Facet, Debug)]
 pub struct ThreadsArgs {
-    /// Select a stopped in-memory run from `stax list` before querying.
-    /// Equivalent to `stax select-run <ID>` followed by `stax threads`.
+    /// Query a run from `stax list` without changing the selected query state.
     #[facet(args::named, default)]
     pub run: Option<u64>,
 
@@ -215,8 +212,7 @@ pub struct ThreadsArgs {
 
 #[derive(Facet, Debug)]
 pub struct FlameArgs {
-    /// Select a stopped in-memory run from `stax list` before querying.
-    /// Equivalent to `stax select-run <ID>` followed by `stax flame`.
+    /// Query a run from `stax list` without changing the selected query state.
     #[facet(args::named, default)]
     pub run: Option<u64>,
 
@@ -249,8 +245,7 @@ pub struct AnnotateArgs {
     #[facet(args::positional)]
     pub target: String,
 
-    /// Select a stopped in-memory run from `stax list` before querying.
-    /// Equivalent to `stax select-run <ID>` followed by `stax annotate`.
+    /// Query a run from `stax list` without changing the selected query state.
     #[facet(args::named, default)]
     pub run: Option<u64>,
 

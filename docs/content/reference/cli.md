@@ -170,8 +170,8 @@ After `select-run`, `threads`, `top`, `flame`, `annotate`, and `diagnose`
 operate on that run. It refuses to replace state while a recording is active.
 This is server-memory history, not persistence; save restart-safe artifacts
 with [`stax save`](#stax-save) and restore them with [`stax open`](#stax-open).
-The reporting commands also accept `--run <RUN_ID>` as shorthand for selecting
-a stopped in-memory run before querying it.
+The reporting commands also accept `--run <RUN_ID>` for non-mutating one-off
+queries of stopped in-memory runs.
 
 ## `stax compare`
 
@@ -215,7 +215,7 @@ stax top [OPTIONS]
 
 | flag                | type     | default  | meaning                                              |
 |---------------------|----------|----------|------------------------------------------------------|
-| `--run <RUN_ID>`    | `u64`    | *(none)* | select a stopped in-memory run before querying       |
+| `--run <RUN_ID>`    | `u64`    | *(none)* | query a run without changing selected query state    |
 | `-n, --limit <N>`   | `u32`    | `20`     | maximum number of entries to return                  |
 | `--sort <MODE>`     | `String` | `self`   | `self` (leaf-only) or `total` (any frame)            |
 | `--tid <TID>`       | `u32`    | *(none)* | restrict to one thread; default is all threads       |
@@ -243,7 +243,7 @@ stax flame [OPTIONS]
 
 | flag                       | type    | default  | meaning                                                        |
 |----------------------------|---------|----------|----------------------------------------------------------------|
-| `--run <RUN_ID>`           | `u64`   | *(none)* | select a stopped in-memory run before querying                 |
+| `--run <RUN_ID>`           | `u64`   | *(none)* | query a run without changing selected query state              |
 | `-d, --max-depth <N>`      | `usize` | `12`     | stop printing below depth N; cut subtrees collapse to a summary |
 | `--threshold-pct <PCT>`    | `f64`   | `1.0`    | hide subtrees below this percent of total active time; `0` for all |
 | `--tid <TID>`              | `u32`   | *(none)* | restrict to one thread; default is all threads                  |
@@ -272,7 +272,7 @@ stax threads [OPTIONS]
 
 | flag                | type  | default | meaning                                                  |
 |---------------------|-------|---------|----------------------------------------------------------|
-| `--run <RUN_ID>`    | `u64` | *(none)*| select a stopped in-memory run before querying           |
+| `--run <RUN_ID>`    | `u64` | *(none)*| query a run without changing selected query state        |
 | `-n, --limit <N>`   | `u32` | `20`    | maximum threads to print; `0` prints every thread        |
 
 ## `stax annotate`
@@ -287,7 +287,7 @@ stax annotate <TARGET> [OPTIONS]
 | flag / arg          | type     | default  | meaning                                                          |
 |---------------------|----------|----------|------------------------------------------------------------------|
 | `<TARGET>`          | positional `String` | *(required)* | hex address (`0x10004ad60`) or a substring of a demangled name |
-| `--run <RUN_ID>`    | `u64`    | *(none)* | select a stopped in-memory run before resolving the target       |
+| `--run <RUN_ID>`    | `u64`    | *(none)* | query a run without changing selected query state                |
 | `--tid <TID>`       | `u32`    | *(none)* | restrict to one thread; default is all threads                   |
 
 A name substring is matched case-insensitively against the run's top-256
@@ -310,7 +310,7 @@ stax diagnose [OPTIONS]
 
 | flag             | type  | default | meaning                                            |
 |------------------|-------|---------|----------------------------------------------------|
-| `--run <RUN_ID>` | `u64` | *(none)*| select a stopped in-memory run before diagnostics  |
+| `--run <RUN_ID>` | `u64` | *(none)*| query a run without changing selected query state  |
 
 ## `stax dump`
 

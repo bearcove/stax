@@ -12,8 +12,9 @@ use parking_lot::RwLock;
 use stax_live_proto::{
     AnnotatedLine, AnnotatedView, CfgUpdate, FlameNode, FlamegraphUpdate, IntervalEntry,
     IntervalListUpdate, LiveFilter, NeighborsUpdate, PetSampleEntry, PetSampleListUpdate, Profiler,
-    TargetLaneTimeline, TargetSpanEntry, TargetSpanGroup, TargetSpanListUpdate, ThreadInfo,
-    ThreadsUpdate, TimelineBucket, TimelineUpdate, TopEntry, TopSort, TopUpdate, ViewParams,
+    RunViewParams, TargetLaneTimeline, TargetSpanEntry, TargetSpanGroup, TargetSpanListUpdate,
+    ThreadInfo, ThreadsUpdate, TimelineBucket, TimelineParams, TimelineUpdate, TopEntry, TopSort,
+    TopUpdate, ViewParams,
 };
 
 use crate::aggregator::{Aggregation, EventCtx, OffCpuBreakdown, PmcAccum, StackNode};
@@ -87,7 +88,11 @@ impl Profiler for LiveServer {
         params: ViewParams,
         output: vox::Tx<TopUpdate>,
     ) {
-        let ViewParams { tid, filter } = params;
+        let ViewParams {
+            run: _,
+            tid,
+            filter,
+        } = params;
         tracing::info!(?sort, ?tid, limit, "subscribe_top: starting stream");
         let aggregator = self.aggregator.clone();
         let binaries = self.binaries.clone();
@@ -121,14 +126,18 @@ impl Profiler for LiveServer {
         });
     }
 
-    async fn total_on_cpu_ns(&self) -> u64 {
+    async fn total_on_cpu_ns(&self, _params: RunViewParams) -> u64 {
         let agg = self.aggregator.read();
         let bins = self.binaries.read();
         agg.aggregate_all(&bins).total_on_cpu_ns
     }
 
     async fn annotated(&self, address: u64, params: ViewParams) -> AnnotatedView {
-        let ViewParams { tid, filter } = params;
+        let ViewParams {
+            run: _,
+            tid,
+            filter,
+        } = params;
         let by_address = {
             let agg = self.aggregator.read();
             let bins = self.binaries.read();
@@ -148,7 +157,11 @@ impl Profiler for LiveServer {
         params: ViewParams,
         output: vox::Tx<AnnotatedView>,
     ) {
-        let ViewParams { tid, filter } = params;
+        let ViewParams {
+            run: _,
+            tid,
+            filter,
+        } = params;
         tracing::info!(
             address = format!("{:#x}", address),
             ?tid,
@@ -191,7 +204,11 @@ impl Profiler for LiveServer {
     }
 
     async fn cfg(&self, address: u64, params: ViewParams) -> CfgUpdate {
-        let ViewParams { tid, filter } = params;
+        let ViewParams {
+            run: _,
+            tid,
+            filter,
+        } = params;
         let by_address = {
             let agg = self.aggregator.read();
             let bins = self.binaries.read();
@@ -206,7 +223,11 @@ impl Profiler for LiveServer {
     }
 
     async fn subscribe_cfg(&self, address: u64, params: ViewParams, output: vox::Tx<CfgUpdate>) {
-        let ViewParams { tid, filter } = params;
+        let ViewParams {
+            run: _,
+            tid,
+            filter,
+        } = params;
         tracing::info!(
             address = format!("{:#x}", address),
             ?tid,
@@ -247,7 +268,11 @@ impl Profiler for LiveServer {
     }
 
     async fn flamegraph(&self, params: ViewParams) -> FlamegraphUpdate {
-        let ViewParams { tid, filter } = params;
+        let ViewParams {
+            run: _,
+            tid,
+            filter,
+        } = params;
         let agg = self.aggregator.read();
         let bins = self.binaries.read();
         let aggregation = aggregate_with_filter(&agg, &bins, tid, &filter);
@@ -255,7 +280,11 @@ impl Profiler for LiveServer {
     }
 
     async fn subscribe_flamegraph(&self, params: ViewParams, output: vox::Tx<FlamegraphUpdate>) {
-        let ViewParams { tid, filter } = params;
+        let ViewParams {
+            run: _,
+            tid,
+            filter,
+        } = params;
         tracing::info!(?tid, "subscribe_flamegraph: starting stream");
         let aggregator = self.aggregator.clone();
         let binaries = self.binaries.clone();
@@ -283,7 +312,11 @@ impl Profiler for LiveServer {
     }
 
     async fn neighbors(&self, address: u64, params: ViewParams) -> NeighborsUpdate {
-        let ViewParams { tid, filter } = params;
+        let ViewParams {
+            run: _,
+            tid,
+            filter,
+        } = params;
         let agg = self.aggregator.read();
         let bins = self.binaries.read();
         let aggregation = aggregate_with_filter(&agg, &bins, tid, &filter);
@@ -296,7 +329,11 @@ impl Profiler for LiveServer {
         params: ViewParams,
         output: vox::Tx<NeighborsUpdate>,
     ) {
-        let ViewParams { tid, filter } = params;
+        let ViewParams {
+            run: _,
+            tid,
+            filter,
+        } = params;
         tracing::info!(
             address = format!("{:#x}", address),
             ?tid,
@@ -331,11 +368,13 @@ impl Profiler for LiveServer {
         });
     }
 
-    async fn timeline(&self, tid: Option<u32>) -> TimelineUpdate {
+    async fn timeline(&self, params: TimelineParams) -> TimelineUpdate {
+        let TimelineParams { run: _, tid } = params;
         build_timeline_update(&self.aggregator, &self.binaries, tid)
     }
 
-    async fn subscribe_timeline(&self, tid: Option<u32>, output: vox::Tx<TimelineUpdate>) {
+    async fn subscribe_timeline(&self, params: TimelineParams, output: vox::Tx<TimelineUpdate>) {
+        let TimelineParams { run: _, tid } = params;
         tracing::info!(?tid, "subscribe_timeline: starting stream");
         let aggregator = self.aggregator.clone();
         let binaries = self.binaries.clone();
@@ -357,13 +396,18 @@ impl Profiler for LiveServer {
         });
     }
 
-    async fn wakers(&self, wakee_tid: u32) -> stax_live_proto::WakersUpdate {
+    async fn wakers(
+        &self,
+        wakee_tid: u32,
+        _params: RunViewParams,
+    ) -> stax_live_proto::WakersUpdate {
         build_wakers_update(&self.aggregator, &self.binaries, wakee_tid)
     }
 
     async fn subscribe_wakers(
         &self,
         wakee_tid: u32,
+        _params: RunViewParams,
         output: vox::Tx<stax_live_proto::WakersUpdate>,
     ) {
         tracing::info!(?wakee_tid, "subscribe_wakers: starting stream");
@@ -389,7 +433,11 @@ impl Profiler for LiveServer {
 
     async fn intervals(&self, flame_key: String, params: ViewParams) -> IntervalListUpdate {
         let _ = flame_key;
-        let ViewParams { tid, filter } = params;
+        let ViewParams {
+            run: _,
+            tid,
+            filter,
+        } = params;
         let agg = self.aggregator.read();
         let bins = self.binaries.read();
         build_intervals_update(&agg, &bins, tid, &filter)
@@ -406,7 +454,11 @@ impl Profiler for LiveServer {
         // key). For now we return every off-CPU interval matching
         // the tid + time/exclude filter, capped at INTERVAL_CAP per
         // snapshot so the wire payload stays bounded.
-        let ViewParams { tid, filter } = params;
+        let ViewParams {
+            run: _,
+            tid,
+            filter,
+        } = params;
         tracing::info!(?tid, %flame_key, "subscribe_intervals: starting stream");
         let aggregator = self.aggregator.clone();
         let binaries = self.binaries.clone();
@@ -434,7 +486,11 @@ impl Profiler for LiveServer {
 
     async fn pet_samples(&self, flame_key: String, params: ViewParams) -> PetSampleListUpdate {
         let _ = flame_key;
-        let ViewParams { tid, filter } = params;
+        let ViewParams {
+            run: _,
+            tid,
+            filter,
+        } = params;
         let agg = self.aggregator.read();
         build_pet_samples_update(&agg, tid, &filter)
     }
@@ -446,7 +502,11 @@ impl Profiler for LiveServer {
         output: vox::Tx<PetSampleListUpdate>,
     ) {
         // Same flame_key-filter caveat as subscribe_intervals.
-        let ViewParams { tid, filter } = params;
+        let ViewParams {
+            run: _,
+            tid,
+            filter,
+        } = params;
         tracing::info!(?tid, %flame_key, "subscribe_pet_samples: starting stream");
         let aggregator = self.aggregator.clone();
         let revision = self.revision.clone();
@@ -472,7 +532,11 @@ impl Profiler for LiveServer {
 
     async fn target_spans(&self, flame_key: String, params: ViewParams) -> TargetSpanListUpdate {
         let _ = flame_key;
-        let ViewParams { tid, filter } = params;
+        let ViewParams {
+            run: _,
+            tid,
+            filter,
+        } = params;
         let agg = self.aggregator.read();
         let bins = self.binaries.read();
         build_target_spans_update(&agg, &bins, tid, &filter)
@@ -485,7 +549,11 @@ impl Profiler for LiveServer {
         output: vox::Tx<TargetSpanListUpdate>,
     ) {
         let _ = flame_key;
-        let ViewParams { tid, filter } = params;
+        let ViewParams {
+            run: _,
+            tid,
+            filter,
+        } = params;
         tracing::info!(?tid, "subscribe_target_spans: starting stream");
         let agg = self.aggregator.clone();
         let bins = self.binaries.clone();
@@ -521,11 +589,11 @@ impl Profiler for LiveServer {
         self.paused.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    async fn threads(&self) -> ThreadsUpdate {
+    async fn threads(&self, _params: RunViewParams) -> ThreadsUpdate {
         build_threads_update(&self.aggregator, &self.binaries)
     }
 
-    async fn subscribe_threads(&self, output: vox::Tx<ThreadsUpdate>) {
+    async fn subscribe_threads(&self, _params: RunViewParams, output: vox::Tx<ThreadsUpdate>) {
         tracing::info!("subscribe_threads: starting stream");
         let aggregator = self.aggregator.clone();
         let binaries = self.binaries.clone();

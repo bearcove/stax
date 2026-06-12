@@ -8,6 +8,7 @@ import type {
   TimelineUpdate,
 } from "./generated/profiler.generated.ts";
 import type { DisplayMode } from "./App.tsx";
+import { timelineParams } from "./App.tsx";
 import { cpuOnlyNs, formatDuration } from "./wire.ts";
 
 /// Compact timeline strip across the top of the page. Each bucket is
@@ -39,7 +40,7 @@ export function Timeline({
     let cancelled = false;
     setUpdate(null);
     const [tx, rx] = channel<TimelineUpdate>();
-    client.subscribeTimeline(tid, tx).catch(() => {});
+    client.subscribeTimeline(timelineParams(tid), tx).catch(() => {});
     (async () => {
       for await (const next of rx) {
         if (cancelled) break;
