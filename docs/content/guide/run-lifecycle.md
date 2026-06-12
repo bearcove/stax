@@ -227,6 +227,11 @@ to a temporary archive directory, reopens it, exercises `stax select-run`,
 queries the restored run through `threads`/`top`/`flame`/`diagnose`, and runs
 `stax compare` against itself.
 
+The focused target-span workflow runs the static verifier on normal PRs. The
+archive and web smokes are available as manual `workflow_dispatch` checks in
+`.github/workflows/target-spans.yml` because they need a runner that can
+manage local stax servers, recording, Vite, and Playwright.
+
 ## Putting it together
 
 ```bash

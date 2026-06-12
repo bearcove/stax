@@ -1,0 +1,164 @@
+name: Target Spans
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/target-spans.yml'
+      - '.config/dodeca.styx'
+      - 'AGENTS.md'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'Justfile'
+      - 'README.md'
+      - 'cli/**'
+      - 'docs/**'
+      - 'frontend/**'
+      - 'notes/stax-improvement-plan.md'
+      - 'stax-live-proto/**'
+      - 'stax-server/**'
+      - 'stax-target/**'
+      - 'xtask/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/target-spans.yml'
+      - '.config/dodeca.styx'
+      - 'AGENTS.md'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'Justfile'
+      - 'README.md'
+      - 'cli/**'
+      - 'docs/**'
+      - 'frontend/**'
+      - 'notes/stax-improvement-plan.md'
+      - 'stax-live-proto/**'
+      - 'stax-server/**'
+      - 'stax-target/**'
+      - 'xtask/**'
+  workflow_dispatch:
+    inputs:
+      live_smokes:
+        description: Run checkout-local archive and browser smokes.
+        required: false
+        default: false
+        type: boolean
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  focused:
+    name: Focused target-span checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: stax
+    steps:
+      - name: Checkout stax
+        uses: actions/checkout@v6
+        with:
+          path: stax
+
+      - name: Checkout vox sibling
+        uses: actions/checkout@v6
+        with:
+          repository: bearcove/vox
+          path: vox
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Install just
+        uses: taiki-e/install-action@just
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: stax -> target
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v5
+        with:
+          version: 11.5.2
+
+      - name: Install frontend dependencies
+        run: pnpm --dir frontend install --frozen-lockfile
+
+      - name: Install dodeca
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/bearcove/dodeca/releases/latest/download/dodeca-installer.sh | sh
+
+      - name: Run focused target-span checks
+        run: just target-span-check
+
+  live-smokes:
+    name: Live archive and web smokes
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.live_smokes }}
+    runs-on: bearcove-ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: stax
+    steps:
+      - name: Checkout stax
+        uses: actions/checkout@v6
+        with:
+          path: stax
+
+      - name: Checkout vox sibling
+        uses: actions/checkout@v6
+        with:
+          repository: bearcove/vox
+          path: vox
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Install just
+        uses: taiki-e/install-action@just
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: stax -> target
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v5
+        with:
+          version: 11.5.2
+
+      - name: Install frontend dependencies
+        run: pnpm --dir frontend install --frozen-lockfile
+
+      - name: Install Playwright CLI
+        run: npm install --global @playwright/cli
+
+      - name: Install Chromium for Playwright
+        run: playwright-cli install chromium
+
+      - name: Smoke saved target-span archives
+        run: just archive-smoke
+
+      - name: Smoke target-span web UI
+        run: just web-target-smoke

@@ -105,6 +105,11 @@ temporary checkout-local `stax-server`, saves and reopens the archive, starts
 Vite, then drives a real browser through the target-time and target-span
 details surfaces at desktop and mobile widths.
 
+The script uses the Codex Playwright wrapper when it is available. Outside
+Codex it tries `playwright-cli` from `PATH`, then falls back to
+`npx --package @playwright/cli playwright-cli`; set `PWCLI=/path/to/wrapper`
+when a runner needs a specific browser driver.
+
 ## Regenerating the RPC bindings
 
 The frontend talks to `stax-server` through generated TypeScript bindings in

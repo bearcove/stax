@@ -4,13 +4,21 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
-PWCLI="${PWCLI:-${CODEX_HOME:-$HOME/.codex}/skills/playwright/scripts/playwright_cli.sh}"
-if ! command -v npx >/dev/null 2>&1; then
-    echo "web-target-smoke needs npx so the Playwright CLI wrapper can run" >&2
+PWCLI="${PWCLI:-}"
+PLAYWRIGHT_BIN=""
+if [[ -z "$PWCLI" ]]; then
+    codex_pwcli="${CODEX_HOME:-$HOME/.codex}/skills/playwright/scripts/playwright_cli.sh"
+    if [[ -x "$codex_pwcli" ]]; then
+        PWCLI="$codex_pwcli"
+    elif command -v playwright-cli >/dev/null 2>&1; then
+        PLAYWRIGHT_BIN="$(command -v playwright-cli)"
+    fi
+elif [[ ! -x "$PWCLI" ]]; then
+    echo "Playwright CLI wrapper not found: $PWCLI" >&2
     exit 1
 fi
-if [[ ! -x "$PWCLI" ]]; then
-    echo "Playwright CLI wrapper not found: $PWCLI" >&2
+if [[ -z "$PWCLI" && -z "$PLAYWRIGHT_BIN" ]] && ! command -v npx >/dev/null 2>&1; then
+    echo "web-target-smoke needs npx so Playwright CLI can run" >&2
     exit 1
 fi
 
@@ -24,7 +32,7 @@ server_pid=""
 vite_pid=""
 
 cleanup() {
-    PLAYWRIGHT_CLI_SESSION="$session" "$PWCLI" close >/dev/null 2>&1 || true
+    pw close >/dev/null 2>&1 || true
     if [[ -n "$vite_pid" ]]; then
         kill "$vite_pid" 2>/dev/null || true
         wait "$vite_pid" 2>/dev/null || true
@@ -64,7 +72,13 @@ wait_for_http() {
 }
 
 pw() {
-    PLAYWRIGHT_CLI_SESSION="$session" "$PWCLI" "$@"
+    if [[ -n "$PWCLI" ]]; then
+        PLAYWRIGHT_CLI_SESSION="$session" "$PWCLI" "$@"
+    elif [[ -n "$PLAYWRIGHT_BIN" ]]; then
+        "$PLAYWRIGHT_BIN" --session "$session" "$@"
+    else
+        npx --yes --package @playwright/cli playwright-cli --session "$session" "$@"
+    fi
 }
 
 pw_eval() {

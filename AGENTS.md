@@ -277,12 +277,21 @@ Routine verification recipes:
 ```
 just check-target            # cargo check -p stax-target --all-targets
 just test-target             # nextest list/run for stax-target
+just fmt-check               # cargo fmt --check
+just diff-check              # git diff --check
 just check-cli               # cargo check -p stax --all-targets
 just test-cli-target-lanes   # stable CLI synthetic-lane regression
 just docs                    # ddc build
 just frontend-check          # pnpm typecheck + vite build
 just target-span-check       # all focused target-span checks above
 ```
+
+GitHub Actions runs the same focused target-span verifier in
+`.github/workflows/target-spans.yml`. That workflow checks out `bearcove/vox`
+as a sibling of stax because this workspace patches the vox crates to
+`../vox/rust/*`. Its live archive/browser smokes are manual
+`workflow_dispatch` checks; enable `live_smokes` only on a runner that can run
+checkout-local stax servers, recording, Vite, and Playwright.
 
 If you need to abort:
 
@@ -484,7 +493,10 @@ just web-target-smoke
 
 That records the same corpus, reopens the saved archive, starts Vite, and
 uses a real browser to verify target lanes, target-time mode, target-span
-details, and desktop/mobile layout against the checkout server.
+details, and desktop/mobile layout against the checkout server. It uses the
+Codex Playwright wrapper when present, then `playwright-cli` from `PATH`, then
+`npx --package @playwright/cli playwright-cli`; set `PWCLI=/path/to/wrapper`
+to force a specific browser driver.
 
 ### `stax top [-n N] [--sort self|total] [--tid TID]`
 

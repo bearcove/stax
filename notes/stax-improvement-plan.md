@@ -666,6 +666,8 @@ Tasks:
     spans in existing views, origin-linked attribution, persistence/reopen
     semantics, and diagnostics/hints
 - Add `just` recipes or documented commands for:
+  - done: `just fmt-check` and `just diff-check` separate verification from
+    formatting
   - done: focused Rust checks (`just check-target`, `just test-target`,
     `just check-cli`, `just test-cli-target-lanes`)
   - done: docs build (`just docs`)
@@ -677,6 +679,9 @@ Tasks:
     `stax select-run`
   - done: `just web-target-smoke` for checkout-local browser verification of
     target lanes, target display mode, and target-span details
+  - done: GitHub Actions focused target-span workflow, with `bearcove/vox`
+    checked out as the required sibling and live archive/browser smokes gated
+    behind manual dispatch
 
 Acceptance criteria:
 
@@ -749,8 +754,9 @@ Done when:
 
 Deferred:
 
-- `just archive-smoke` should run in CI only after the runner can manage the
-  stax daemon lifecycle.
+- `just archive-smoke` / `just web-target-smoke` are wired as manual
+  `workflow_dispatch` checks; making them required by default waits until the
+  runner contract for local stax server/browser/profiling access is settled.
 - Append-friendly event logs, `blobs/`, and single-file packaging remain
   future work after the v2 aggregate chunk layout.
 
@@ -849,8 +855,10 @@ Resolved for this phase:
   completion semantics visible and avoids treating `drop` as a protocol
   action.
 - Stable CI corpus checks should be compile/unit/CLI-format checks first.
-  Live `just demo-corpus` / `just archive-smoke` belongs in gated CI once the
-  runner can manage the stax daemon lifecycle.
+  Done: focused checks run on PRs/pushes in `.github/workflows/target-spans.yml`.
+  Live `just archive-smoke` / `just web-target-smoke` are gated by manual
+  workflow dispatch until the runner contract for recording and browser access
+  is settled.
 - Saved-run format v2 is implemented as a chunked directory layout for new
   saves. Stopped-run history has an in-memory selector via `select-run`. The
   next persistence question is whether append-friendly event logs and
@@ -861,8 +869,8 @@ Still open:
 - Should append-friendly saved-run event logs land before per-call
   `--run <ID>` live querying, or should those land together so archives and
   live history share one query selector model?
-- Whether `just web-target-smoke` should run in CI by default once the runner
-  can provide browser dependencies and stax daemon access.
+- Whether the manual live smokes should become required checks once the runner
+  can provide browser dependencies and stax daemon/profiling access.
 
 ## Working rule for future agents
 

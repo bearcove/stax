@@ -5,6 +5,12 @@ list:
 fmt:
     cargo fmt
 
+fmt-check:
+    cargo fmt --check
+
+diff-check:
+    git diff --check
+
 check-target:
     cargo check -p stax-target --all-targets --message-format=short
 
@@ -29,7 +35,7 @@ frontend-check:
 web-target-smoke:
     bash frontend/scripts/web-target-smoke.sh
 
-target-span-check: fmt check-target test-target check-cli test-cli-target-lanes docs frontend-check
+target-span-check: fmt-check check-target test-target check-cli test-cli-target-lanes docs frontend-check diff-check
 
 install:
     cargo xtask install
