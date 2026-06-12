@@ -342,13 +342,17 @@ export interface RunControlCaller {
    */
   stopActive(): Promise<{ ok: true; value: RunSummary } | { ok: false; error: RunControlError }>;
   /**
-   * Save the current or most recent queryable run into a v2 directory
-   * archive at `path`.
+   * Save the current or most recent queryable run into a v2 archive at
+   * `path`. Paths ending in `.stax` create a single-file package; other
+   * paths create a directory with aggregate chunks, blobs, and
+   * `events.jsonl`.
    */
   saveCurrent(path: string): Promise<{ ok: true; value: void } | { ok: false; error: RunControlError }>;
   /**
    * Open a saved archive into the server's current query state. Accepts
-   * v2 archive directories/manifests and legacy v1 archive.json files.
+   * v2 archive directories/manifests, `.stax` packages, and legacy v1
+   * archive.json files. V2 archives replay saved event records when
+   * present.
    * Fails while a recording is active.
    */
   openSaved(path: string): Promise<{ ok: true; value: void } | { ok: false; error: RunControlError }>;
@@ -480,8 +484,10 @@ export class RunControlClient implements RunControlCaller {
   }
 
   /**
-   * Save the current or most recent queryable run into a v2 directory
-   * archive at `path`.
+   * Save the current or most recent queryable run into a v2 archive at
+   * `path`. Paths ending in `.stax` create a single-file package; other
+   * paths create a directory with aggregate chunks, blobs, and
+   * `events.jsonl`.
    */
   async saveCurrent(path: string): Promise<{ ok: true; value: void } | { ok: false; error: RunControlError }> {
     try {
@@ -503,7 +509,9 @@ export class RunControlClient implements RunControlCaller {
 
   /**
    * Open a saved archive into the server's current query state. Accepts
-   * v2 archive directories/manifests and legacy v1 archive.json files.
+   * v2 archive directories/manifests, `.stax` packages, and legacy v1
+   * archive.json files. V2 archives replay saved event records when
+   * present.
    * Fails while a recording is active.
    */
   async openSaved(path: string): Promise<{ ok: true; value: void } | { ok: false; error: RunControlError }> {
