@@ -9,6 +9,51 @@ This document is the agent-facing manual: install, lifecycle, query, wait.
 stax runs on **macOS** and **Linux**; platform differences are called out
 where they matter.
 
+## stax is NOT just a CPU sampler — read this before concluding anything
+
+A recording captures the **whole timeline** of the target, not just on-CPU
+stacks. If the workload you care about is GPU-bound or wait-bound, stax is
+still the right tool — that is the whole point. One recording holds:
+
+- **On-CPU PET samples** — what `top`, `flame`, `annotate` aggregate.
+- **Off-CPU intervals + wakeup attribution** — every blocked stretch with
+  why-blocked classification. `stax threads` prints the per-thread
+  on/off-CPU breakdown on the CLI; the web UI timeline shows the intervals.
+- **GPU (and other accelerator) lanes** via **`stax-target`** — a profiled
+  app links the `stax-target` crate and reports named spans (kernel
+  dispatches, command-buffer stages) with `mach_absolute_time`-derived
+  timestamps; they ingest as a **synthetic thread** per `(pid, lane)` on the
+  same timebase as everything else. No correlation step, no chrome-trace
+  export, no second tool. See `stax-target/src/lib.rs` and
+  `stax-server/src/target_ingest.rs`; the guide page is
+  `docs/content/guide/profiling-gpu-work.md`.
+
+A cooperating process pays nothing when not recorded: the target polls a
+capture gate (~1s) and only captures spans while a recording of its pid is
+active (`stax_target::reporting_active()`).
+
+Known consumer: **bee's `hx`** reports Metal 4 per-dispatch GPU timestamps
+as the `"GPU tq1s"` lane (and TTS lanes) — see
+`bee/rust/helix-metal4/src/stax.rs`, whose module doc says it plainly:
+"stax is THE profiler for this work".
+
+Gotchas that have actually misled agents (verified 2026-06-12):
+
+- Synthetic GPU lanes have **zero on-CPU time**, so the default
+  `stax threads` cutoff (top ~20 by on-CPU) HIDES them. Use
+  `stax threads -n 2000 | grep -i gpu` — the lane row shows its span count.
+  Synthetic tids live at/above `0xFFF0_0000`.
+- `stax top --tid <synthetic>` / `stax flame --tid <synthetic>` currently
+  return no data even when the lane holds thousands of ingested spans —
+  the CLI tree views aggregate PET samples only (likely a gap/bug; the
+  synthetic-symbol machinery exists precisely so span names render as
+  frames). Use the **web UI timeline** for per-kernel inspection until that
+  is fixed.
+- A GPU-bound target looks nearly EMPTY in `stax top` — a handful of
+  samples, allocator noise at the top. That is not "stax doesn't work";
+  that is the answer (the CPU is idle). The story is in `threads`, the
+  off-CPU intervals, and the GPU lane.
+
 ## Install
 
 One command from a fresh checkout builds and stages the binaries:
