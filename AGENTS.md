@@ -393,9 +393,10 @@ Write the current or most recent queryable run to a directory archive. The
 current archive format is v2: `manifest.json` plus typed facet-json chunks
 (`aggregator.json`, `binaries.json`, and `target-ingest.json`). The manifest
 records archive version, save time, producer/version, OS/arch, run summaries,
-and chunk filenames. The chunks store raw aggregator streams, binary/symbol
-metadata, and target-ingest diagnostics. It is meant for bug reports,
-handoff, and replaying `threads`/`top`/`flame` after the live process is gone.
+and archive-relative chunk filenames. The chunks store raw aggregator streams,
+binary/symbol metadata, and target-ingest diagnostics. It is meant for bug
+reports, handoff, and replaying `threads`/`top`/`flame` after the live process
+is gone.
 
 ```
 $ stax save /tmp/stax-demo.staxdir

@@ -283,7 +283,7 @@ Status as of 2026-06-12:
     plus typed chunks: `aggregator.json`, `binaries.json`, and
     `target-ingest.json`.
   - `manifest.json` records archive version, save time, producer/version,
-    OS/arch, run summaries, and chunk filenames.
+    OS/arch, run summaries, and archive-relative chunk filenames.
   - `stax open <PATH>` loads that archive back into `stax-server`'s current
     query state.
   - `open` refuses to replace state while a recording is active.

@@ -911,15 +911,36 @@ fn read_saved_archive_manifest(manifest_path: &Path) -> Result<SavedRunArchive, 
         format_version: manifest.format_version,
         saved_at_unix_ns: manifest.saved_at_unix_ns,
         runs: manifest.runs,
-        aggregator: read_saved_json(&base.join(&manifest.files.aggregator))?,
-        binaries: read_saved_json(&base.join(&manifest.files.binaries))?,
-        target_ingest: read_saved_json(&base.join(&manifest.files.target_ingest))?,
+        aggregator: read_saved_json(&archive_member_path(base, &manifest.files.aggregator)?)?,
+        binaries: read_saved_json(&archive_member_path(base, &manifest.files.binaries)?)?,
+        target_ingest: read_saved_json(&archive_member_path(base, &manifest.files.target_ingest)?)?,
     })
 }
 
 fn read_saved_json<T: facet::Facet<'static>>(path: &Path) -> Result<T, Box<dyn Error>> {
     let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     facet_json::from_slice(&bytes).map_err(|e| format!("parse {}: {e}", path.display()).into())
+}
+
+fn archive_member_path(base: &Path, member: &str) -> Result<PathBuf, Box<dyn Error>> {
+    let member_path = Path::new(member);
+    let mut has_component = false;
+    for component in member_path.components() {
+        match component {
+            std::path::Component::Normal(_) => has_component = true,
+            _ => {
+                return Err(format!(
+                    "archive member path {member:?} must stay inside {}",
+                    base.display()
+                )
+                .into());
+            }
+        }
+    }
+    if !has_component {
+        return Err(format!("archive member path {member:?} must not be empty").into());
+    }
+    Ok(base.join(member_path))
 }
 
 fn is_supported_archive_version(version: u32) -> bool {
@@ -2000,6 +2021,33 @@ mod tests {
             read_saved_archive(&archive_dir.join(ARCHIVE_V1_FILE_NAME)).expect("read legacy file");
         assert_eq!(from_file.format_version, ARCHIVE_V1_FORMAT_VERSION);
         assert_eq!(from_file.saved_at_unix_ns, 456);
+
+        let _ = std::fs::remove_dir_all(&archive_dir);
+    }
+
+    #[test]
+    fn read_saved_archive_rejects_manifest_paths_outside_archive() {
+        let archive_dir = temp_archive_dir("cli-v2-bad-path");
+        let _ = std::fs::remove_dir_all(&archive_dir);
+        std::fs::create_dir_all(&archive_dir).expect("create archive dir");
+
+        let manifest = SavedRunArchiveManifest {
+            format_version: ARCHIVE_FORMAT_VERSION,
+            saved_at_unix_ns: 123,
+            provenance: test_provenance(),
+            runs: Vec::new(),
+            files: SavedRunArchiveFiles {
+                aggregator: "../outside.json".to_owned(),
+                binaries: ARCHIVE_BINARIES_FILE_NAME.to_owned(),
+                target_ingest: ARCHIVE_TARGET_INGEST_FILE_NAME.to_owned(),
+            },
+        };
+        write_test_json(&archive_dir.join(ARCHIVE_MANIFEST_FILE_NAME), &manifest);
+
+        let error = read_saved_archive(&archive_dir)
+            .expect_err("manifest path outside archive should be rejected")
+            .to_string();
+        assert!(error.contains("must stay inside"));
 
         let _ = std::fs::remove_dir_all(&archive_dir);
     }

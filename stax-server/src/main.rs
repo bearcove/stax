@@ -797,9 +797,10 @@ fn read_archive_manifest(manifest_path: &Path) -> Result<SavedRunArchive, String
             manifest_path.display()
         )
     })?;
-    let aggregator = read_aggregator(base.join(&manifest.files.aggregator))?;
-    let binaries = read_binaries(base.join(&manifest.files.binaries))?;
-    let target_ingest = read_target_ingest(base.join(&manifest.files.target_ingest))?;
+    let aggregator = read_aggregator(archive_member_path(base, &manifest.files.aggregator)?)?;
+    let binaries = read_binaries(archive_member_path(base, &manifest.files.binaries)?)?;
+    let target_ingest =
+        read_target_ingest(archive_member_path(base, &manifest.files.target_ingest)?)?;
     Ok(SavedRunArchive {
         format_version: manifest.format_version,
         saved_at_unix_ns: manifest.saved_at_unix_ns,
@@ -823,6 +824,26 @@ fn read_binaries(path: PathBuf) -> Result<SavedBinaryRegistry, String> {
 fn read_target_ingest(path: PathBuf) -> Result<TargetIngestDiagnostics, String> {
     let bytes = fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     facet_json::from_slice(&bytes).map_err(|e| format!("parse {}: {e}", path.display()))
+}
+
+fn archive_member_path(base: &Path, member: &str) -> Result<PathBuf, String> {
+    let member_path = Path::new(member);
+    let mut has_component = false;
+    for component in member_path.components() {
+        match component {
+            std::path::Component::Normal(_) => has_component = true,
+            _ => {
+                return Err(format!(
+                    "archive member path {member:?} must stay inside {}",
+                    base.display()
+                ));
+            }
+        }
+    }
+    if !has_component {
+        return Err(format!("archive member path {member:?} must not be empty"));
+    }
+    Ok(base.join(member_path))
 }
 
 fn is_supported_archive_version(version: u32) -> bool {
@@ -879,6 +900,19 @@ mod tests {
     use super::*;
 
     const SYNTH_TID_BASE: u32 = 0xFFF0_0000;
+
+    #[test]
+    fn archive_member_path_rejects_paths_outside_archive() {
+        let base = Path::new("/tmp/stax-archive");
+
+        assert_eq!(
+            archive_member_path(base, "aggregator.json").expect("valid member"),
+            base.join("aggregator.json")
+        );
+        assert!(archive_member_path(base, "../outside.json").is_err());
+        assert!(archive_member_path(base, "/tmp/outside.json").is_err());
+        assert!(archive_member_path(base, "").is_err());
+    }
 
     #[tokio::test]
     async fn save_open_restores_query_state_and_target_diagnostics() {
