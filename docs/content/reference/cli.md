@@ -120,12 +120,13 @@ Save the current or most recent queryable run to an archive. Paths ending in
 `.stax` create a single-file facet-json package. Other paths create the v2
 directory layout: `manifest.json` plus typed facet-json chunks
 (`aggregator.json`, `binaries.json`, and `target-ingest.json`) plus an
-append-friendly `events.jsonl` sidecar. The manifest/package records archive
-version, save time, producer/version, OS/arch, and run summaries. The chunks
-or package store raw aggregator streams, binary/symbol metadata, target-ingest
-diagnostics, and typed `SavedEventLogEntry` records. New readers replay those
-records when present and keep the aggregate chunks/package members as a
-compatibility and inspection path.
+append-friendly `events.jsonl` sidecar; copied text bytes live under `blobs/`.
+The manifest/package records archive version, save time, producer/version,
+OS/arch, and run summaries. The chunks or package store raw aggregator
+streams, binary/symbol metadata, target-ingest diagnostics, typed
+`SavedEventLogEntry` records, and any code-byte blobs needed by `annotate`.
+New readers replay those records when present and keep the aggregate
+chunks/package members as a compatibility and inspection path.
 
 ```text
 stax save <PATH>

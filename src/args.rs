@@ -52,7 +52,7 @@ pub enum Command {
 
     /// Save the current or most recent queryable run to a v2 archive.
     /// Paths ending in .stax create a single-file package; other paths create
-    /// a directory with aggregate chunks and an events.jsonl replay stream.
+    /// a directory with aggregate chunks, blobs, and an events.jsonl replay stream.
     Save(SaveArgs),
 
     /// Open a saved run archive into stax-server's query state.

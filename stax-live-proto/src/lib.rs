@@ -1186,6 +1186,13 @@ pub struct SavedRunArchiveBundle {
     pub binaries: SavedBinaryRegistry,
     pub target_ingest: TargetIngestDiagnostics,
     pub events: Vec<SavedEventLogEntry>,
+    pub blobs: Vec<SavedArchiveBlob>,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct SavedArchiveBlob {
+    pub path: String,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Facet)]
@@ -1213,9 +1220,9 @@ pub struct SavedRunArchiveFiles {
 }
 
 /// One append-friendly record in `events.jsonl`, the saved-run stream written
-/// next to the v2 aggregate chunks and embedded in `.stax` packages. New
-/// readers replay this stream when it is present; the aggregate chunks remain
-/// a fast inspection and compatibility path.
+/// next to the v2 aggregate chunks/blobs and embedded in `.stax` packages.
+/// New readers replay this stream when it is present; the aggregate chunks
+/// remain a fast inspection and compatibility path.
 #[derive(Clone, Debug, Facet)]
 #[repr(u8)]
 pub enum SavedEventLogEntry {
@@ -1470,7 +1477,8 @@ pub trait RunControl {
 
     /// Save the current or most recent queryable run into a v2 archive at
     /// `path`. Paths ending in `.stax` create a single-file package; other
-    /// paths create a directory with aggregate chunks plus `events.jsonl`.
+    /// paths create a directory with aggregate chunks, blobs, and
+    /// `events.jsonl`.
     async fn save_current(&self, path: String) -> Result<(), RunControlError>;
 
     /// Open a saved archive into the server's current query state. Accepts

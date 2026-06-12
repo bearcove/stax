@@ -28,7 +28,7 @@ use stax_live_proto::{
     AnnotatedView, CfgUpdate, DiagnosticsSnapshot, FlamegraphUpdate, IntervalListUpdate,
     NeighborsUpdate, PetSampleListUpdate, Profiler, ProfilerDispatcher, RunConfig, RunControl,
     RunControlDispatcher, RunControlError, RunId, RunState, RunSummary, RunViewParams,
-    SavedAggregator, SavedBinaryRegistry, SavedEventLogEntry, SavedRunArchive,
+    SavedAggregator, SavedArchiveBlob, SavedBinaryRegistry, SavedEventLogEntry, SavedRunArchive,
     SavedRunArchiveBundle, SavedRunArchiveFiles, SavedRunArchiveManifest,
     SavedRunArchiveProvenance, ServerStatus, StopReason, TargetIngestDiagnostics,
     TargetIngestDispatcher, TargetSpanListUpdate, ThreadsUpdate, TimelineParams, TimelineUpdate,
@@ -49,6 +49,7 @@ const ARCHIVE_AGGREGATOR_FILE_NAME: &str = "aggregator.json";
 const ARCHIVE_BINARIES_FILE_NAME: &str = "binaries.json";
 const ARCHIVE_TARGET_INGEST_FILE_NAME: &str = "target-ingest.json";
 const ARCHIVE_EVENTS_FILE_NAME: &str = "events.jsonl";
+const ARCHIVE_BLOBS_DIR_NAME: &str = "blobs";
 const ARCHIVE_SINGLE_FILE_EXTENSION: &str = "stax";
 
 #[tokio::main]
@@ -1178,6 +1179,7 @@ fn write_archive_directory(path: &Path, archive: &SavedRunArchive) -> Result<(),
     }
     fs::create_dir_all(path).map_err(|e| format!("create archive dir {}: {e}", path.display()))?;
     remove_legacy_archive_file(path)?;
+    let (archive, blobs) = archive_for_storage(archive);
     let manifest = SavedRunArchiveManifest {
         format_version: ARCHIVE_FORMAT_VERSION,
         saved_at_unix_ns: archive.saved_at_unix_ns,
@@ -1196,7 +1198,8 @@ fn write_archive_directory(path: &Path, archive: &SavedRunArchive) -> Result<(),
         path.join(ARCHIVE_TARGET_INGEST_FILE_NAME),
         &archive.target_ingest,
     )?;
-    write_event_log(path.join(ARCHIVE_EVENTS_FILE_NAME), archive)
+    write_archive_blobs(path, &blobs)?;
+    write_event_log(path.join(ARCHIVE_EVENTS_FILE_NAME), &archive)
 }
 
 fn write_archive_bundle(path: &Path, archive: &SavedRunArchive) -> Result<(), String> {
@@ -1206,6 +1209,7 @@ fn write_archive_bundle(path: &Path, archive: &SavedRunArchive) -> Result<(), St
             path.display()
         ));
     }
+    let (archive, blobs) = archive_for_storage(archive);
     let bundle = SavedRunArchiveBundle {
         format_version: archive.format_version,
         saved_at_unix_ns: archive.saved_at_unix_ns,
@@ -1214,11 +1218,51 @@ fn write_archive_bundle(path: &Path, archive: &SavedRunArchive) -> Result<(), St
         aggregator: archive.aggregator.clone(),
         binaries: archive.binaries.clone(),
         target_ingest: archive.target_ingest.clone(),
-        events: archive_event_log_entries(archive),
+        events: archive_event_log_entries(&archive),
+        blobs,
     };
     let bytes = facet_json::to_vec_pretty(&bundle)
         .map_err(|e| format!("serialize {}: {e}", path.display()))?;
     fs::write(path, bytes).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+fn archive_for_storage(archive: &SavedRunArchive) -> (SavedRunArchive, Vec<SavedArchiveBlob>) {
+    let mut archive = archive.clone();
+    let mut blobs = Vec::new();
+    for (index, binary) in archive.binaries.binaries.iter_mut().enumerate() {
+        let Some(bytes) = binary.text_bytes.take() else {
+            continue;
+        };
+        blobs.push(SavedArchiveBlob {
+            path: binary_text_blob_member(index, binary),
+            bytes,
+        });
+    }
+    (archive, blobs)
+}
+
+fn write_archive_blobs(base: &Path, blobs: &[SavedArchiveBlob]) -> Result<(), String> {
+    let blobs_dir = base.join(ARCHIVE_BLOBS_DIR_NAME);
+    if blobs_dir.exists() {
+        if !blobs_dir.is_dir() {
+            return Err(format!(
+                "archive blobs path {} exists and is not a directory",
+                blobs_dir.display()
+            ));
+        }
+        fs::remove_dir_all(&blobs_dir)
+            .map_err(|e| format!("remove stale archive blobs {}: {e}", blobs_dir.display()))?;
+    }
+    if blobs.is_empty() {
+        return Ok(());
+    }
+    fs::create_dir_all(&blobs_dir)
+        .map_err(|e| format!("create archive blobs dir {}: {e}", blobs_dir.display()))?;
+    for blob in blobs {
+        let path = archive_member_path(base, &blob.path)?;
+        fs::write(&path, &blob.bytes).map_err(|e| format!("write {}: {e}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn archive_provenance() -> SavedRunArchiveProvenance {
@@ -1411,16 +1455,19 @@ fn read_archive_bundle(bundle_path: &Path) -> Result<SavedRunArchive, String> {
         if archive.runs.is_empty() {
             archive.runs = bundle.runs;
         }
+        restore_bundle_blobs(&mut archive.binaries, &bundle.blobs)?;
         return Ok(archive);
     }
-    Ok(SavedRunArchive {
+    let mut archive = SavedRunArchive {
         format_version: bundle.format_version,
         saved_at_unix_ns: bundle.saved_at_unix_ns,
         runs: bundle.runs,
         aggregator: bundle.aggregator,
         binaries: bundle.binaries,
         target_ingest: bundle.target_ingest,
-    })
+    };
+    restore_bundle_blobs(&mut archive.binaries, &bundle.blobs)?;
+    Ok(archive)
 }
 
 fn read_archive_manifest(manifest_path: &Path) -> Result<SavedRunArchive, String> {
@@ -1455,11 +1502,13 @@ fn read_archive_manifest(manifest_path: &Path) -> Result<SavedRunArchive, String
             if archive.runs.is_empty() {
                 archive.runs = manifest.runs;
             }
+            restore_directory_blobs(base, &mut archive.binaries)?;
             return Ok(archive);
         }
     }
     let aggregator = read_aggregator(archive_member_path(base, &manifest.files.aggregator)?)?;
-    let binaries = read_binaries(archive_member_path(base, &manifest.files.binaries)?)?;
+    let mut binaries = read_binaries(archive_member_path(base, &manifest.files.binaries)?)?;
+    restore_directory_blobs(base, &mut binaries)?;
     let target_ingest =
         read_target_ingest(archive_member_path(base, &manifest.files.target_ingest)?)?;
     Ok(SavedRunArchive {
@@ -1504,6 +1553,40 @@ fn read_event_log(path: &Path) -> Result<Vec<SavedEventLogEntry>, String> {
         entries.push(entry);
     }
     Ok(entries)
+}
+
+fn restore_directory_blobs(base: &Path, binaries: &mut SavedBinaryRegistry) -> Result<(), String> {
+    for (index, binary) in binaries.binaries.iter_mut().enumerate() {
+        let member = binary_text_blob_member(index, binary);
+        let path = archive_member_path(base, &member)?;
+        if !path.exists() {
+            continue;
+        }
+        binary.text_bytes =
+            Some(fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?);
+    }
+    Ok(())
+}
+
+fn restore_bundle_blobs(
+    binaries: &mut SavedBinaryRegistry,
+    blobs: &[SavedArchiveBlob],
+) -> Result<(), String> {
+    for (index, binary) in binaries.binaries.iter_mut().enumerate() {
+        let member = binary_text_blob_member(index, binary);
+        let Some(blob) = blobs.iter().find(|blob| blob.path == member) else {
+            continue;
+        };
+        binary.text_bytes = Some(blob.bytes.clone());
+    }
+    Ok(())
+}
+
+fn binary_text_blob_member(index: usize, binary: &stax_live_proto::SavedLoadedBinary) -> String {
+    format!(
+        "{ARCHIVE_BLOBS_DIR_NAME}/binary-text-{index:06}-{:016x}.bin",
+        binary.base_avma
+    )
 }
 
 fn archive_member_path(base: &Path, member: &str) -> Result<PathBuf, String> {
@@ -1580,8 +1663,8 @@ fn now_unix_ns() -> u64 {
 mod tests {
     use stax_live_proto::{
         LiveFilter, Profiler as _, RunControl as _, RunViewParams, SavedAggregator,
-        SavedBinaryRegistry, SavedEventLogEntry, TargetIngest as _, TargetReporterStats,
-        TargetSpan, TargetSpanBatch, TopSort, ViewParams,
+        SavedBinaryRegistry, SavedEventLogEntry, SavedLoadedBinary, TargetIngest as _,
+        TargetReporterStats, TargetSpan, TargetSpanBatch, TopSort, ViewParams,
     };
 
     use super::*;
@@ -1599,6 +1682,71 @@ mod tests {
         assert!(archive_member_path(base, "../outside.json").is_err());
         assert!(archive_member_path(base, "/tmp/outside.json").is_err());
         assert!(archive_member_path(base, "").is_err());
+    }
+
+    #[test]
+    fn archive_writes_binary_text_bytes_as_blobs() {
+        let archive_dir = temp_archive_dir("blobs");
+        let _ = std::fs::remove_dir_all(&archive_dir);
+        let package_path = archive_dir.with_extension(ARCHIVE_SINGLE_FILE_EXTENSION);
+        let _ = std::fs::remove_file(&package_path);
+        let archive = SavedRunArchive {
+            format_version: ARCHIVE_FORMAT_VERSION,
+            saved_at_unix_ns: 42,
+            runs: Vec::new(),
+            aggregator: SavedAggregator::default(),
+            binaries: SavedBinaryRegistry {
+                binaries: vec![test_saved_binary()],
+            },
+            target_ingest: TargetIngestDiagnostics::default(),
+        };
+
+        write_archive_directory(&archive_dir, &archive).expect("write directory archive");
+        let stored_binaries =
+            read_binaries(archive_dir.join(ARCHIVE_BINARIES_FILE_NAME)).expect("read binaries");
+        assert!(stored_binaries.binaries[0].text_bytes.is_none());
+        let event_log = read_event_log_for_test(&archive_dir.join(ARCHIVE_EVENTS_FILE_NAME));
+        assert!(event_log.iter().any(|entry| {
+            matches!(
+                entry,
+                SavedEventLogEntry::BinaryLoaded { binary }
+                    if binary.text_bytes.is_none()
+            )
+        }));
+        let blob_member = binary_text_blob_member(0, &stored_binaries.binaries[0]);
+        assert_eq!(
+            std::fs::read(archive_dir.join(&blob_member)).expect("read directory blob"),
+            vec![1, 2, 3, 4]
+        );
+        let restored = read_archive(&archive_dir).expect("read directory archive");
+        assert_eq!(
+            restored.binaries.binaries[0].text_bytes.as_deref(),
+            Some(&[1, 2, 3, 4][..])
+        );
+
+        write_archive_bundle(&package_path, &archive).expect("write package archive");
+        let bundle_bytes = std::fs::read(&package_path).expect("read package");
+        let bundle: SavedRunArchiveBundle =
+            facet_json::from_slice(&bundle_bytes).expect("parse package");
+        assert!(bundle.binaries.binaries[0].text_bytes.is_none());
+        assert!(bundle.events.iter().any(|entry| {
+            matches!(
+                entry,
+                SavedEventLogEntry::BinaryLoaded { binary }
+                    if binary.text_bytes.is_none()
+            )
+        }));
+        assert_eq!(bundle.blobs.len(), 1);
+        assert_eq!(bundle.blobs[0].path, blob_member);
+        assert_eq!(bundle.blobs[0].bytes, vec![1, 2, 3, 4]);
+        let restored = read_archive(&package_path).expect("read package archive");
+        assert_eq!(
+            restored.binaries.binaries[0].text_bytes.as_deref(),
+            Some(&[1, 2, 3, 4][..])
+        );
+
+        let _ = std::fs::remove_dir_all(&archive_dir);
+        let _ = std::fs::remove_file(&package_path);
     }
 
     #[tokio::test]
@@ -2021,5 +2169,18 @@ mod tests {
         text.lines()
             .map(|line| facet_json::from_slice(line.as_bytes()).expect("parse event log entry"))
             .collect()
+    }
+
+    fn test_saved_binary() -> SavedLoadedBinary {
+        SavedLoadedBinary {
+            path: "/tmp/jit-code".to_owned(),
+            base_avma: 0x1234_0000,
+            avma_end: 0x1234_1000,
+            text_svma: 0,
+            arch: Some(std::env::consts::ARCH.to_owned()),
+            is_executable: false,
+            symbols: Vec::new(),
+            text_bytes: Some(vec![1, 2, 3, 4]),
+        }
     }
 }

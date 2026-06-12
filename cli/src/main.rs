@@ -17,10 +17,10 @@ use stax_core::cmd_setup_linux;
 use stax_core::cmd_setup_mac;
 use stax_live_proto::{
     DiagnosticsSnapshot, FlameNode, FlamegraphUpdate, LiveFilter, OffCpuBreakdown, ProfilerClient,
-    RunControlClient, RunId, RunSummary, RunViewParams, SavedEventLogEntry, SavedIntervalKind,
-    SavedRunArchive, SavedRunArchiveBundle, SavedRunArchiveManifest, ServerStatus, StopReason,
-    TargetIngestDiagnostics, ThreadsUpdate, TopEntry, TopSort, TopUpdate, ViewParams,
-    WaitCondition, WaitOutcome,
+    RunControlClient, RunId, RunSummary, RunViewParams, SavedArchiveBlob, SavedEventLogEntry,
+    SavedIntervalKind, SavedRunArchive, SavedRunArchiveBundle, SavedRunArchiveManifest,
+    ServerStatus, StopReason, TargetIngestDiagnostics, ThreadsUpdate, TopEntry, TopSort, TopUpdate,
+    ViewParams, WaitCondition, WaitOutcome,
 };
 
 #[cfg(target_os = "macos")]
@@ -1258,6 +1258,7 @@ const ARCHIVE_V1_FORMAT_VERSION: u32 = 1;
 const ARCHIVE_V1_FILE_NAME: &str = "archive.json";
 const ARCHIVE_MANIFEST_FILE_NAME: &str = "manifest.json";
 const ARCHIVE_EVENTS_FILE_NAME: &str = "events.jsonl";
+const ARCHIVE_BLOBS_DIR_NAME: &str = "blobs";
 const ARCHIVE_SINGLE_FILE_EXTENSION: &str = "stax";
 #[cfg(test)]
 const ARCHIVE_AGGREGATOR_FILE_NAME: &str = "aggregator.json";
@@ -1319,16 +1320,19 @@ fn read_saved_archive_bundle(bundle_path: &Path) -> Result<SavedRunArchive, Box<
         if archive.runs.is_empty() {
             archive.runs = bundle.runs;
         }
+        restore_bundle_blobs(&mut archive.binaries, &bundle.blobs);
         return Ok(archive);
     }
-    Ok(SavedRunArchive {
+    let mut archive = SavedRunArchive {
         format_version: bundle.format_version,
         saved_at_unix_ns: bundle.saved_at_unix_ns,
         runs: bundle.runs,
         aggregator: bundle.aggregator,
         binaries: bundle.binaries,
         target_ingest: bundle.target_ingest,
-    })
+    };
+    restore_bundle_blobs(&mut archive.binaries, &bundle.blobs);
+    Ok(archive)
 }
 
 fn read_saved_archive_manifest(manifest_path: &Path) -> Result<SavedRunArchive, Box<dyn Error>> {
@@ -1364,16 +1368,23 @@ fn read_saved_archive_manifest(manifest_path: &Path) -> Result<SavedRunArchive, 
             if archive.runs.is_empty() {
                 archive.runs = manifest.runs;
             }
+            restore_directory_blobs(base, &mut archive.binaries)?;
             return Ok(archive);
         }
     }
+    let aggregator_path = archive_member_path(base, &manifest.files.aggregator)?;
+    let binaries_path = archive_member_path(base, &manifest.files.binaries)?;
+    let target_ingest_path = archive_member_path(base, &manifest.files.target_ingest)?;
+    let aggregator = read_saved_json(&aggregator_path)?;
+    let mut binaries: stax_live_proto::SavedBinaryRegistry = read_saved_json(&binaries_path)?;
+    restore_directory_blobs(base, &mut binaries)?;
     Ok(SavedRunArchive {
         format_version: manifest.format_version,
         saved_at_unix_ns: manifest.saved_at_unix_ns,
         runs: manifest.runs,
-        aggregator: read_saved_json(&archive_member_path(base, &manifest.files.aggregator)?)?,
-        binaries: read_saved_json(&archive_member_path(base, &manifest.files.binaries)?)?,
-        target_ingest: read_saved_json(&archive_member_path(base, &manifest.files.target_ingest)?)?,
+        aggregator,
+        binaries,
+        target_ingest: read_saved_json(&target_ingest_path)?,
     })
 }
 
@@ -1400,6 +1411,42 @@ fn read_saved_event_log(path: &Path) -> Result<Vec<SavedEventLogEntry>, Box<dyn 
         entries.push(entry);
     }
     Ok(entries)
+}
+
+fn restore_directory_blobs(
+    base: &Path,
+    binaries: &mut stax_live_proto::SavedBinaryRegistry,
+) -> Result<(), Box<dyn Error>> {
+    for (index, binary) in binaries.binaries.iter_mut().enumerate() {
+        let member = binary_text_blob_member(index, binary);
+        let path = archive_member_path(base, &member)?;
+        if !path.exists() {
+            continue;
+        }
+        binary.text_bytes =
+            Some(std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?);
+    }
+    Ok(())
+}
+
+fn restore_bundle_blobs(
+    binaries: &mut stax_live_proto::SavedBinaryRegistry,
+    blobs: &[SavedArchiveBlob],
+) {
+    for (index, binary) in binaries.binaries.iter_mut().enumerate() {
+        let member = binary_text_blob_member(index, binary);
+        let Some(blob) = blobs.iter().find(|blob| blob.path == member) else {
+            continue;
+        };
+        binary.text_bytes = Some(blob.bytes.clone());
+    }
+}
+
+fn binary_text_blob_member(index: usize, binary: &stax_live_proto::SavedLoadedBinary) -> String {
+    format!(
+        "{ARCHIVE_BLOBS_DIR_NAME}/binary-text-{index:06}-{:016x}.bin",
+        binary.base_avma
+    )
 }
 
 fn archive_member_path(base: &Path, member: &str) -> Result<PathBuf, Box<dyn Error>> {
@@ -2107,17 +2154,19 @@ fn mentions_metal_cooperation(function_name: Option<&str>, binary: Option<&str>)
 #[cfg(test)]
 mod tests {
     use super::{
-        ARCHIVE_AGGREGATOR_FILE_NAME, ARCHIVE_BINARIES_FILE_NAME, ARCHIVE_EVENTS_FILE_NAME,
-        ARCHIVE_FORMAT_VERSION, ARCHIVE_MANIFEST_FILE_NAME, ARCHIVE_SINGLE_FILE_EXTENSION,
-        ARCHIVE_TARGET_INGEST_FILE_NAME, ARCHIVE_V1_FILE_NAME, ARCHIVE_V1_FORMAT_VERSION,
-        SYNTH_TID_BASE, build_compare_report, empty_view_hint, mentions_metal_cooperation,
-        read_saved_archive, summarize_archive, target_ingest_hints, thread_kind, write_threads,
+        ARCHIVE_AGGREGATOR_FILE_NAME, ARCHIVE_BINARIES_FILE_NAME, ARCHIVE_BLOBS_DIR_NAME,
+        ARCHIVE_EVENTS_FILE_NAME, ARCHIVE_FORMAT_VERSION, ARCHIVE_MANIFEST_FILE_NAME,
+        ARCHIVE_SINGLE_FILE_EXTENSION, ARCHIVE_TARGET_INGEST_FILE_NAME, ARCHIVE_V1_FILE_NAME,
+        ARCHIVE_V1_FORMAT_VERSION, SYNTH_TID_BASE, binary_text_blob_member, build_compare_report,
+        empty_view_hint, mentions_metal_cooperation, read_saved_archive, summarize_archive,
+        target_ingest_hints, thread_kind, write_threads,
     };
     use stax_live_proto::{
-        OffCpuBreakdown, SavedAggregator, SavedBinaryRegistry, SavedEventLogEntry, SavedInterval,
-        SavedIntervalKind, SavedPetSample, SavedPmuSample, SavedRunArchive, SavedRunArchiveBundle,
-        SavedRunArchiveFiles, SavedRunArchiveManifest, SavedRunArchiveProvenance, SavedThread,
-        SavedThreadName, TargetIngestDiagnostics, ThreadInfo, ThreadsUpdate,
+        OffCpuBreakdown, SavedAggregator, SavedArchiveBlob, SavedBinaryRegistry,
+        SavedEventLogEntry, SavedInterval, SavedIntervalKind, SavedLoadedBinary, SavedPetSample,
+        SavedPmuSample, SavedRunArchive, SavedRunArchiveBundle, SavedRunArchiveFiles,
+        SavedRunArchiveManifest, SavedRunArchiveProvenance, SavedThread, SavedThreadName,
+        TargetIngestDiagnostics, ThreadInfo, ThreadsUpdate,
     };
 
     #[test]
@@ -2650,6 +2699,7 @@ mod tests {
             binaries: SavedBinaryRegistry::default(),
             target_ingest: TargetIngestDiagnostics::default(),
             events: Vec::new(),
+            blobs: Vec::new(),
         };
         write_test_json(&package_path, &bundle);
 
@@ -2675,6 +2725,7 @@ mod tests {
             binaries: SavedBinaryRegistry::default(),
             target_ingest: TargetIngestDiagnostics::default(),
             events: target_lane_events(987),
+            blobs: Vec::new(),
         };
         write_test_json(&package_path, &bundle);
 
@@ -2683,6 +2734,92 @@ mod tests {
         assert_eq!(from_package.aggregator.threads.len(), 1);
         assert_eq!(from_package.target_ingest.spans_recorded, 1);
 
+        let _ = std::fs::remove_file(&package_path);
+    }
+
+    #[test]
+    fn read_saved_archive_restores_directory_and_package_binary_blobs() {
+        let archive_dir = temp_archive_dir("cli-blobs");
+        let _ = std::fs::remove_dir_all(&archive_dir);
+        std::fs::create_dir_all(archive_dir.join(ARCHIVE_BLOBS_DIR_NAME))
+            .expect("create blobs dir");
+
+        let mut binary = test_saved_binary();
+        binary.text_bytes = None;
+        let manifest = SavedRunArchiveManifest {
+            format_version: ARCHIVE_FORMAT_VERSION,
+            saved_at_unix_ns: 654,
+            provenance: test_provenance(),
+            runs: Vec::new(),
+            files: SavedRunArchiveFiles {
+                aggregator: ARCHIVE_AGGREGATOR_FILE_NAME.to_owned(),
+                binaries: ARCHIVE_BINARIES_FILE_NAME.to_owned(),
+                target_ingest: ARCHIVE_TARGET_INGEST_FILE_NAME.to_owned(),
+            },
+        };
+        write_test_json(&archive_dir.join(ARCHIVE_MANIFEST_FILE_NAME), &manifest);
+        write_test_json(
+            &archive_dir.join(ARCHIVE_AGGREGATOR_FILE_NAME),
+            &SavedAggregator::default(),
+        );
+        write_test_json(
+            &archive_dir.join(ARCHIVE_BINARIES_FILE_NAME),
+            &SavedBinaryRegistry {
+                binaries: vec![binary.clone()],
+            },
+        );
+        write_test_json(
+            &archive_dir.join(ARCHIVE_TARGET_INGEST_FILE_NAME),
+            &TargetIngestDiagnostics::default(),
+        );
+        write_test_event_log(
+            &archive_dir.join(ARCHIVE_EVENTS_FILE_NAME),
+            &[SavedEventLogEntry::BinaryLoaded {
+                binary: binary.clone(),
+            }],
+        );
+        std::fs::write(
+            archive_dir.join(binary_text_blob_member(0, &binary)),
+            [1_u8, 2, 3, 4],
+        )
+        .expect("write directory blob");
+
+        let archive = read_saved_archive(&archive_dir).expect("read directory blob archive");
+        assert_eq!(
+            archive.binaries.binaries[0].text_bytes.as_deref(),
+            Some(&[1, 2, 3, 4][..])
+        );
+
+        let package_path =
+            temp_archive_dir("cli-package-blobs").with_extension(ARCHIVE_SINGLE_FILE_EXTENSION);
+        let _ = std::fs::remove_file(&package_path);
+        let bundle = SavedRunArchiveBundle {
+            format_version: ARCHIVE_FORMAT_VERSION,
+            saved_at_unix_ns: 654,
+            provenance: test_provenance(),
+            runs: Vec::new(),
+            aggregator: SavedAggregator::default(),
+            binaries: SavedBinaryRegistry {
+                binaries: vec![binary.clone()],
+            },
+            target_ingest: TargetIngestDiagnostics::default(),
+            events: vec![SavedEventLogEntry::BinaryLoaded {
+                binary: binary.clone(),
+            }],
+            blobs: vec![SavedArchiveBlob {
+                path: binary_text_blob_member(0, &binary),
+                bytes: vec![5, 6, 7, 8],
+            }],
+        };
+        write_test_json(&package_path, &bundle);
+
+        let archive = read_saved_archive(&package_path).expect("read package blob archive");
+        assert_eq!(
+            archive.binaries.binaries[0].text_bytes.as_deref(),
+            Some(&[5, 6, 7, 8][..])
+        );
+
+        let _ = std::fs::remove_dir_all(&archive_dir);
         let _ = std::fs::remove_file(&package_path);
     }
 
@@ -2803,6 +2940,19 @@ mod tests {
                 },
             },
         ]
+    }
+
+    fn test_saved_binary() -> SavedLoadedBinary {
+        SavedLoadedBinary {
+            path: "/tmp/jit-code".to_owned(),
+            base_avma: 0x1234_0000,
+            avma_end: 0x1234_1000,
+            text_svma: 0,
+            arch: Some(std::env::consts::ARCH.to_owned()),
+            is_executable: false,
+            symbols: Vec::new(),
+            text_bytes: Some(vec![9, 9, 9]),
+        }
     }
 
     fn test_provenance() -> SavedRunArchiveProvenance {

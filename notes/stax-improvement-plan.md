@@ -282,9 +282,11 @@ Status as of 2026-06-12:
   - `stax save <PATH>` writes a v2 directory archive with `manifest.json`
     plus typed chunks: `aggregator.json`, `binaries.json`, and
     `target-ingest.json`, plus an append-friendly typed `events.jsonl`
-    replay stream.
+    replay stream. Copied text bytes live in deterministic files under
+    `blobs/`.
   - `stax save <PATH>.stax` writes the same saved run as a single-file
-    facet-json package containing aggregate chunks and event records.
+    facet-json package containing aggregate chunks, event records, and
+    embedded blob entries.
   - `manifest.json` records archive version, save time, producer/version,
     OS/arch, run summaries, and archive-relative chunk filenames.
   - `stax open <PATH>` loads that archive back into `stax-server`'s current
@@ -307,7 +309,7 @@ Status as of 2026-06-12:
   - manifest provenance: producer/version, OS, and architecture
   - raw aggregator streams: PET samples, intervals, target synthetic spans,
     wakeups, and thread names
-  - binary/symbol metadata, including inline text bytes when present
+  - binary/symbol metadata plus blob-backed text bytes when present
   - target-ingest diagnostics, including origin-link counters and
     target-side queue drops
   - a chronological `events.jsonl` sidecar of facet-json `SavedEventLogEntry`
@@ -324,7 +326,6 @@ Status as of 2026-06-12:
   `annotate`, and `diagnose` accept `--run <ID>` as a non-mutating one-off
   query against stopped in-memory history.
 - Current deliberate non-goals:
-  - no `blobs/` layout yet
   - annotate depends on saved/host-available bytes in the same way the live
     binary registry does
 
@@ -400,7 +401,7 @@ Implementation direction:
   - `manifest`
   - done: `events.jsonl` sidecar
   - `symbols`
-  - `blobs/`
+  - done: `blobs/` for copied binary text bytes
 - Done: a single-file `.stax` package wraps the current schema without adding
   compression/container dependencies.
 - Keep run persistence orthogonal to live recording. The live aggregator should
@@ -799,6 +800,9 @@ Done when:
     introducing a new compression/container dependency.
 12. Done: make v2 archive reads event-log-driven when an event stream is
     present, for both daemon `open` and CLI `compare`.
+13. Done: externalize copied binary text bytes to `blobs/` in directory
+    archives and embedded blob entries in `.stax` packages, then hydrate them
+    on read before restoring the binary registry.
 
 Done when:
 
@@ -815,8 +819,6 @@ Deferred:
 - `just archive-smoke` / `just web-target-smoke` are wired as manual
   `workflow_dispatch` checks; making them required by default waits until the
   runner contract for local stax server/browser/profiling access is settled.
-- `blobs/` remains future work after the v2 aggregate chunk layout and replay
-  stream.
 
 ### Phase E: web target-time polish
 
@@ -894,7 +896,7 @@ Resolved for this phase:
 
 - Format v2 became a chunked directory layout first, then a single-file
   `.stax` package that wraps the same data. The directory shape keeps
-  manifests, events, symbols, and future blobs inspectable while the schema
+  manifests, events, symbols, and copied-byte blobs inspectable while the schema
   settles.
 - Detailed archive inspection should continue through `stax open` and the
   normal query surfaces. Direct archive-local CLI should stay focused on
@@ -920,16 +922,15 @@ Resolved for this phase:
   is settled.
 - Saved-run format v2 is implemented as a chunked directory layout and a
   single-file `.stax` package for new saves, with an append-friendly
-  `events.jsonl` sidecar in the directory form and embedded event records in
-  the package form. `open` and `compare` replay those records when present and
-  keep aggregate chunks as fallback/inspection material. Stopped-run history
-  has both a state-changing selector via `select-run` and non-mutating per-RPC
-  `RunId` selectors for reporting surfaces.
+  `events.jsonl` sidecar in the directory form, embedded event records in the
+  package form, and blob-backed copied binary text bytes in both forms. `open`
+  and `compare` replay those records when present and keep aggregate chunks as
+  fallback/inspection material. Stopped-run history has both a state-changing
+  selector via `select-run` and non-mutating per-RPC `RunId` selectors for
+  reporting surfaces.
 
 Still open:
 
-- Whether binary text bytes should move out of `binaries.json` into a `blobs/`
-  layout for large archives and more inspectable package contents.
 - Whether the manual live smokes should become required checks once the runner
   can provide browser dependencies and stax daemon/profiling access.
 
