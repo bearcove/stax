@@ -18,7 +18,7 @@ stax record -- ./target/release/mybench
 # from another shell — or to an AI agent — query the live run
 stax wait --for-samples 10000     # block until data lands
 stax top -n 10 --sort self        # hottest leaf functions or target spans
-stax flame -d 6                   # CPU/lane-active flamegraph, as a tree
+stax flame -d 6                   # active flamegraph, as a tree
 stax annotate 'mycrate::hot_fn'   # per-instruction sample counts
 ```
 
@@ -67,9 +67,10 @@ nothing depends on it.
 - **On-CPU *and* off-CPU.** stax doesn't just show where the CPU time goes —
   it correlates scheduler events to show *why* a thread was blocked: lock,
   sleep, I/O, IPC.
-- **Cooperating target spans.** GPU and accelerator work reported through
-  `stax-target` lands on the same timeline as synthetic lanes, so Metal 4
-  kernels can show up in `threads`, `top`, `flame`, and the web UI.
+- **Cooperating target spans.** GPU, accelerator, and executor work reported
+  through `stax-target` lands on the same timeline as synthetic lanes, with
+  explicit target time/span counts in `threads`, `top`, `flame`, and the web
+  UI.
 - **Down to the instruction.** `stax annotate` disassembles a hot function and
   attributes samples to individual instructions, interleaved with source.
 - **Symbolicates stripped binaries.** On Linux, stax pulls symbols from local

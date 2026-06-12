@@ -451,6 +451,10 @@ body {
   text-align: right;
 }
 
+.thread-target-count {
+  color: var(--text-muted);
+}
+
 .thread-empty {
   padding: 12px;
   color: var(--text-muted);
@@ -1172,6 +1176,15 @@ table.top-table td.num .num-bar-fill {
   background: var(--accent);
   border-radius: 1px;
   transition: width 250ms linear;
+}
+
+table.top-table td.num .num-target-slot {
+  margin-top: 3px;
+  min-height: 13px;
+  line-height: 13px;
+  font-size: 10px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
 }
 
 /* The IPC / cache-miss / branch-mispred annotation. Always

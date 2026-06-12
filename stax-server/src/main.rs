@@ -409,6 +409,7 @@ impl ServerState {
 
             *self.aggregator.write() = Aggregator::default();
             *self.binaries.write() = BinaryRegistry::new();
+            *self.target_lanes.lock() = TargetLaneRegistry::default();
             self.bump_revision();
             self.attach_local_shared_cache();
 
@@ -477,6 +478,7 @@ impl RunControl for ServerState {
         DiagnosticsSnapshot {
             server_started_at_unix_ns: self.started_at_unix_ns,
             active: inner.active.clone().into_iter().collect(),
+            target_ingest: self.target_lanes.lock().diagnostics(),
         }
     }
 

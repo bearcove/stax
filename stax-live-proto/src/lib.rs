@@ -60,11 +60,19 @@ pub struct TopEntry {
     /// `"swift"`, etc.
     pub language: String,
 
-    /// On-CPU time attributed to this symbol as a leaf frame, ns.
+    /// Active time attributed to this symbol as a leaf frame, ns.
+    /// For real threads this is CPU time; for cooperating target
+    /// lanes it also includes target-reported execution spans.
     pub self_on_cpu_ns: u64,
-    /// On-CPU time attributed to this symbol as any frame on the
+    /// Active time attributed to this symbol as any frame on the
     /// stack, ns.
     pub total_on_cpu_ns: u64,
+    /// Portion of `self_on_cpu_ns` that came from target-reported
+    /// execution spans, ns.
+    pub self_target_ns: u64,
+    /// Portion of `total_on_cpu_ns` that came from target-reported
+    /// execution spans, ns.
+    pub total_target_ns: u64,
     /// Off-CPU breakdown attributed as a leaf.
     pub self_off_cpu: OffCpuBreakdown,
     /// Off-CPU breakdown attributed as any frame on the stack.
@@ -73,6 +81,10 @@ pub struct TopEntry {
     pub self_pet_samples: u64,
     /// PET stack-walk hits where this symbol appeared anywhere.
     pub total_pet_samples: u64,
+    /// Target-reported spans where this symbol was the leaf.
+    pub self_target_spans: u64,
+    /// Target-reported spans where this symbol appeared anywhere.
+    pub total_target_spans: u64,
     /// Off-CPU intervals attributed to this symbol as a leaf.
     pub self_off_cpu_intervals: u64,
     /// Off-CPU intervals attributed to this symbol anywhere.
@@ -93,9 +105,15 @@ pub struct TopEntry {
 
 #[derive(Clone, Debug, Facet)]
 pub struct TopUpdate {
-    /// Total on-CPU time across every entry in this snapshot, ns.
-    /// Bounded above by `cores × wall_time`.
+    /// Total active time across every entry in this snapshot, ns.
+    /// Real CPU intervals plus cooperating target execution spans.
     pub total_on_cpu_ns: u64,
+    /// Portion of `total_on_cpu_ns` contributed by target-reported
+    /// execution spans.
+    pub total_target_ns: u64,
+    /// Count of target-reported execution spans included in this
+    /// snapshot.
+    pub total_target_spans: u64,
     /// Total off-CPU time across every entry, ns. Per-reason
     /// breakdown across the whole snapshot.
     pub total_off_cpu: OffCpuBreakdown,
@@ -115,11 +133,11 @@ pub enum TopSort {
 /// One node in the call-tree flamegraph. Address 0 is reserved for the
 /// synthetic root that aggregates all stacks.
 ///
-/// Each node carries on-CPU time and off-CPU time *separately*, with
-/// the off-CPU portion broken down by reason. Children sum to (or are
-/// less than, after pruning) the parent's totals, per-field. The UI
-/// picks which field drives flame-box width and can color-segment a
-/// box across the off-CPU breakdown.
+/// Each node carries active time, target-executor time, and off-CPU
+/// time separately, with the off-CPU portion broken down by reason.
+/// Children sum to (or are less than, after pruning) the parent's
+/// totals, per-field. The UI picks which field drives flame-box width
+/// and can color-segment a box across the off-CPU breakdown.
 ///
 /// `function_name`, `binary`, and `language` are indices into the
 /// containing `FlamegraphUpdate.strings` / `NeighborsUpdate.strings`
@@ -133,11 +151,14 @@ pub struct FlameNode {
     pub is_main: bool,
     pub language: u32,
 
-    /// Real CPU time at (or under) this stack, in nanoseconds.
-    /// Computed from SCHED on-CPU intervals: each interval's duration
-    /// is distributed evenly across the PET stack samples that fell
-    /// inside it, then credited to every node on those stacks.
+    /// Active time at (or under) this stack, in nanoseconds. For real
+    /// CPU work this comes from SCHED on-CPU intervals; for
+    /// cooperating target lanes this includes exact target-reported
+    /// span durations.
     pub on_cpu_ns: u64,
+    /// Portion of `on_cpu_ns` that came from target-reported execution
+    /// spans.
+    pub target_ns: u64,
     /// Off-CPU time at this stack, by reason. Computed from SCHED
     /// off-CPU intervals using the leaf frame at the moment the
     /// thread blocked.
@@ -147,6 +168,8 @@ pub struct FlameNode {
     /// "10ms × 10 samples" (high confidence) for the same on-cpu
     /// number.
     pub pet_samples: u64,
+    /// Number of target-reported spans at (or under) this node.
+    pub target_spans: u64,
     /// Number of off-CPU intervals attributed to this stack. Hot
     /// blocking-site indicator independent of total time.
     pub off_cpu_intervals: u64,
@@ -164,9 +187,14 @@ pub struct FlameNode {
 
 #[derive(Clone, Debug, Facet)]
 pub struct FlamegraphUpdate {
-    /// Total on-CPU time covered by this snapshot's intervals, ns.
+    /// Total active time covered by this snapshot's intervals, ns.
     /// Equals `root.on_cpu_ns`.
     pub total_on_cpu_ns: u64,
+    /// Portion of `total_on_cpu_ns` contributed by target-reported
+    /// execution spans. Equals `root.target_ns`.
+    pub total_target_ns: u64,
+    /// Count of target-reported spans included in the tree.
+    pub total_target_spans: u64,
     /// Total off-CPU time, by reason. Equals `root.off_cpu`.
     pub total_off_cpu: OffCpuBreakdown,
     /// Deduplicated string table: `FlameNode.function_name`,
@@ -203,15 +231,19 @@ pub struct WakersUpdate {
 pub struct ThreadInfo {
     pub tid: u32,
     pub name: Option<String>,
-    /// On-CPU time for this thread, ns. Bounded by wall_time on a
-    /// single core (≤ wall_time × cores in practice -- a thread can
-    /// only be on one CPU at a time, so per-thread on_cpu_ns ≤
-    /// wall_time).
+    /// Active time for this thread, ns. For CPU threads this is
+    /// on-CPU time plus any origin-linked target spans. For synthetic
+    /// target lanes this is lane execution time.
     pub on_cpu_ns: u64,
+    /// Portion of `on_cpu_ns` that came from target-reported execution
+    /// spans.
+    pub target_ns: u64,
     /// Off-CPU breakdown for this thread.
     pub off_cpu: OffCpuBreakdown,
     /// Total PET stack-walk hits we caught for this thread.
     pub pet_samples: u64,
+    /// Target-reported spans included in this thread/lane row.
+    pub target_spans: u64,
 }
 
 #[derive(Clone, Debug, Facet)]
@@ -227,9 +259,11 @@ pub struct TimelineBucket {
     /// Bucket start, in nanoseconds since the recording started (i.e.
     /// since the first sample).
     pub start_ns: u64,
-    /// On-CPU time attributed to this bucket from SCHED on-CPU
-    /// intervals that overlapped it.
+    /// Active time attributed to this bucket from SCHED on-CPU
+    /// intervals and target spans that overlapped it.
     pub on_cpu_ns: u64,
+    /// Portion of `on_cpu_ns` that came from target-reported spans.
+    pub target_ns: u64,
     /// Off-CPU time, summed across all reasons.
     pub off_cpu_ns: u64,
 }
@@ -328,8 +362,11 @@ pub struct TimelineUpdate {
     /// Recording duration so the UI can show "Xs elapsed" without
     /// computing it client-side.
     pub recording_duration_ns: u64,
-    /// Total on-CPU time across the timeline.
+    /// Total active time across the timeline.
     pub total_on_cpu_ns: u64,
+    /// Portion of `total_on_cpu_ns` contributed by target-reported
+    /// execution spans.
+    pub total_target_ns: u64,
     /// Total off-CPU time across the timeline (all reasons summed).
     pub total_off_cpu_ns: u64,
     /// Buckets in chronological order, dense (zero buckets in the
@@ -867,10 +904,35 @@ pub struct ServerStatus {
     pub active: Vec<RunSummary>,
 }
 
+#[derive(Clone, Debug, Default, Facet)]
+pub struct TargetLaneDiagnostics {
+    pub tid: u32,
+    pub name: String,
+    pub spans_recorded: u64,
+    pub spans_with_origin: u64,
+    pub spans_linked_origin: u64,
+    pub spans_unlinked_origin: u64,
+    pub total_duration_ns: u64,
+}
+
+#[derive(Clone, Debug, Default, Facet)]
+pub struct TargetIngestDiagnostics {
+    pub batches: u64,
+    pub spans_received: u64,
+    pub spans_recorded: u64,
+    pub spans_dropped_bad_duration: u64,
+    pub spans_with_origin: u64,
+    pub spans_linked_origin: u64,
+    pub spans_unlinked_origin: u64,
+    pub total_duration_ns: u64,
+    pub lanes: Vec<TargetLaneDiagnostics>,
+}
+
 #[derive(Clone, Debug, Facet)]
 pub struct DiagnosticsSnapshot {
     pub server_started_at_unix_ns: u64,
     pub active: Vec<RunSummary>,
+    pub target_ingest: TargetIngestDiagnostics,
 }
 
 /// Agent-side wait condition: which event makes `wait_active` return.
@@ -970,8 +1032,8 @@ pub trait RunControl {
     /// (in-memory only for now; on-disk persistence is a follow-up).
     async fn list_runs(&self) -> Vec<RunSummary>;
 
-    /// Point-in-time server diagnostics: current run plus stax-owned
-    /// telemetry counters, phases, histograms, and recent events.
+    /// Point-in-time server diagnostics: current run plus target-span
+    /// ingest counters and origin-link health.
     async fn diagnostics(&self) -> DiagnosticsSnapshot;
 
     /// Start a recording by attaching to an existing pid. For

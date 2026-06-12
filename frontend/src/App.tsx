@@ -113,18 +113,21 @@ function findFlameByKey(node: FlameView, target: string): FlameView | null {
 }
 
 /// Render a flame subtree as a plain-text indented tree, sorted by
-/// on_cpu_ns descending at each level. Same shape as `stax flame`
-/// from the CLI: per-line `   XXms PP.P%  └─ name (binary)`. Trees
-/// can be huge; this prints everything (no depth/threshold caps),
-/// the assumption being clipboard targets handle large pastes
-/// fine and the user asked for a deep copy.
+/// active time descending at each level. Same shape as `stax flame`
+/// from the CLI: per-line active time, target time, span count, share,
+/// and `└─ name (binary)`. Trees can be huge; this prints everything
+/// (no depth/threshold caps), the assumption being clipboard targets
+/// handle large pastes fine and the user asked for a deep copy.
 function renderFlameAsText(root: FlameView, totalOnCpuNs: bigint): string {
   const total = Number(totalOnCpuNs > 0n ? totalOnCpuNs : 1n);
-  const lines: string[] = [];
+  const lines: string[] = [
+    `${"active".padStart(8)} ${"target".padStart(8)} ${"spans".padStart(7)} ${"%".padStart(5)}  frame`,
+  ];
 
   function rec(node: FlameView, depth: number) {
     const onCpu = Number(node.on_cpu_ns);
     const ms = (onCpu / 1e6).toFixed(2);
+    const targetMs = (Number(node.target_ns) / 1e6).toFixed(2);
     const pct = ((onCpu / total) * 100).toFixed(1);
     const indent = "  ".repeat(depth);
     const prefix = depth === 0 ? "" : "└─ ";
@@ -132,7 +135,9 @@ function renderFlameAsText(root: FlameView, totalOnCpuNs: bigint): string {
       depth === 0
         ? "(root)"
         : `${node.function_name ?? "<unresolved>"}  (${node.binary ?? "?"})`;
-    lines.push(`${ms.padStart(8)}ms ${pct.padStart(5)}%  ${indent}${prefix}${label}`);
+    lines.push(
+      `${ms.padStart(8)} ${targetMs.padStart(8)} ${node.target_spans.toString().padStart(7)} ${pct.padStart(5)}  ${indent}${prefix}${label}`,
+    );
     const children = [...node.children].sort((a, b) =>
       a.on_cpu_ns > b.on_cpu_ns ? -1 : a.on_cpu_ns < b.on_cpu_ns ? 1 : 0,
     );
@@ -380,7 +385,7 @@ export function App() {
             next.entries.length,
             "entries,",
             next.total_on_cpu_ns.toString(),
-            "ns on-cpu",
+            "ns active",
           );
           latest.current = next;
           // While frozen we accumulate into `latest` but don't render.
@@ -534,7 +539,7 @@ export function App() {
           <span className="spacer" />
           <span className="meta">
             {displayed
-              ? `${formatDuration(displayed.total_on_cpu_ns)} on-CPU · ${formatDuration(offCpuTotal(displayed.total_off_cpu))} off-CPU · ${displayed.entries.length} symbols`
+              ? `${formatDuration(displayed.total_on_cpu_ns)} active · ${formatDuration(displayed.total_target_ns)} target · ${formatDuration(offCpuTotal(displayed.total_off_cpu))} off-CPU · ${displayed.entries.length} symbols`
               : "waiting for samples..."}
           </span>
         </div>
@@ -631,6 +636,7 @@ export function App() {
           <TopTable
             entries={displayed?.entries ?? []}
             totalOnCpuNs={displayed?.total_on_cpu_ns ?? 0n}
+            totalTargetNs={displayed?.total_target_ns ?? 0n}
             selected={selected}
             onSelect={setSelected}
             sort={sort}
@@ -860,8 +866,8 @@ export type LangKind = "rust" | "c" | "cpp" | "swift" | "asm" | "unknown";
 export type ObjKind = "main" | "system" | "dylib" | "unknown";
 type PaneTab = "asm" | "neighbors" | "intervals";
 
-/// What flame-box widths represent: real CPU time, off-CPU waiting
-/// time, or wall (on + off). Display-only; the wire carries both
+/// What flame-box widths represent: active time, off-CPU waiting
+/// time, or wall (active + off). Display-only; the wire carries both
 /// dimensions on every node.
 export type DisplayMode = "on_cpu" | "off_cpu" | "wall";
 
@@ -973,9 +979,9 @@ function WakersPanel({
 }
 
 /// Pill row that picks what flame-box widths represent. UI-only:
-/// every flame node carries both on_cpu_ns and a per-reason off-CPU
-/// breakdown, so flipping the mode just changes which dimension
-/// drives layout (and the flame-status footer).
+/// every flame node carries active time, target-executor time, and a
+/// per-reason off-CPU breakdown, so flipping the mode just changes
+/// which dimension drives layout (and the flame-status footer).
 function DisplayModeFilter({
   mode,
   onChange,
@@ -986,8 +992,8 @@ function DisplayModeFilter({
   const options: { id: DisplayMode; label: string; title: string }[] = [
     {
       id: "on_cpu",
-      label: "on-cpu",
-      title: "flame width = real CPU time (default)",
+      label: "active",
+      title: "flame width = CPU time plus cooperating target spans (default)",
     },
     {
       id: "off_cpu",
@@ -997,7 +1003,7 @@ function DisplayModeFilter({
     {
       id: "wall",
       label: "wall",
-      title: "flame width = on-CPU + off-CPU (total time stack was active)",
+      title: "flame width = active + off-CPU (total time stack was active)",
     },
   ];
   return (
@@ -1021,8 +1027,8 @@ function DisplayModeFilter({
 }
 
 /// Strip under the timeline that lists each non-zero off-CPU reason
-/// with its share of total off-CPU time, plus the on-CPU/off-CPU
-/// totals. Renders nothing when there is no off-CPU time.
+/// with its share of total off-CPU time. Renders nothing when there is
+/// no off-CPU time.
 function ReasonLegend({
   breakdown,
   totalOnCpuNs,
@@ -1276,6 +1282,7 @@ function entryMatches(
 function TopTable({
   entries,
   totalOnCpuNs,
+  totalTargetNs,
   selected,
   onSelect,
   sort,
@@ -1287,6 +1294,7 @@ function TopTable({
 }: {
   entries: TopEntry[];
   totalOnCpuNs: bigint;
+  totalTargetNs: bigint;
   selected: bigint | null;
   onSelect: (a: bigint) => void;
   sort: SortKey;
@@ -1297,13 +1305,14 @@ function TopTable({
   onContextMenu: (t: ContextMenuTarget) => void;
 }) {
   void totalOnCpuNs;
+  void totalTargetNs;
   const visible = entries.filter((e) => !hiddenKinds.has(objKindOf(e)));
   // Scale every row's progress bar against the busiest visible row,
   // not the recording's grand total. With many symbols, the
   // grand-total denominator made every bar a hairline -- now the
   // leader fills the bar and the rest are proportional to it (the
-  // "Activity Monitor" model). Rank by on-CPU time; off-CPU time
-  // shows up as a secondary annotation.
+  // "Activity Monitor" model). Rank by active time; target time and
+  // off-CPU time show up as secondary annotations.
   const barDenom = visible.reduce((m, e) => {
     const v = sort === "self" ? e.self_on_cpu_ns : e.total_on_cpu_ns;
     return v > m ? v : m;
@@ -1336,6 +1345,14 @@ function TopTable({
           const obj = objKindOf(e);
           const fnLabel = e.function_name ?? `0x${e.address.toString(16)}`;
           const binLabel = e.binary ?? "(no binary)";
+          const selfTarget = e.self_target_ns;
+          const totalTarget = e.total_target_ns;
+          const targetLine =
+            selfTarget === 0n && totalTarget === 0n
+              ? null
+              : selfTarget === totalTarget
+                ? `${formatDuration(selfTarget)} target · ${e.self_target_spans.toString()} spans`
+                : `${formatDuration(selfTarget)} / ${formatDuration(totalTarget)} target · ${e.self_target_spans.toString()} / ${e.total_target_spans.toString()} spans`;
           return (
             <tr
               key={String(e.address)}
@@ -1394,6 +1411,7 @@ function TopTable({
                     }}
                   />
                 </div>
+                {targetLine && <div className="num-target-slot">{targetLine}</div>}
                 <div className="num-ipc-slot">{pmuLabel(e, pmuMetric)}</div>
               </td>
             </tr>
@@ -1469,9 +1487,9 @@ function ThreadSwitcher({
     }
   }, [open]);
 
-  // Rank by on-CPU time so threads doing real CPU work float up;
-  // mostly-parked workers stay near the bottom even though they may
-  // have a lot of blocked wall time.
+  // Rank by active time so CPU threads and cooperating target lanes
+  // both float up; mostly-parked workers stay near the bottom even
+  // though they may have a lot of blocked wall time.
   const total = threads.reduce((s, t) => s + t.on_cpu_ns, 0n);
   const totalF = total === 0n ? 1 : Number(total);
   const max = threads.reduce(
@@ -1562,7 +1580,7 @@ function ThreadSwitcher({
                     key={t.tid}
                     className={`thread-row${sel ? " selected" : ""}`}
                     onClick={() => pick(t.tid)}
-                    title={`${formatDuration(t.on_cpu_ns)} on-CPU + ${formatDuration(offTotal)} off-CPU (${rPct}% of CPU time)`}
+                    title={`${formatDuration(t.on_cpu_ns)} active (${formatDuration(t.target_ns)} target) + ${formatDuration(offTotal)} off-CPU (${rPct}% of active time)`}
                   >
                     <span className="thread-check">{sel && <LuCheck />}</span>
                     <span className="thread-name">
@@ -1579,6 +1597,12 @@ function ThreadSwitcher({
                     </span>
                     <span className="thread-count">
                       {formatDuration(t.on_cpu_ns)}
+                      {t.target_spans > 0n ? (
+                        <span className="thread-target-count">
+                          {" "}
+                          · {t.target_spans.toString()} spans
+                        </span>
+                      ) : null}
                     </span>
                   </button>
                 );
@@ -1586,7 +1610,7 @@ function ThreadSwitcher({
             )}
           </div>
           <div className="thread-popover-footer">
-            {threads.length} threads · sorted by on-CPU time
+            {threads.length} threads · sorted by active time
           </div>
         </div>
       )}

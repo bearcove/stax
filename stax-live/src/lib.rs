@@ -73,6 +73,8 @@ impl Profiler for LiveServer {
         let entries = group_top_entries(&aggregation, &bins, sort, limit as usize);
         TopUpdate {
             total_on_cpu_ns: aggregation.total_on_cpu_ns,
+            total_target_ns: aggregation.total_target_ns,
+            total_target_spans: aggregation.total_target_spans,
             total_off_cpu: aggregation.total_off_cpu.to_proto(),
             entries,
         }
@@ -105,6 +107,8 @@ impl Profiler for LiveServer {
                     let entries = group_top_entries(&aggregation, &bins, sort, limit as usize);
                     TopUpdate {
                         total_on_cpu_ns: aggregation.total_on_cpu_ns,
+                        total_target_ns: aggregation.total_target_ns,
+                        total_target_spans: aggregation.total_target_spans,
                         total_off_cpu: aggregation.total_off_cpu.to_proto(),
                         entries,
                     }
@@ -533,8 +537,10 @@ fn build_threads_update(
                 tid,
                 name: agg.thread_name(tid).map(|s| s.to_owned()),
                 on_cpu_ns: aggregation.total_on_cpu_ns,
+                target_ns: aggregation.total_target_ns,
                 off_cpu: aggregation.total_off_cpu.to_proto(),
                 pet_samples,
+                target_spans: aggregation.total_target_spans,
             }
         })
         .collect();
@@ -816,10 +822,14 @@ fn group_top_entries(
         representative_self_ns: u64,
         self_on_cpu_ns: u64,
         total_on_cpu_ns: u64,
+        self_target_ns: u64,
+        total_target_ns: u64,
         self_off_cpu: OffCpuBreakdown,
         total_off_cpu: OffCpuBreakdown,
         self_pet_samples: u64,
         total_pet_samples: u64,
+        self_target_spans: u64,
+        total_target_spans: u64,
         self_off_cpu_intervals: u64,
         total_off_cpu_intervals: u64,
         self_pmc: PmcAccum,
@@ -845,10 +855,16 @@ fn group_top_entries(
             .and_modify(|g| {
                 g.self_on_cpu_ns = g.self_on_cpu_ns.saturating_add(stats.self_on_cpu_ns);
                 g.total_on_cpu_ns = g.total_on_cpu_ns.saturating_add(stats.total_on_cpu_ns);
+                g.self_target_ns = g.self_target_ns.saturating_add(stats.self_target_ns);
+                g.total_target_ns = g.total_target_ns.saturating_add(stats.total_target_ns);
                 g.self_off_cpu.add_other(&stats.self_off_cpu);
                 g.total_off_cpu.add_other(&stats.total_off_cpu);
                 g.self_pet_samples = g.self_pet_samples.saturating_add(stats.self_pet_samples);
                 g.total_pet_samples = g.total_pet_samples.saturating_add(stats.total_pet_samples);
+                g.self_target_spans = g.self_target_spans.saturating_add(stats.self_target_spans);
+                g.total_target_spans = g
+                    .total_target_spans
+                    .saturating_add(stats.total_target_spans);
                 g.self_off_cpu_intervals = g
                     .self_off_cpu_intervals
                     .saturating_add(stats.self_off_cpu_intervals);
@@ -868,10 +884,14 @@ fn group_top_entries(
                 representative_self_ns: stats.self_on_cpu_ns,
                 self_on_cpu_ns: stats.self_on_cpu_ns,
                 total_on_cpu_ns: stats.total_on_cpu_ns,
+                self_target_ns: stats.self_target_ns,
+                total_target_ns: stats.total_target_ns,
                 self_off_cpu: stats.self_off_cpu,
                 total_off_cpu: stats.total_off_cpu,
                 self_pet_samples: stats.self_pet_samples,
                 total_pet_samples: stats.total_pet_samples,
+                self_target_spans: stats.self_target_spans,
+                total_target_spans: stats.total_target_spans,
                 self_off_cpu_intervals: stats.self_off_cpu_intervals,
                 total_off_cpu_intervals: stats.total_off_cpu_intervals,
                 self_pmc: stats.self_pmc,
@@ -907,10 +927,14 @@ fn group_top_entries(
             language: g.language.as_str().to_owned(),
             self_on_cpu_ns: g.self_on_cpu_ns,
             total_on_cpu_ns: g.total_on_cpu_ns,
+            self_target_ns: g.self_target_ns,
+            total_target_ns: g.total_target_ns,
             self_off_cpu: g.self_off_cpu.to_proto(),
             total_off_cpu: g.total_off_cpu.to_proto(),
             self_pet_samples: g.self_pet_samples,
             total_pet_samples: g.total_pet_samples,
+            self_target_spans: g.self_target_spans,
+            total_target_spans: g.total_target_spans,
             self_off_cpu_intervals: g.self_off_cpu_intervals,
             total_off_cpu_intervals: g.total_off_cpu_intervals,
             self_cycles: g.self_pmc.cycles,
@@ -974,9 +998,11 @@ fn build_timeline_update(aggregator: &Arc<RwLock<Aggregator>>, tid: Option<u32>)
     };
     let n_buckets = ((recording_duration_ns / bucket_size_ns) + 1) as usize;
     let mut on_cpu_per_bucket: Vec<u64> = vec![0; n_buckets.max(1)];
+    let mut target_per_bucket: Vec<u64> = vec![0; n_buckets.max(1)];
     let mut off_cpu_per_bucket: Vec<u64> = vec![0; n_buckets.max(1)];
 
     let mut total_on_cpu_ns: u64 = 0;
+    let mut total_target_ns: u64 = 0;
     let mut total_off_cpu_ns: u64 = 0;
 
     for (_tid, interval) in agg.iter_intervals(tid) {
@@ -989,10 +1015,8 @@ fn build_timeline_update(aggregator: &Arc<RwLock<Aggregator>>, tid: Option<u32>)
         if int_end <= int_start {
             continue;
         }
-        let on_cpu = matches!(
-            interval.kind,
-            IntervalKind::OnCpu | IntervalKind::SyntheticSpan { .. }
-        );
+        let target = matches!(interval.kind, IntervalKind::SyntheticSpan { .. });
+        let on_cpu = matches!(interval.kind, IntervalKind::OnCpu) || target;
         // Distribute the interval's duration across the buckets it
         // overlaps. For each overlapping bucket [b_start, b_end), the
         // share is min(int_end, b_end) - max(int_start, b_start).
@@ -1010,6 +1034,10 @@ fn build_timeline_update(aggregator: &Arc<RwLock<Aggregator>>, tid: Option<u32>)
             if on_cpu {
                 on_cpu_per_bucket[b] = on_cpu_per_bucket[b].saturating_add(share);
                 total_on_cpu_ns = total_on_cpu_ns.saturating_add(share);
+                if target {
+                    target_per_bucket[b] = target_per_bucket[b].saturating_add(share);
+                    total_target_ns = total_target_ns.saturating_add(share);
+                }
             } else {
                 off_cpu_per_bucket[b] = off_cpu_per_bucket[b].saturating_add(share);
                 total_off_cpu_ns = total_off_cpu_ns.saturating_add(share);
@@ -1019,11 +1047,13 @@ fn build_timeline_update(aggregator: &Arc<RwLock<Aggregator>>, tid: Option<u32>)
 
     let buckets: Vec<TimelineBucket> = on_cpu_per_bucket
         .into_iter()
+        .zip(target_per_bucket.into_iter())
         .zip(off_cpu_per_bucket.into_iter())
         .enumerate()
-        .map(|(i, (on_cpu_ns, off_cpu_ns))| TimelineBucket {
+        .map(|(i, ((on_cpu_ns, target_ns), off_cpu_ns))| TimelineBucket {
             start_ns: i as u64 * bucket_size_ns,
             on_cpu_ns,
+            target_ns,
             off_cpu_ns,
         })
         .collect();
@@ -1032,6 +1062,7 @@ fn build_timeline_update(aggregator: &Arc<RwLock<Aggregator>>, tid: Option<u32>)
         bucket_size_ns,
         recording_duration_ns,
         total_on_cpu_ns,
+        total_target_ns,
         total_off_cpu_ns,
         buckets,
     }
@@ -1046,8 +1077,9 @@ fn build_timeline_update(aggregator: &Arc<RwLock<Aggregator>>, tid: Option<u32>)
 ///   2. Merge the entire descendant subtree into `callees_tree`,
 ///      keyed by symbol (so recursion + multiple call sites collapse).
 ///
-/// SymbolNode tracks both on-CPU time and the off-CPU breakdown so
-/// the family-tree view shows the same dimensions as the main flame.
+/// SymbolNode tracks active time, target-executor time, and the
+/// off-CPU breakdown so the family-tree view shows the same dimensions
+/// as the main flame.
 fn compute_neighbors_update(
     flame_root: &StackNode,
     binaries: &BinaryRegistry,
@@ -1060,8 +1092,10 @@ fn compute_neighbors_update(
     #[derive(Default)]
     struct SymbolNode {
         on_cpu_ns: u64,
+        target_ns: u64,
         off_cpu: OffCpuBreakdown,
         pet_samples: u64,
+        target_spans: u64,
         off_cpu_intervals: u64,
         rep_address: u64,
         rep_self_ns: u64,
@@ -1091,8 +1125,10 @@ fn compute_neighbors_update(
         language: stax_demangle::Language,
     ) {
         node.on_cpu_ns = node.on_cpu_ns.saturating_add(src.on_cpu_ns);
+        node.target_ns = node.target_ns.saturating_add(src.target_ns);
         node.off_cpu.add_other(&src.off_cpu);
         node.pet_samples = node.pet_samples.saturating_add(src.pet_samples);
+        node.target_spans = node.target_spans.saturating_add(src.target_spans);
         node.off_cpu_intervals = node.off_cpu_intervals.saturating_add(src.off_cpu_intervals);
         let candidate = src.on_cpu_ns;
         if candidate > node.rep_self_ns {
@@ -1160,8 +1196,10 @@ fn compute_neighbors_update(
     ) -> FlameNode {
         let SymbolNode {
             on_cpu_ns,
+            target_ns,
             off_cpu,
             pet_samples,
+            target_spans,
             off_cpu_intervals,
             rep_address,
             is_main,
@@ -1190,8 +1228,10 @@ fn compute_neighbors_update(
         FlameNode {
             address: rep_address,
             on_cpu_ns,
+            target_ns,
             off_cpu: off_cpu.to_proto(),
             pet_samples,
+            target_spans,
             off_cpu_intervals,
             function_name: interner.intern_opt(key.0),
             binary: interner.intern_opt(key.1),
@@ -1234,15 +1274,19 @@ fn compute_neighbors_update(
     // Stamp the target's own data + representative onto each tree's
     // root so the renderer has a useful "self" frame.
     callers.on_cpu_ns = own.on_cpu_ns;
+    callers.target_ns = own.target_ns;
     callers.off_cpu = own.off_cpu;
     callers.pet_samples = own.pet_samples;
+    callers.target_spans = own.target_spans;
     callers.off_cpu_intervals = own.off_cpu_intervals;
     callers.rep_address = target_address;
     callers.is_main = target_resolved.as_ref().map(|r| r.is_main).unwrap_or(false);
     callers.language = target_language;
     callees.on_cpu_ns = own.on_cpu_ns;
+    callees.target_ns = own.target_ns;
     callees.off_cpu = own.off_cpu;
     callees.pet_samples = own.pet_samples;
+    callees.target_spans = own.target_spans;
     callees.off_cpu_intervals = own.off_cpu_intervals;
     callees.rep_address = target_address;
     callees.is_main = target_resolved.as_ref().map(|r| r.is_main).unwrap_or(false);
@@ -1324,6 +1368,8 @@ impl StringInterner {
 
 fn compute_flame_update(aggregation: &Aggregation, binaries: &BinaryRegistry) -> FlamegraphUpdate {
     let total_on_cpu_ns = aggregation.total_on_cpu_ns;
+    let total_target_ns = aggregation.total_target_ns;
+    let total_target_spans = aggregation.total_target_spans;
     let total_off_cpu = aggregation.total_off_cpu;
     let mut interner = StringInterner::new();
     let mut symbol_cache: HashMap<u64, ResolvedSymbol> = HashMap::new();
@@ -1355,8 +1401,10 @@ fn compute_flame_update(aggregation: &Aggregation, binaries: &BinaryRegistry) ->
     let root = FlameNode {
         address: 0,
         on_cpu_ns: total_on_cpu_ns,
+        target_ns: total_target_ns,
         off_cpu: total_off_cpu.to_proto(),
         pet_samples: total_pet_samples,
+        target_spans: total_target_spans,
         off_cpu_intervals: total_off_cpu_intervals,
         function_name: Some(all_label),
         binary: None,
@@ -1370,6 +1418,8 @@ fn compute_flame_update(aggregation: &Aggregation, binaries: &BinaryRegistry) ->
     };
     FlamegraphUpdate {
         total_on_cpu_ns,
+        total_target_ns,
+        total_target_spans,
         total_off_cpu: total_off_cpu.to_proto(),
         strings: interner.into_strings(),
         root,
@@ -1429,8 +1479,10 @@ fn build_children(
 
     struct Acc<'a> {
         on_cpu_ns: u64,
+        target_ns: u64,
         off_cpu: OffCpuBreakdown,
         pet_samples: u64,
+        target_spans: u64,
         off_cpu_intervals: u64,
         pmc: PmcAccum,
         rep_addr: u64,
@@ -1475,8 +1527,10 @@ fn build_children(
             let key = (fname.cloned(), bin.cloned());
             let acc = groups.entry(key).or_insert_with(|| Acc {
                 on_cpu_ns: 0,
+                target_ns: 0,
                 off_cpu: OffCpuBreakdown::default(),
                 pet_samples: 0,
+                target_spans: 0,
                 off_cpu_intervals: 0,
                 pmc: PmcAccum::default(),
                 rep_addr: addr,
@@ -1486,8 +1540,10 @@ fn build_children(
                 sub_sources: Vec::new(),
             });
             acc.on_cpu_ns = acc.on_cpu_ns.saturating_add(child.on_cpu_ns);
+            acc.target_ns = acc.target_ns.saturating_add(child.target_ns);
             acc.off_cpu.add_other(&child.off_cpu);
             acc.pet_samples = acc.pet_samples.saturating_add(child.pet_samples);
+            acc.target_spans = acc.target_spans.saturating_add(child.target_spans);
             acc.off_cpu_intervals = acc
                 .off_cpu_intervals
                 .saturating_add(child.off_cpu_intervals);
@@ -1524,8 +1580,10 @@ fn build_children(
         visible.push(FlameNode {
             address: acc.rep_addr,
             on_cpu_ns: acc.on_cpu_ns,
+            target_ns: acc.target_ns,
             off_cpu: acc.off_cpu.to_proto(),
             pet_samples: acc.pet_samples,
+            target_spans: acc.target_spans,
             off_cpu_intervals: acc.off_cpu_intervals,
             function_name: interner.intern_opt(fname),
             binary: interner.intern_opt(bin),

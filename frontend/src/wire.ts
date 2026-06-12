@@ -3,10 +3,11 @@
 // FlamegraphUpdate.strings) and what the rest of the frontend wants
 // to see (those fields as inline strings).
 //
-// Each node carries on-CPU time + off-CPU breakdown (10 reasons) +
-// PET sample count + off-CPU interval count separately. The UI picks
-// which dimension drives flame box width and can color-segment a
-// single box across the off-CPU reasons.
+// Each node carries active time, target-executor time, off-CPU
+// breakdown (10 reasons), PET sample count, target span count, and
+// off-CPU interval count separately. The UI picks which dimension
+// drives flame box width and can color-segment a single box across
+// the off-CPU reasons.
 
 import type {
   FlameNode as WireFlameNode,
@@ -20,13 +21,17 @@ export type OffCpuBreakdown = WireOffCpuBreakdown;
 
 export interface FlameView {
   address: bigint;
-  /// Real CPU time at (or under) this stack, in ns.
+  /// Active time at (or under) this stack, in ns.
   on_cpu_ns: bigint;
+  /// Portion of on_cpu_ns that came from target-reported execution spans.
+  target_ns: bigint;
   /// Off-CPU time at this stack, by reason. Sum across fields = total
   /// off-CPU time. UI can color-segment a flame box by reason.
   off_cpu: OffCpuBreakdown;
   /// PET stack-walk hits at (or under) this node.
   pet_samples: bigint;
+  /// Target-reported spans at (or under) this node.
+  target_spans: bigint;
   /// Off-CPU intervals attributed to this stack.
   off_cpu_intervals: bigint;
   function_name: string | null;
@@ -42,6 +47,8 @@ export interface FlameView {
 
 export interface FlamegraphView {
   total_on_cpu_ns: bigint;
+  total_target_ns: bigint;
+  total_target_spans: bigint;
   total_off_cpu: OffCpuBreakdown;
   root: FlameView;
 }
@@ -67,8 +74,10 @@ function hydrateNode(node: WireFlameNode, strings: string[]): FlameView {
   return {
     address: node.address,
     on_cpu_ns: node.on_cpu_ns,
+    target_ns: node.target_ns,
     off_cpu: node.off_cpu,
     pet_samples: node.pet_samples,
+    target_spans: node.target_spans,
     off_cpu_intervals: node.off_cpu_intervals,
     function_name: lookup(strings, node.function_name),
     binary: lookup(strings, node.binary),
@@ -85,6 +94,8 @@ function hydrateNode(node: WireFlameNode, strings: string[]): FlameView {
 export function hydrateFlamegraph(u: WireFlamegraphUpdate): FlamegraphView {
   return {
     total_on_cpu_ns: u.total_on_cpu_ns,
+    total_target_ns: u.total_target_ns,
+    total_target_spans: u.total_target_spans,
     total_off_cpu: u.total_off_cpu,
     root: hydrateNode(u.root, u.strings),
   };

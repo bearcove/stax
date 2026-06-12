@@ -20,18 +20,19 @@ still the right tool — that is the whole point. One recording holds:
 - **Off-CPU intervals + wakeup attribution** — every blocked stretch with
   why-blocked classification. `stax threads` prints the per-thread
   on/off-CPU breakdown on the CLI; the web UI timeline shows the intervals.
-- **GPU (and other accelerator) lanes** via **`stax-target`** — a profiled
-  app links the `stax-target` crate and reports named spans (kernel
-  dispatches, command-buffer stages) with `mach_absolute_time`-derived
-  timestamps; they ingest as a **synthetic thread** per `(pid, lane)` on the
-  same timebase as everything else. Span names are synthetic symbols, so
+- **Target/executor lanes** via **`stax-target`** — a profiled app links the
+  `stax-target` crate and reports named spans (GPU kernels, command-buffer
+  stages, accelerator jobs, runtime/executor work) with timestamps on the
+  same timebase as the recording; they ingest as a **synthetic thread** per
+  `(pid, lane)`. Span names are synthetic symbols, so
   `stax top --tid <synthetic>` and `stax flame --tid <synthetic>` render
-  per-kernel frames; the `samples` column is span count and the time column
-  is lane active time. If the target also reports a span origin, `top` and
-  `flame` for the origin CPU tid include that GPU work under the sampled CPU
-  stack that queued it: `CPU caller -> lane -> kernel`. No correlation step,
-  no chrome-trace export, no second tool. See `stax-target/src/lib.rs` and
-  `stax-server/src/target_ingest.rs`; the guide page is
+  span names like function frames. CLI and web views now break out explicit
+  `target` time/span counts alongside active time/PET samples. If the target
+  also reports a span origin, `top` and `flame` for the origin CPU tid include
+  that target work under the sampled CPU stack that queued it:
+  `CPU caller -> lane -> span`. No correlation step, no chrome-trace export,
+  no second tool. See `stax-target/src/lib.rs` and
+  `stax-server/src/target_ingest.rs`; the GPU worked example is
   `docs/content/guide/profiling-gpu-work.md`.
 
 A cooperating process pays nothing when not recorded: the target polls a
@@ -45,10 +46,11 @@ as the `"GPU tq1s"` lane (and TTS lanes) — see
 
 Gotchas that have actually misled agents (verified 2026-06-12):
 
-- Synthetic GPU lanes use the CLI's **on-CPU** time columns as synthetic
-  lane-active time. That does not mean the CPU was busy; it is how target
-  span durations participate in existing `threads`, `top`, and `flame`
-  views. Synthetic tids live at/above `0xFFF0_0000`.
+- Synthetic target lanes use the **target** columns for exact span duration
+  and span count. The legacy `active`/`on_cpu_ns` fields still include that
+  time so older clients and flame widths keep working; do not read target
+  lane active time as CPU-busy time. Synthetic tids live at/above
+  `0xFFF0_0000`.
 - `stax top --tid <synthetic>` should show span names with duration sums and
   span counts. `stax flame --tid <synthetic>` should render
   `(all) -> lane -> span name`. If either is empty while `stax threads`
@@ -59,7 +61,7 @@ Gotchas that have actually misled agents (verified 2026-06-12):
   `stax top --tid <real CPU tid> --sort total` will then attribute the span
   duration to the CPU dispatch stack; `--sort self` still surfaces the
   per-kernel span names.
-- A GPU-bound target looks nearly EMPTY in `stax top` — a handful of
+- A GPU-bound target looks nearly empty in CPU-only rows — a handful of
   samples, allocator noise at the top. That is not "stax doesn't work";
   that is the answer (the CPU is idle). The story is in `threads`, the
   off-CPU intervals, and the GPU lane.
@@ -362,15 +364,17 @@ Snapshot the top-N hottest functions in the active run.
 - `--sort total` — any-frame attribution (functions that *contain* hot
   code, including their callers).
 
-Output is one line per entry: `<self ms> <self samples> <function> (<binary>)`.
-For synthetic target lanes, `self ms` is span duration and `samples` is span
-count. When spans carry origins, `--tid <real CPU tid>` includes those spans
-under the CPU stack that queued them.
+Output is one line per entry with active time, target-executor time, PET
+sample count, target span count, and symbol name. For synthetic target lanes,
+`target ms` is span duration and `spans` is span count. When spans carry
+origins, `--tid <real CPU tid>` includes those spans under the CPU stack that
+queued them.
 
 ```
 $ stax top -n 5
-   42.184ms       3812 samples  vox_jit::translate (libvox.dylib)
-    9.001ms        812 samples  cranelift::lower (libcranelift.dylib)
+ active ms  target ms  samples    spans  function
+    42.184      0.000     3812        0  vox_jit::translate (libvox.dylib)
+     9.001      0.000      812        0  cranelift::lower (libcranelift.dylib)
     …
 ```
 
@@ -382,28 +386,29 @@ worth flaming.
 
 ```
 $ stax threads -n 5
- active ms off-CPU ms    samples   blocked  tid    name
-   1240.20      31.40       1102      lock  501    main
-    860.00      99.00        710     sleep  592    tokio-runtime-worker
-    220.10      14.50        198      idle  600    grpc-pool
+    cpu ms  target ms off-CPU ms  samples    spans   blocked  tid    name
+   1240.20       0.00      31.40     1102        0      lock  501    main
+    860.00       0.00      99.00      710        0     sleep  592    tokio-runtime-worker
+      0.00     220.10       0.00      198      198         -  4293918720 GPU tq1s
     …
 ```
 
-The `active ms` column is on-CPU time for CPU threads, plus any target spans
-whose origin points at that CPU tid. For synthetic target lanes it is reported
-span duration. The `samples` column is PET sample count for CPU threads and
-span count for synthetic lanes. The `blocked` column names the largest
-off-CPU bucket for that thread (`idle`, `lock`, `sem`, `ipc`, `ioR`, `ioW`,
-`ready`, `sleep`, `conn`, `other`). Off-CPU intervals are recorded on both
-macOS and Linux.
+The `cpu ms` column is real on-CPU time. `target ms` is exact duration from
+cooperating target spans: for synthetic lanes it is lane active time; for CPU
+threads it is origin-linked target work queued by that thread. `samples` is PET
+sample count and `spans` is target span count. The `blocked` column names the
+largest off-CPU bucket for that thread (`idle`, `lock`, `sem`, `ipc`, `ioR`,
+`ioW`, `ready`, `sleep`, `conn`, `other`). Off-CPU intervals are recorded on
+both macOS and Linux.
 
-`-n 0` prints every thread. Default 20.
+`-n 0` prints every thread. Default 20. Synthetic target lanes with spans are
+included even when they would otherwise fall past the cutoff.
 
 ### `stax flame [-d MAX_DEPTH] [--threshold-pct PCT] [--tid TID]`
 
-Print the CPU/lane-active flamegraph as an indented Markdown tree, sorted by
-active time descending at each level. Same data the web UI renders; this is
-the agent-friendly view of "where is the time going." Cooperating target
+Print the active flamegraph as an indented Markdown tree, sorted by active
+time descending at each level. Same data the web UI renders; this is the
+agent-friendly view of "where is the time going." Cooperating target
 lanes render as `(all) -> lane -> span name`; when spans carry origins,
 filtering to the origin CPU tid renders `(all) -> CPU caller -> lane -> span`.
 
@@ -418,15 +423,16 @@ Operates on the current run's aggregator (same rules as `stax top`).
 
 ```
 $ stax flame -d 4 --threshold-pct 2
-# stax flame · total active 2.503s · off-CPU 4.122s
+# stax flame · total active 2.503s · target 0.000s · off-CPU 4.122s
 
 `​``
-   2503ms 100.0%  (root)
-   1201ms  48.0%    └─ vox_jit::translate  (libvox.dylib)
-    901ms  36.0%      └─ cranelift::lower  (libcranelift.dylib)
-    402ms  16.0%        └─ cranelift::regalloc  (libcranelift.dylib)
-    200ms   8.0%      └─ vox_postcard::deserialize  (libvox.dylib)
-    802ms  32.1%    └─ tokio::runtime::poll_task  (libtokio.dylib)
+  active   target   spans     %  frame
+ 2503.00     0.00       0 100.0  (root)
+ 1201.00     0.00       0  48.0    └─ vox_jit::translate  (libvox.dylib)
+  901.00     0.00       0  36.0      └─ cranelift::lower  (libcranelift.dylib)
+  402.00     0.00       0  16.0        └─ cranelift::regalloc  (libcranelift.dylib)
+  200.00     0.00       0   8.0      └─ vox_postcard::deserialize  (libvox.dylib)
+  802.00     0.00       0  32.1    └─ tokio::runtime::poll_task  (libtokio.dylib)
         …18 more frames
 `​``
 ```
@@ -464,9 +470,10 @@ omit for whole-process.
 
 ### `stax diagnose`
 
-Dump `stax-server` diagnostics: telemetry phases, counters, histograms, and
-recent events. Use it when numbers look wrong and you want the pipeline's own
-accounting.
+Dump `stax-server` diagnostics: active run state plus target-span ingest
+counters (batches, recorded/dropped spans, lane totals, and origin
+link/unlink counts). Use it when numbers look wrong and you want the
+pipeline's own accounting.
 
 ### `stax dump`
 
@@ -536,10 +543,11 @@ TypeScript bindings are generated into `frontend/src/generated/` by
   `$XDG_RUNTIME_DIR/stax-server.sock` or `/tmp/stax-server-$UID.sock`, not a
   path under `~/Library/Group Containers`.
 
-- **`stax top` returns `(no samples yet — is a recording in progress?)`** —
-  either no run is active, or the run hasn't ingested any samples yet (very
-  early in the lifecycle). Try `stax status` to confirm a run exists, or
-  `stax wait --for-samples 100` to block until data is in.
+- **`stax top` returns `(no samples or target spans yet — is a recording in progress?)`** —
+  either no run is active, or the run hasn't ingested any PET samples or
+  target spans yet (very early in the lifecycle). Try `stax status` to
+  confirm a run exists, or `stax wait --for-samples 100` to block until CPU
+  samples are in.
 
 - **Hardened-runtime targets** (macOS) are out of scope. The attachment
   helper is same-uid and intended for normal local developer processes.

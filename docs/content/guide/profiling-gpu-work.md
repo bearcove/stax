@@ -5,9 +5,11 @@ insert_anchor_links = "heading"
 +++
 
 stax recordings are not limited to what the CPU sampler can see. A profiled
-app can put **GPU command queues** (or any other accelerator lane) on the
-same timeline as its threads, with named spans, on the same clock — no
-export step, no second tool, no correlation pass.
+app can put **target/executor lanes** on the same timeline as its threads:
+GPU command queues, accelerator work, runtime queues, or any other work the
+target can timestamp and name. GPU work is the first concrete consumer, but
+the mechanism is deliberately general — no export step, no second tool, no
+correlation pass.
 
 ## How it works
 
@@ -34,10 +36,13 @@ The app links the **`stax-target`** crate and does two things:
 Server-side (`TargetIngest`), each `(pid, lane)` becomes a **synthetic
 thread** — a pseudo-tid at/above `0xFFF0_0000` — and each distinct span
 name becomes a synthetic symbol. Each reported span records one sample
-marker plus one attributed synthetic execution interval, so kernel names
-render like function names in `top`, `flame`, and the web UI timeline. With
-origins, `top`/`flame` for the dispatching CPU tid include the span under the
-sampled CPU stack that queued it: `CPU caller -> lane -> span name`.
+marker plus one attributed synthetic execution interval, so kernel/job names
+render like function names in `top`, `flame`, and the web UI timeline. The
+legacy active-time fields include these durations for compatibility, and the
+newer reporting surfaces break them out explicitly as `target` time and
+target span counts. With origins, `top`/`flame` for the dispatching CPU tid
+include the span under the sampled CPU stack that queued it:
+`CPU caller -> lane -> span name`.
 
 ## A worked example: bee's `hx`
 
@@ -50,25 +55,30 @@ stax threads | grep -i gpu
 ```
 
 In the verified 2026-06-12 `hx` run, this lane had 6300 ingested kernel
-spans. For synthetic lanes, the `samples` column is the span count, and
-the `active ms` column is lane active time synthesized from the reported
-span durations.
+spans. For synthetic lanes, `target ms` is the exact sum of reported span
+durations and `spans` is the span count. The old active-time field still
+includes the same duration so flame widths and older clients keep working,
+but it does not mean a CPU thread was busy.
 
 ## Reading the results
 
 - **`stax threads`** — existence + span count. Synthetic tids live
-  at/above `0xFFF0_0000`; pass `-n 0` if you want every thread row.
+  at/above `0xFFF0_0000`; target lanes with spans are included even past the
+  normal `-n` cutoff.
 - **Web UI timeline** (`ws://127.0.0.1:8080`, see
   [The Web UI](@/guide/web-ui.md)) — the lane drawn against the real
   threads, spans named per kernel.
 - **`stax top --tid <synthetic>` / `stax flame --tid <synthetic>`** —
-  per-kernel aggregation. `top` reports total span duration in the `ms`
-  column and span count in the `samples` column. `flame` renders
-  `(all) -> lane -> span name`.
+  per-kernel aggregation. `top` reports total span duration in `target ms`
+  and span count in `spans`. `flame` renders `(all) -> lane -> span name`
+  with target time/span columns.
 - **`stax top --tid <cpu tid>` / `stax flame --tid <cpu tid>`** — when the
   target reports span origins, these thread-scoped views include the GPU work
   queued from that CPU thread. `--sort total` is useful for charging GPU time
   to dispatch callers; `--sort self` still shows the kernel/span names.
+- **`stax diagnose`** — target ingest counters: batches, recorded/dropped
+  spans, total target duration, lanes, and origin link/unlink counts. Use this
+  when spans are present but CPU-stack attribution is missing.
 
 ## Interpreting a GPU-bound target
 

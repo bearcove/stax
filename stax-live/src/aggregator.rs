@@ -225,8 +225,10 @@ pub struct RawWakerEntry {
 #[derive(Default, Clone)]
 pub struct StackNode {
     pub on_cpu_ns: u64,
+    pub target_ns: u64,
     pub off_cpu: OffCpuBreakdown,
     pub pet_samples: u64,
+    pub target_spans: u64,
     pub off_cpu_intervals: u64,
     pub pmc: PmcAccum,
     pub children: HashMap<u64, StackNode>,
@@ -235,8 +237,10 @@ pub struct StackNode {
 impl StackNode {
     fn merge(&mut self, other: &StackNode) {
         self.on_cpu_ns = self.on_cpu_ns.saturating_add(other.on_cpu_ns);
+        self.target_ns = self.target_ns.saturating_add(other.target_ns);
         self.off_cpu.add_other(&other.off_cpu);
         self.pet_samples = self.pet_samples.saturating_add(other.pet_samples);
+        self.target_spans = self.target_spans.saturating_add(other.target_spans);
         self.off_cpu_intervals = self
             .off_cpu_intervals
             .saturating_add(other.off_cpu_intervals);
@@ -253,10 +257,14 @@ impl StackNode {
 pub struct AddressStats {
     pub self_on_cpu_ns: u64,
     pub total_on_cpu_ns: u64,
+    pub self_target_ns: u64,
+    pub total_target_ns: u64,
     pub self_off_cpu: OffCpuBreakdown,
     pub total_off_cpu: OffCpuBreakdown,
     pub self_pet_samples: u64,
     pub total_pet_samples: u64,
+    pub self_target_spans: u64,
+    pub total_target_spans: u64,
     pub self_off_cpu_intervals: u64,
     pub total_off_cpu_intervals: u64,
     pub self_pmc: PmcAccum,
@@ -269,6 +277,8 @@ pub struct Aggregation {
     pub flame_root: StackNode,
     pub by_address: HashMap<u64, AddressStats>,
     pub total_on_cpu_ns: u64,
+    pub total_target_ns: u64,
+    pub total_target_spans: u64,
     pub total_off_cpu: OffCpuBreakdown,
 }
 
@@ -498,6 +508,8 @@ impl Aggregator {
         let mut flame_root = StackNode::default();
         let mut by_address: HashMap<u64, AddressStats> = HashMap::new();
         let mut total_on_cpu_ns: u64 = 0;
+        let mut total_target_ns: u64 = 0;
+        let mut total_target_spans: u64 = 0;
         let mut total_off_cpu = OffCpuBreakdown::default();
 
         // Walk per-thread to keep the per-thread sample/interval
@@ -576,6 +588,7 @@ impl Aggregator {
                                 &s.stack,
                                 credit_ns,
                                 &s.pmc,
+                                false,
                             );
                         }
                     }
@@ -593,12 +606,15 @@ impl Aggregator {
                             continue;
                         }
                         total_on_cpu_ns = total_on_cpu_ns.saturating_add(duration);
+                        total_target_ns = total_target_ns.saturating_add(duration);
+                        total_target_spans = total_target_spans.saturating_add(1);
                         credit_on_cpu_to_tree(
                             &mut flame_root,
                             &mut by_address,
                             stack,
                             duration,
                             &PmuSample::default(),
+                            true,
                         );
                     }
                     IntervalKind::OffCpu {
@@ -638,6 +654,8 @@ impl Aggregator {
             flame_root,
             by_address,
             total_on_cpu_ns,
+            total_target_ns,
+            total_target_spans,
             total_off_cpu,
         }
     }
@@ -672,6 +690,7 @@ fn credit_on_cpu_to_tree(
     stack: &[u64],
     credit_ns: u64,
     pmc: &PmuSample,
+    is_target: bool,
 ) {
     if stack.is_empty() {
         return;
@@ -681,6 +700,10 @@ fn credit_on_cpu_to_tree(
         let s = by_address.entry(leaf).or_default();
         s.self_on_cpu_ns = s.self_on_cpu_ns.saturating_add(credit_ns);
         s.self_pet_samples = s.self_pet_samples.saturating_add(1);
+        if is_target {
+            s.self_target_ns = s.self_target_ns.saturating_add(credit_ns);
+            s.self_target_spans = s.self_target_spans.saturating_add(1);
+        }
         s.self_pmc.add(pmc);
     }
     let mut seen: smallset::SmallSet = Default::default();
@@ -689,6 +712,10 @@ fn credit_on_cpu_to_tree(
             let s = by_address.entry(addr).or_default();
             s.total_on_cpu_ns = s.total_on_cpu_ns.saturating_add(credit_ns);
             s.total_pet_samples = s.total_pet_samples.saturating_add(1);
+            if is_target {
+                s.total_target_ns = s.total_target_ns.saturating_add(credit_ns);
+                s.total_target_spans = s.total_target_spans.saturating_add(1);
+            }
             s.total_pmc.add(pmc);
         }
     }
@@ -699,6 +726,10 @@ fn credit_on_cpu_to_tree(
         node = node.children.entry(addr).or_default();
         node.on_cpu_ns = node.on_cpu_ns.saturating_add(credit_ns);
         node.pet_samples = node.pet_samples.saturating_add(1);
+        if is_target {
+            node.target_ns = node.target_ns.saturating_add(credit_ns);
+            node.target_spans = node.target_spans.saturating_add(1);
+        }
         node.pmc.add(pmc);
     }
 }

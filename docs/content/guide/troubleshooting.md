@@ -13,16 +13,17 @@ diagnostic tools and the common errors.
 
 ### stax diagnose
 
-Dumps `stax-server`'s internals: telemetry phases, counters, histograms, and
-recent events.
+Dumps `stax-server`'s internals, including active run state and target-span
+ingest counters: batches, recorded/dropped spans, lane totals, and origin
+link/unlink counts.
 
 ```bash
 stax diagnose
 ```
 
 Reach for this when numbers look wrong — samples not landing, intervals not
-being counted — and you want to see the pipeline's own accounting rather than
-guessing.
+being counted, target spans missing, or origins failing to link — and you want
+to see the pipeline's own accounting rather than guessing.
 
 ### stax dump
 
@@ -98,11 +99,11 @@ stax wait     # block until it finishes on its own
 stax stop     # or stop it now
 ```
 
-### `stax top` returns `(no samples yet — is a recording in progress?)`
+### `stax top` returns `(no samples or target spans yet — is a recording in progress?)`
 
-Either no run is active, or the run hasn't ingested any samples yet — very
-early in a run's life. Confirm a run exists with `stax status`, or block
-until data is in:
+Either no run is active, or the run hasn't ingested any PET samples or target
+spans yet — very early in a run's life. Confirm a run exists with
+`stax status`, or block until CPU samples are in:
 
 ```bash
 stax wait --for-samples 100

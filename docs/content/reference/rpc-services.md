@@ -34,7 +34,7 @@ The lifecycle and control plane — the surface behind `stax status`, `list`,
 |-----------------|------------------------------------------------------------|
 | `status`        | the active run plus server-wide info                       |
 | `list_runs`     | every run hosted, active and history                       |
-| `diagnostics`   | telemetry counters, phases, histograms, recent events      |
+| `diagnostics`   | active run plus target-span ingest counters                |
 | `start_attach`  | begin a recording by attaching to a pid                    |
 | `wait_active`   | block until a `WaitCondition` fires or the run stops       |
 | `stop_active`   | stop the active run cleanly, returning its final summary   |

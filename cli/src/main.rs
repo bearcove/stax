@@ -709,8 +709,8 @@ async fn run_top(args: TopArgs) -> Result<(), Box<dyn Error>> {
     };
     let client: ProfilerClient = vox::connect(&url).await?;
     let _debug_registration = register_profiler_client("top", &client);
-    let entries = client
-        .top(
+    let update = client
+        .top_update(
             args.limit,
             sort,
             ViewParams {
@@ -723,18 +723,39 @@ async fn run_top(args: TopArgs) -> Result<(), Box<dyn Error>> {
         )
         .await
         .map_err(|e| format!("{e:?}"))?;
+    let entries = update.entries;
     if entries.is_empty() {
-        println!("(no samples yet — is a recording in progress?)");
+        println!("(no samples or target spans yet — is a recording in progress?)");
         return Ok(());
     }
     let threads = client.threads().await.ok();
+    println!(
+        "{:>10} {:>10} {:>8} {:>8}  function",
+        "active ms", "target ms", "samples", "spans",
+    );
     for e in &entries {
         let name = e.function_name.as_deref().unwrap_or("<unresolved>");
         let bin = e.binary.as_deref().unwrap_or("?");
+        let (active_ns, target_ns, samples, spans) = match sort {
+            TopSort::BySelf => (
+                e.self_on_cpu_ns,
+                e.self_target_ns,
+                e.self_pet_samples,
+                e.self_target_spans,
+            ),
+            TopSort::ByTotal => (
+                e.total_on_cpu_ns,
+                e.total_target_ns,
+                e.total_pet_samples,
+                e.total_target_spans,
+            ),
+        };
         println!(
-            "{:>10.3}ms  {:>8} samples  {} ({})",
-            e.self_on_cpu_ns as f64 / 1e6,
-            e.self_pet_samples,
+            "{:>10.3} {:>10.3} {:>8} {:>8}  {} ({})",
+            active_ns as f64 / 1e6,
+            target_ns as f64 / 1e6,
+            samples,
+            spans,
             name,
             bin,
         );
@@ -799,6 +820,7 @@ fn print_threads(update: &ThreadsUpdate, limit: u32) {
         let b_total = b.on_cpu_ns.saturating_add(off_cpu_total_ns(&b.off_cpu));
         b_total
             .cmp(&a_total)
+            .then_with(|| b.target_spans.cmp(&a.target_spans))
             .then_with(|| b.pet_samples.cmp(&a.pet_samples))
             .then_with(|| a.tid.cmp(&b.tid))
     });
@@ -807,29 +829,43 @@ fn print_threads(update: &ThreadsUpdate, limit: u32) {
         return;
     }
     println!(
-        "{:>10} {:>10} {:>10} {:>9}  tid    name",
-        "active ms", "off-CPU ms", "samples", "blocked",
+        "{:>10} {:>10} {:>10} {:>8} {:>8} {:>9}  tid    name",
+        "cpu ms", "target ms", "off-CPU ms", "samples", "spans", "blocked",
     );
     let take = if limit == 0 {
         threads.len()
     } else {
         limit as usize
     };
-    for t in threads.iter().take(take) {
+    let mut visible: Vec<&stax_live_proto::ThreadInfo> =
+        threads.iter().take(take).copied().collect();
+    if limit != 0 {
+        visible.extend(
+            threads
+                .iter()
+                .skip(take)
+                .copied()
+                .filter(|t| t.tid >= SYNTH_TID_BASE && t.target_spans > 0),
+        );
+    }
+    for t in &visible {
         let off_total = off_cpu_total_ns(&t.off_cpu);
         let dominant = dominant_off_cpu_reason(&t.off_cpu);
+        let cpu_ns = t.on_cpu_ns.saturating_sub(t.target_ns);
         println!(
-            "{:>10.2} {:>10.2} {:>10} {:>9}  {:<6} {}",
-            t.on_cpu_ns as f64 / 1e6,
+            "{:>10.2} {:>10.2} {:>10.2} {:>8} {:>8} {:>9}  {:<6} {}",
+            cpu_ns as f64 / 1e6,
+            t.target_ns as f64 / 1e6,
             off_total as f64 / 1e6,
             t.pet_samples,
+            t.target_spans,
             dominant,
             t.tid,
             t.name.as_deref().unwrap_or("(unnamed)"),
         );
     }
-    if threads.len() > take {
-        println!("…{} more threads", threads.len() - take);
+    if threads.len() > visible.len() {
+        println!("…{} more non-target threads", threads.len() - visible.len());
     }
 }
 
@@ -884,8 +920,9 @@ async fn run_flame(args: FlameArgs) -> Result<(), Box<dyn Error>> {
 fn print_flame(update: &FlamegraphUpdate, max_depth: usize, threshold_pct: f64) {
     let total = update.total_on_cpu_ns.max(1) as f64;
     println!(
-        "# stax flame · total active {:.3}s · off-CPU {:.3}s",
+        "# stax flame · total active {:.3}s · target {:.3}s · off-CPU {:.3}s",
         update.total_on_cpu_ns as f64 / 1e9,
+        update.total_target_ns as f64 / 1e9,
         off_cpu_total_ns(&update.total_off_cpu) as f64 / 1e9,
     );
     if let Some(tid) = update.root.children.first().and(None::<u32>) {
@@ -895,6 +932,10 @@ fn print_flame(update: &FlamegraphUpdate, max_depth: usize, threshold_pct: f64) 
     }
     println!();
     println!("```");
+    println!(
+        "{:>8} {:>8} {:>7} {:>5}  frame",
+        "active", "target", "spans", "%",
+    );
     print_flame_node(
         &update.root,
         &update.strings,
@@ -947,8 +988,10 @@ fn print_flame_node(
     };
     let indent = "  ".repeat(depth);
     println!(
-        "{:>8.2}ms {:>5.1}%  {indent}{prefix}{label}",
+        "{:>8.2} {:>8.2} {:>7} {:>5.1}  {indent}{prefix}{label}",
         node.on_cpu_ns as f64 / 1e6,
+        node.target_ns as f64 / 1e6,
+        node.target_spans,
         pct,
         indent = indent,
         prefix = if depth == 0 { "" } else { "└─ " },
@@ -993,9 +1036,9 @@ fn maybe_print_metal_target_hint(threads: Option<&ThreadsUpdate>, saw_metal_disp
         return;
     }
     eprintln!(
-        "hint: Metal command/dispatch frames are visible, but no stax-target lane is present. \
-         If the target can cooperate, report Metal 4 timestamp-counter spans with stax-target; \
-         then `stax threads` will show a synthetic GPU lane, `stax top --tid <lane tid>` will show per-kernel durations, \
+        "hint: Metal command/dispatch frames are visible, but no cooperating target lane is present. \
+         Link stax-target in the profiled process and report Metal 4 timestamp-counter spans from the dispatch/reporting thread; \
+         then `stax threads` will show the synthetic lane, `stax top --tid <lane tid>` will show per-kernel durations, \
          and span origins let `stax flame --tid <cpu tid>` show CPU stack -> GPU lane -> kernel."
     );
 }
@@ -1004,7 +1047,7 @@ fn has_synthetic_target_lane(threads: &ThreadsUpdate) -> bool {
     threads
         .threads
         .iter()
-        .any(|thread| thread.tid >= SYNTH_TID_BASE && thread.pet_samples > 0)
+        .any(|thread| thread.tid >= SYNTH_TID_BASE && thread.target_spans > 0)
 }
 
 fn top_entries_mention_metal_cooperation(entries: &[TopEntry]) -> bool {
@@ -1160,6 +1203,43 @@ fn print_diagnostics(snapshot: &DiagnosticsSnapshot) {
         print_run_one_line(active);
     } else {
         println!("active run: none");
+    }
+    let target = &snapshot.target_ingest;
+    println!("target ingest:");
+    if target.batches == 0 {
+        println!("  no target span batches ingested");
+        return;
+    }
+    println!(
+        "  batches {}  spans {}/{} recorded  dropped {}  duration {:.3}ms",
+        target.batches,
+        target.spans_recorded,
+        target.spans_received,
+        target.spans_dropped_bad_duration,
+        target.total_duration_ns as f64 / 1e6,
+    );
+    if target.spans_with_origin > 0 {
+        println!(
+            "  origins {} linked / {} unlinked",
+            target.spans_linked_origin, target.spans_unlinked_origin,
+        );
+    }
+    if !target.lanes.is_empty() {
+        println!(
+            "  {:>10} {:>8} {:>8} {:>8} {:>10}  lane",
+            "duration", "spans", "origin", "linked", "tid",
+        );
+        for lane in &target.lanes {
+            println!(
+                "  {:>10.3} {:>8} {:>8} {:>8} {:>10}  {}",
+                lane.total_duration_ns as f64 / 1e6,
+                lane.spans_recorded,
+                lane.spans_with_origin,
+                lane.spans_linked_origin,
+                lane.tid,
+                lane.name,
+            );
+        }
     }
 }
 

@@ -35,8 +35,8 @@ pub enum Command {
     /// List every run stax-server has hosted (active + history).
     List,
 
-    /// Dump stax-server diagnostics: telemetry phases, counters,
-    /// histograms, and recent events.
+    /// Dump stax-server diagnostics, including target-span ingest and
+    /// origin-link counters.
     Diagnose,
 
     /// Ask running stax processes to dump SIGUSR1 telemetry/debug
@@ -51,15 +51,18 @@ pub enum Command {
     Stop,
 
     /// Snapshot top functions or target-span names from the active run.
+    /// Output includes active time, target-executor time, PET samples,
+    /// and target span counts.
     Top(TopArgs),
 
     /// Disassemble + annotate a function from the active run.
     Annotate(AnnotateArgs),
 
-    /// Print the CPU/lane-active flamegraph as an indented tree.
+    /// Print the active flamegraph as an indented tree, with
+    /// target-executor time/spans broken out per node.
     Flame(FlameArgs),
 
-    /// Per-thread and synthetic-lane active/off-CPU breakdown.
+    /// Per-thread and synthetic-lane CPU/target/off-CPU breakdown.
     Threads(ThreadsArgs),
 }
 
@@ -93,7 +96,9 @@ pub struct TopArgs {
     #[facet(args::named, args::short = 'n', default = 20)]
     pub limit: u32,
 
-    /// Sort by `self` (leaf) or `total` (any frame). Default: `self`.
+    /// Sort by `self` (leaf) or `total` (any frame). `total` is useful
+    /// for CPU threads with origin-linked target spans because the
+    /// dispatch stack owns the target duration as an ancestor.
     #[facet(args::named, default = "self")]
     pub sort: String,
 
@@ -106,7 +111,8 @@ pub struct TopArgs {
 #[derive(Facet, Debug)]
 pub struct ThreadsArgs {
     /// Maximum number of threads/lanes to print, sorted by total
-    /// activity. 0 to print all.
+    /// activity; target lanes with spans are always included. 0 to
+    /// print all.
     #[facet(args::named, args::short = 'n', default = 20)]
     pub limit: u32,
 }
@@ -121,7 +127,7 @@ pub struct FlameArgs {
     #[facet(args::named, args::short = 'd', default = 12)]
     pub max_depth: usize,
 
-    /// Hide nodes whose share of the total CPU/lane-active time falls
+    /// Hide nodes whose share of total active time falls
     /// below this percent. `0` to print everything.
     #[facet(args::named, default = 1.0)]
     pub threshold_pct: f64,

@@ -78,9 +78,9 @@ function findByKey(node: FlameView, target: string): FlameView | null {
 }
 
 /// Pick the metric that drives flame box width for the active
-/// display mode. on-CPU = real CPU time (excitement, hot loops);
+/// display mode. active = CPU time plus cooperating target spans;
 /// off-CPU = waiting time, broken down further by reason stripes;
-/// wall = on + off, the whole time the stack was active.
+/// wall = active + off, the whole time the stack was active.
 export function widthOf(node: FlameView, mode: DisplayMode): bigint {
   switch (mode) {
     case "on_cpu":
@@ -160,7 +160,7 @@ export function Flamegraph({
   filter: LiveFilter;
   matchText: ((t: string) => boolean) | null;
   hiddenKinds: Set<ObjKind>;
-  /// Drives flame box widths: on-CPU only, off-CPU only, or wall.
+  /// Drives flame box widths: active only, off-CPU only, or wall.
   displayMode: DisplayMode;
   /// Absolute flame key (relative to `update.root`) of the currently
   /// focused subtree, or null when there's no focus.
@@ -379,7 +379,11 @@ export function Flamegraph({
               {formatDuration(widthOf(hover.node, displayMode))} /{" "}
               {formatDuration(total)} ·{" "}
               {pct(widthOf(hover.node, displayMode), total)}
-              {" · "}on {formatDuration(hover.node.on_cpu_ns)} · off{" "}
+              {" · "}active {formatDuration(hover.node.on_cpu_ns)}
+              {hover.node.target_ns > 0n
+                ? ` (${formatDuration(hover.node.target_ns)} target, ${hover.node.target_spans.toString()} spans)`
+                : ""}
+              {" · "}off{" "}
               {formatDuration(offCpuTotal(hover.node.off_cpu))}
               {ipcFor(hover.node) ? ` · ${ipcFor(hover.node)} ipc` : ""}
               {hover.node.binary ? ` · ${hover.node.binary}` : ""}
@@ -444,7 +448,11 @@ function tooltipFor(
   const w = widthOf(node, mode);
   const offTotal = offCpuTotal(node.off_cpu);
   const head = `${labelFor(node)} · ${formatDuration(w)} / ${formatDuration(total)} (${pct(w, total)})`;
-  const split = `on ${formatDuration(node.on_cpu_ns)} · off ${formatDuration(offTotal)}`;
+  const target =
+    node.target_ns > 0n
+      ? ` · target ${formatDuration(node.target_ns)} (${node.target_spans.toString()} spans)`
+      : "";
+  const split = `active ${formatDuration(node.on_cpu_ns)}${target} · off ${formatDuration(offTotal)}`;
   const segs = reasonSegments(node.off_cpu);
   const reasonLine = segs.length
     ? "\n" +
@@ -460,7 +468,7 @@ function tooltipFor(
 function modeLabel(mode: DisplayMode): string {
   switch (mode) {
     case "on_cpu":
-      return "on-CPU activity";
+      return "active time";
     case "off_cpu":
       return "off-CPU time";
     case "wall":

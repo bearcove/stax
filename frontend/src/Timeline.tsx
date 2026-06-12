@@ -7,8 +7,8 @@ import type {
 } from "./generated/profiler.generated.ts";
 
 /// Compact timeline strip across the top of the page. Each bucket is
-/// drawn as a vertical bar; bar height is proportional to the bucket's
-/// sample count relative to the busiest bucket in view. Drag across
+/// drawn as a compact area; height is proportional to active + off-CPU
+/// time relative to the busiest bucket in view. Drag across
 /// the bars to brush-select a time range; click to clear.
 export function Timeline({
   client,
@@ -47,10 +47,10 @@ export function Timeline({
     return <div className="timeline placeholder">timeline (waiting for samples…)</div>;
   }
 
-  // Use total wall time per bucket (on + off) as the bar height: it's
+  // Use total wall time per bucket (active + off) as the bar height: it's
   // the most useful "what was the system doing here?" signal. The
   // per-axis split is in the bucket fields; future iterations can
-  // stack on-CPU and off-CPU as separate layers in the chart.
+  // stack active, target, and off-CPU as separate layers in the chart.
   const max = update.buckets.reduce((m, b) => {
     const total = b.on_cpu_ns + b.off_cpu_ns;
     return total > m ? total : m;
@@ -152,7 +152,8 @@ export function Timeline({
         )}
       </svg>
       <div className="timeline-footer">
-        {(Number(update.total_on_cpu_ns) / 1e9).toFixed(2)}s on-CPU ·{" "}
+        {(Number(update.total_on_cpu_ns) / 1e9).toFixed(2)}s active ·{" "}
+        {(Number(update.total_target_ns) / 1e9).toFixed(2)}s target ·{" "}
         {(Number(update.total_off_cpu_ns) / 1e9).toFixed(2)}s off-CPU ·{" "}
         {durSec.toFixed(1)}s elapsed
         {range && (

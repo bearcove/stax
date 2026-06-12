@@ -126,15 +126,18 @@ stax top [OPTIONS]
 | `--sort <MODE>`     | `String` | `self`   | `self` (leaf-only) or `total` (any frame)            |
 | `--tid <TID>`       | `u32`    | *(none)* | restrict to one thread; default is all threads       |
 
-For a synthetic target lane, `--tid <TID>` shows per-span durations and span
-counts. When target spans carry origins, filtering to the origin CPU tid also
-includes those spans under the CPU dispatch stack. If Metal command/dispatch
-frames are visible but no target lane is present, `stax top` prints a stderr
-hint about `stax-target` Metal 4 timestamp-counter cooperation.
+Output columns are active time, target-executor time, PET samples, target
+span count, and function/span name. For a synthetic target lane,
+`--tid <TID>` shows per-span durations in `target ms` and span counts in
+`spans`. When target spans carry origins, filtering to the origin CPU tid also
+includes those spans under the CPU dispatch stack; `--sort total` then charges
+the target duration to dispatch callers. If Metal command/dispatch frames are
+visible but no target lane is present, `stax top` prints a stderr hint about
+`stax-target` Metal 4 timestamp-counter cooperation.
 
 ## `stax flame`
 
-Print the CPU/lane-active flamegraph as an indented tree. See
+Print the active flamegraph as an indented tree. See
 [Inspecting a Run](@/guide/inspecting-a-run.md#stax-flame).
 
 ```text
@@ -147,17 +150,19 @@ stax flame [OPTIONS]
 | `--threshold-pct <PCT>`    | `f64`   | `1.0`    | hide subtrees below this percent of total active time; `0` for all |
 | `--tid <TID>`              | `u32`   | *(none)* | restrict to one thread; default is all threads                  |
 
-Cooperating target lanes render as `(all) -> lane -> span name`. When target
-spans carry origins, `--tid <cpu tid>` can render
+Cooperating target lanes render as `(all) -> lane -> span name`, with per-node
+active time, target time, span count, and percent columns. When target spans
+carry origins, `--tid <cpu tid>` can render
 `(all) -> CPU caller -> lane -> span name`. Like `top`, `flame` prints a Metal
 cooperation hint when Metal command/dispatch frames are visible but no
 synthetic target lane has reported spans.
 
 ## `stax threads`
 
-Per-thread and synthetic-lane active/off-CPU breakdown for the current run,
-sorted by total activity. CPU thread rows include origin-linked target spans
-queued from that thread. See
+Per-thread and synthetic-lane CPU/target/off-CPU breakdown for the current
+run, sorted by total activity. CPU thread rows include origin-linked target
+spans queued from that thread, and synthetic target lanes with spans are
+included even if they fall past the normal `-n` cutoff. See
 [Inspecting a Run](@/guide/inspecting-a-run.md#stax-threads).
 
 ```text
@@ -187,8 +192,9 @@ leaf-self functions; the hottest match wins.
 
 ## `stax diagnose`
 
-Dump `stax-server` diagnostics: telemetry phases, counters, histograms, and
-recent events. Takes no options. See
+Dump `stax-server` diagnostics, including target-span ingest counters
+(batches, recorded/dropped spans, lane totals, and origin link/unlink counts).
+Takes no options. See
 [Troubleshooting](@/guide/troubleshooting.md#diagnostic-commands--stax-diagnose).
 
 ## `stax dump`

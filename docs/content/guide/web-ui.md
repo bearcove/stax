@@ -62,14 +62,16 @@ there is nothing to reload. The layout, top to bottom:
   selection that scopes every other panel.
 - **Off-CPU reason legend** and a **wakers panel** — what threads were
   blocked on, and who woke them.
-- **Flamegraph** — the CPU/lane-active tree, the same data as
+- **Flamegraph** — the active tree (CPU time plus cooperating target spans),
+  the same data as
   [`stax flame`](@/guide/inspecting-a-run.md#stax-flame), rendered as a
   zoomable graph with focus / drop-symbol / Esc keyboard shortcuts and
-  off-CPU reason stripes. Origin-linked target spans appear under the CPU
-  stack that queued them when that thread is selected.
+  off-CPU reason stripes. Hover text breaks out target time and span counts.
+  Origin-linked target spans appear under the CPU stack that queued them when
+  that thread is selected.
 - **Top-N table** — the hot-leaf or target-span leaderboard, the same data as
   [`stax top`](@/guide/inspecting-a-run.md#stax-top), sortable by self or
-  total.
+  total, with target duration/span annotations on cooperating rows.
 - **A tabbed detail pane** — *disassembly* (cost-annotated, source-headed,
   the same data as [`stax annotate`](@/guide/inspecting-a-run.md#stax-annotate)),
   *family tree* (callers/callees around a symbol), and *intervals* (the

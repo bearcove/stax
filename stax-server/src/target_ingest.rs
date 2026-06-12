@@ -27,7 +27,9 @@
 use std::collections::HashMap;
 
 use stax_live::{IntervalKind, LiveSymbolOwned, LoadedBinary, PmuSample};
-use stax_live_proto::{TargetIngest, TargetSpanBatch, TargetSpanOrigin};
+use stax_live_proto::{
+    TargetIngest, TargetIngestDiagnostics, TargetLaneDiagnostics, TargetSpanBatch, TargetSpanOrigin,
+};
 
 use crate::ServerState;
 
@@ -56,6 +58,8 @@ pub(crate) struct TargetLaneRegistry {
     lane_tids: HashMap<(u32, String), u32>,
     /// lane/span symbol → synthetic symbol AVMA.
     symbol_addrs: HashMap<SyntheticSymbolKey, u64>,
+    totals: TargetIngestCounters,
+    lane_counters: HashMap<(u32, String), TargetIngestCounters>,
 }
 
 #[derive(Clone)]
@@ -74,6 +78,116 @@ struct SpanEvent {
     end_ns: u64,
     span_addr: u64,
     origin: Option<TargetSpanOrigin>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct TargetIngestCounters {
+    batches: u64,
+    spans_received: u64,
+    spans_recorded: u64,
+    spans_dropped_bad_duration: u64,
+    spans_with_origin: u64,
+    spans_linked_origin: u64,
+    total_duration_ns: u64,
+}
+
+impl TargetIngestCounters {
+    fn spans_unlinked_origin(&self) -> u64 {
+        self.spans_with_origin
+            .saturating_sub(self.spans_linked_origin)
+    }
+
+    fn record_batch(
+        &mut self,
+        received: u64,
+        recorded: u64,
+        dropped_bad_duration: u64,
+        spans_with_origin: u64,
+        spans_linked_origin: u64,
+        total_duration_ns: u64,
+    ) {
+        self.batches = self.batches.saturating_add(1);
+        self.spans_received = self.spans_received.saturating_add(received);
+        self.spans_recorded = self.spans_recorded.saturating_add(recorded);
+        self.spans_dropped_bad_duration = self
+            .spans_dropped_bad_duration
+            .saturating_add(dropped_bad_duration);
+        self.spans_with_origin = self.spans_with_origin.saturating_add(spans_with_origin);
+        self.spans_linked_origin = self.spans_linked_origin.saturating_add(spans_linked_origin);
+        self.total_duration_ns = self.total_duration_ns.saturating_add(total_duration_ns);
+    }
+}
+
+impl TargetLaneRegistry {
+    fn record_batch(
+        &mut self,
+        pid: u32,
+        lane: &str,
+        received: u64,
+        recorded: u64,
+        dropped_bad_duration: u64,
+        spans_with_origin: u64,
+        spans_linked_origin: u64,
+        total_duration_ns: u64,
+    ) {
+        self.totals.record_batch(
+            received,
+            recorded,
+            dropped_bad_duration,
+            spans_with_origin,
+            spans_linked_origin,
+            total_duration_ns,
+        );
+        self.lane_counters
+            .entry((pid, lane.to_owned()))
+            .or_default()
+            .record_batch(
+                received,
+                recorded,
+                dropped_bad_duration,
+                spans_with_origin,
+                spans_linked_origin,
+                total_duration_ns,
+            );
+    }
+
+    pub(crate) fn diagnostics(&self) -> TargetIngestDiagnostics {
+        let mut lanes: Vec<TargetLaneDiagnostics> = self
+            .lane_counters
+            .iter()
+            .map(|((pid, lane), counters)| TargetLaneDiagnostics {
+                tid: self
+                    .lane_tids
+                    .get(&(*pid, lane.clone()))
+                    .copied()
+                    .unwrap_or(0),
+                name: lane.clone(),
+                spans_recorded: counters.spans_recorded,
+                spans_with_origin: counters.spans_with_origin,
+                spans_linked_origin: counters.spans_linked_origin,
+                spans_unlinked_origin: counters.spans_unlinked_origin(),
+                total_duration_ns: counters.total_duration_ns,
+            })
+            .collect();
+        lanes.sort_by(|a, b| {
+            b.total_duration_ns
+                .cmp(&a.total_duration_ns)
+                .then_with(|| b.spans_recorded.cmp(&a.spans_recorded))
+                .then_with(|| a.tid.cmp(&b.tid))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        TargetIngestDiagnostics {
+            batches: self.totals.batches,
+            spans_received: self.totals.spans_received,
+            spans_recorded: self.totals.spans_recorded,
+            spans_dropped_bad_duration: self.totals.spans_dropped_bad_duration,
+            spans_with_origin: self.totals.spans_with_origin,
+            spans_linked_origin: self.totals.spans_linked_origin,
+            spans_unlinked_origin: self.totals.spans_unlinked_origin(),
+            total_duration_ns: self.totals.total_duration_ns,
+            lanes,
+        }
+    }
 }
 
 impl SyntheticSymbolKey {
@@ -179,10 +293,14 @@ impl TargetIngest for TargetIngestService {
             });
         }
         events.sort_by_key(|event| (event.start_ns, event.end_ns));
+        let spans_received = batch.spans.len() as u64;
+        let recorded_spans = events.len() as u64;
+        let dropped_bad_duration = spans_received.saturating_sub(recorded_spans);
+        let spans_with_origin = events.iter().filter(|event| event.origin.is_some()).count() as u64;
         let mut total_duration_ns = 0u64;
+        let mut linked_origins = 0u64;
         if !events.is_empty() {
             let mut aggregator = self.server.aggregator().write();
-            let mut linked_origins = 0u64;
             for event in &events {
                 total_duration_ns = total_duration_ns.saturating_add(event.end_ns - event.start_ns);
                 let origin_tid = event
@@ -227,13 +345,17 @@ impl TargetIngest for TargetIngestService {
                     IntervalKind::SyntheticSpan { stack, origin_tid },
                 );
             }
-            tracing::debug!(
-                pid = batch.pid,
-                lane = %batch.lane,
-                linked_origins,
-                "target span CPU origins linked"
-            );
         }
+        self.server.target_lanes().lock().record_batch(
+            batch.pid,
+            &batch.lane,
+            spans_received,
+            recorded_spans,
+            dropped_bad_duration,
+            spans_with_origin,
+            linked_origins,
+            total_duration_ns,
+        );
         if !events.is_empty() {
             self.server.bump_revision();
         }
@@ -242,6 +364,8 @@ impl TargetIngest for TargetIngestService {
             lane = %batch.lane,
             spans = batch.spans.len(),
             recorded_spans = events.len(),
+            spans_with_origin,
+            linked_origins,
             total_duration_ns,
             "target spans ingested"
         );
@@ -255,8 +379,8 @@ impl TargetIngest for TargetIngestService {
 #[cfg(test)]
 mod tests {
     use stax_live_proto::{
-        FlameNode, LiveFilter, Profiler as _, TargetIngest as _, TargetSpan, TargetSpanBatch,
-        TopSort, ViewParams,
+        FlameNode, LiveFilter, Profiler as _, RunConfig, StopReason, TargetIngest as _, TargetSpan,
+        TargetSpanBatch, TopSort, ViewParams,
     };
 
     use super::*;
@@ -340,30 +464,43 @@ mod tests {
         assert_eq!(top.len(), 2);
         assert_eq!(top[0].function_name.as_deref(), Some("kernel_a"));
         assert_eq!(top[0].self_on_cpu_ns, 3_000_000);
+        assert_eq!(top[0].self_target_ns, 3_000_000);
         assert_eq!(top[0].self_pet_samples, 1);
+        assert_eq!(top[0].self_target_spans, 1);
         assert_eq!(top[1].function_name.as_deref(), Some("kernel_b"));
         assert_eq!(top[1].self_on_cpu_ns, 500_000);
+        assert_eq!(top[1].self_target_ns, 500_000);
         assert_eq!(top[1].self_pet_samples, 1);
+        assert_eq!(top[1].self_target_spans, 1);
 
         let flame = profiler.flamegraph(view_params(Some(tid))).await;
         assert_eq!(flame.total_on_cpu_ns, 3_500_000);
+        assert_eq!(flame.total_target_ns, 3_500_000);
+        assert_eq!(flame.total_target_spans, 2);
         assert_eq!(flame.root.pet_samples, 2);
+        assert_eq!(flame.root.target_spans, 2);
         assert_eq!(flame.root.children.len(), 1);
         let lane = &flame.root.children[0];
         assert_eq!(flame_node_name(lane, &flame.strings), Some("GPU test"));
         assert_eq!(lane.on_cpu_ns, 3_500_000);
+        assert_eq!(lane.target_ns, 3_500_000);
         assert_eq!(lane.pet_samples, 2);
+        assert_eq!(lane.target_spans, 2);
         assert_eq!(lane.children.len(), 2);
         assert_eq!(
             flame_node_name(&lane.children[0], &flame.strings),
             Some("kernel_a")
         );
         assert_eq!(lane.children[0].on_cpu_ns, 3_000_000);
+        assert_eq!(lane.children[0].target_ns, 3_000_000);
+        assert_eq!(lane.children[0].target_spans, 1);
         assert_eq!(
             flame_node_name(&lane.children[1], &flame.strings),
             Some("kernel_b")
         );
         assert_eq!(lane.children[1].on_cpu_ns, 500_000);
+        assert_eq!(lane.children[1].target_ns, 500_000);
+        assert_eq!(lane.children[1].target_spans, 1);
 
         let threads = profiler.threads().await;
         let thread = threads
@@ -373,7 +510,19 @@ mod tests {
             .expect("synthetic thread row");
         assert_eq!(thread.name.as_deref(), Some("GPU test"));
         assert_eq!(thread.on_cpu_ns, 3_500_000);
+        assert_eq!(thread.target_ns, 3_500_000);
         assert_eq!(thread.pet_samples, 2);
+        assert_eq!(thread.target_spans, 2);
+
+        let diagnostics = server.target_lanes().lock().diagnostics();
+        assert_eq!(diagnostics.batches, 1);
+        assert_eq!(diagnostics.spans_received, 2);
+        assert_eq!(diagnostics.spans_recorded, 2);
+        assert_eq!(diagnostics.spans_dropped_bad_duration, 0);
+        assert_eq!(diagnostics.total_duration_ns, 3_500_000);
+        assert_eq!(diagnostics.lanes.len(), 1);
+        assert_eq!(diagnostics.lanes[0].tid, tid);
+        assert_eq!(diagnostics.lanes[0].name, "GPU test");
     }
 
     #[tokio::test]
@@ -438,23 +587,32 @@ mod tests {
             .await;
         assert_eq!(cpu_top[0].function_name.as_deref(), Some("kernel_a"));
         assert_eq!(cpu_top[0].self_on_cpu_ns, 3_000_000);
+        assert_eq!(cpu_top[0].self_target_ns, 3_000_000);
         assert_eq!(cpu_top[0].self_pet_samples, 1);
+        assert_eq!(cpu_top[0].self_target_spans, 1);
 
         let flame = profiler.flamegraph(view_params(Some(CPU_TID))).await;
         assert_eq!(flame.total_on_cpu_ns, 3_000_000);
+        assert_eq!(flame.total_target_ns, 3_000_000);
+        assert_eq!(flame.total_target_spans, 1);
         assert_eq!(flame.root.children.len(), 1);
         let cpu_parent = &flame.root.children[0];
         assert_eq!(
             flame_node_name(cpu_parent, &flame.strings),
             Some("cpu_parent")
         );
+        assert_eq!(cpu_parent.target_ns, 3_000_000);
+        assert_eq!(cpu_parent.target_spans, 1);
         let cpu_leaf = &cpu_parent.children[0];
         assert_eq!(flame_node_name(cpu_leaf, &flame.strings), Some("cpu_leaf"));
+        assert_eq!(cpu_leaf.target_ns, 3_000_000);
         let lane = &cpu_leaf.children[0];
         assert_eq!(flame_node_name(lane, &flame.strings), Some("GPU test"));
+        assert_eq!(lane.target_spans, 1);
         let span = &lane.children[0];
         assert_eq!(flame_node_name(span, &flame.strings), Some("kernel_a"));
         assert_eq!(span.on_cpu_ns, 3_000_000);
+        assert_eq!(span.target_ns, 3_000_000);
 
         let threads = profiler.threads().await;
         let cpu_thread = threads
@@ -463,14 +621,74 @@ mod tests {
             .find(|thread| thread.tid == CPU_TID)
             .expect("origin CPU thread row");
         assert_eq!(cpu_thread.on_cpu_ns, 3_000_000);
+        assert_eq!(cpu_thread.target_ns, 3_000_000);
         assert_eq!(cpu_thread.pet_samples, 1);
+        assert_eq!(cpu_thread.target_spans, 1);
         let lane_thread = threads
             .threads
             .iter()
             .find(|thread| thread.tid == SYNTH_TID_BASE)
             .expect("synthetic lane row");
         assert_eq!(lane_thread.on_cpu_ns, 3_000_000);
+        assert_eq!(lane_thread.target_ns, 3_000_000);
         assert_eq!(lane_thread.pet_samples, 1);
+        assert_eq!(lane_thread.target_spans, 1);
+
+        let diagnostics = server.target_lanes().lock().diagnostics();
+        assert_eq!(diagnostics.spans_with_origin, 1);
+        assert_eq!(diagnostics.spans_linked_origin, 1);
+        assert_eq!(diagnostics.spans_unlinked_origin, 0);
+    }
+
+    #[tokio::test]
+    async fn new_run_resets_target_lane_registry_and_republishes_symbols() {
+        let server = ServerState::new_for_tests();
+        let service = TargetIngestService::new(server.clone());
+
+        let run1 = server
+            .begin_run(test_run_config("first"))
+            .expect("begin first run");
+        server.apply_target_attached_in_process(run1, 42, 0);
+        service
+            .ingest(TargetSpanBatch {
+                pid: 42,
+                lane: "GPU test".to_owned(),
+                spans: vec![span("kernel_a", 1_000_000, 2_000_000)],
+            })
+            .await;
+        assert!(
+            server
+                .binaries()
+                .read()
+                .lookup_symbol(SYNTH_BINARY_BASE_AVMA + SYNTH_SYMBOL_STRIDE)
+                .is_some(),
+            "first run publishes synthetic span symbols"
+        );
+        server.finalize_run(run1, StopReason::UserStop);
+
+        let run2 = server
+            .begin_run(test_run_config("second"))
+            .expect("begin second run");
+        server.apply_target_attached_in_process(run2, 42, 0);
+        service
+            .ingest(TargetSpanBatch {
+                pid: 42,
+                lane: "GPU test".to_owned(),
+                spans: vec![span("kernel_a", 3_000_000, 5_000_000)],
+            })
+            .await;
+
+        let top = server
+            .profiler()
+            .top(10, TopSort::BySelf, view_params(Some(SYNTH_TID_BASE)))
+            .await;
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].function_name.as_deref(), Some("kernel_a"));
+        assert_eq!(top[0].self_target_ns, 2_000_000);
+        let diagnostics = server.target_lanes().lock().diagnostics();
+        assert_eq!(diagnostics.batches, 1);
+        assert_eq!(diagnostics.spans_recorded, 1);
+        assert_eq!(diagnostics.total_duration_ns, 2_000_000);
     }
 
     fn span(name: &str, start_ns: u64, end_ns: u64) -> TargetSpan {
@@ -484,6 +702,14 @@ mod tests {
         origin: TargetSpanOrigin,
     ) -> TargetSpan {
         TargetSpan::new(name, start_ns, end_ns).with_origin(origin)
+    }
+
+    fn test_run_config(label: &str) -> RunConfig {
+        RunConfig {
+            label: label.to_owned(),
+            frequency_hz: 900,
+            dwarf_unwind: false,
+        }
     }
 
     fn view_params(tid: Option<u32>) -> ViewParams {
@@ -559,7 +785,9 @@ mod tests {
         assert_eq!(top.len(), 1);
         assert_eq!(top[0].function_name.as_deref(), Some("wire_kernel"));
         assert_eq!(top[0].self_on_cpu_ns, 6_000_000);
+        assert_eq!(top[0].self_target_ns, 6_000_000);
         assert_eq!(top[0].self_pet_samples, 1);
+        assert_eq!(top[0].self_target_spans, 1);
         let _ = std::fs::remove_file(&socket);
     }
 }

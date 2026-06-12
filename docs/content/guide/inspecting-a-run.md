@@ -23,14 +23,16 @@ stax top -n 10 --sort self
 ```
 
 ```text
-   42.184ms       3812 samples  mycrate::translate (mybench)
-    9.001ms        812 samples  cranelift::lower (libcranelift.dylib)
+ active ms  target ms  samples    spans  function
+    42.184      0.000     3812        0  mycrate::translate (mybench)
+     9.001      0.000      812        0  cranelift::lower (libcranelift.dylib)
     …
 ```
 
-One line per function/span: self time in milliseconds, self sample count,
-demangled name, and the binary it came from. For a cooperating synthetic
-lane, time is the sum of reported span durations and samples are span count.
+One line per function/span: active time, target-executor time, PET samples,
+target span count, demangled name, and the binary it came from. For a
+cooperating synthetic lane, `target ms` is the sum of reported span durations
+and `spans` is span count.
 
 | flag                | meaning                                                   |
 |---------------------|-----------------------------------------------------------|
@@ -39,9 +41,11 @@ lane, time is the sum of reported span durations and samples are span count.
 | `--sort total`      | any-frame attribution: functions that *contain* hot code  |
 | `--tid <TID>`       | restrict to one thread — default: all threads             |
 
-`--sort self` answers "what instruction is the CPU running"; `--sort total`
-answers "what work is responsible", and will rank callers like `main` or a
-runtime's poll loop highly because hot code runs *underneath* them.
+The output columns are active time, target-executor time, PET samples, target
+span count, and function/span name. `--sort self` answers "what instruction is
+the CPU or target lane running"; `--sort total` answers "what work is
+responsible", and will rank callers like `main` or a runtime's poll loop
+highly because hot code runs *underneath* them.
 For target lanes, `--sort self --tid <synthetic>` shows per-span names;
 `--sort total --tid <synthetic>` can surface the lane aggregate. When spans
 carry origins, `--tid <real CPU tid>` includes the target work queued from
@@ -54,23 +58,24 @@ cooperation through `stax-target`.
 
 ## stax flame
 
-The CPU/lane-active flamegraph, printed as an indented tree — the same data
-the [web UI](@/guide/web-ui.md) renders, in a form you (or an agent) can read
-in a terminal.
+The active flamegraph, printed as an indented tree — the same data the
+[web UI](@/guide/web-ui.md) renders, in a form you (or an agent) can read in
+a terminal.
 
 ```bash
 stax flame -d 4 --threshold-pct 2
 ```
 
 ```text
-# stax flame · total active 2.503s · off-CPU 4.122s
+# stax flame · total active 2.503s · target 0.000s · off-CPU 4.122s
 
-   2503ms 100.0%  (root)
-   1201ms  48.0%    └─ vox_jit::translate  (libvox.dylib)
-    901ms  36.0%      └─ cranelift::lower  (libcranelift.dylib)
-    402ms  16.0%        └─ cranelift::regalloc  (libcranelift.dylib)
-    200ms   8.0%      └─ vox_postcard::deserialize  (libvox.dylib)
-    802ms  32.1%    └─ tokio::runtime::poll_task  (libtokio.dylib)
+  active   target   spans     %  frame
+ 2503.00     0.00       0 100.0  (root)
+ 1201.00     0.00       0  48.0    └─ vox_jit::translate  (libvox.dylib)
+  901.00     0.00       0  36.0      └─ cranelift::lower  (libcranelift.dylib)
+  402.00     0.00       0  16.0        └─ cranelift::regalloc  (libcranelift.dylib)
+  200.00     0.00       0   8.0      └─ vox_postcard::deserialize  (libvox.dylib)
+  802.00     0.00       0  32.1    └─ tokio::runtime::poll_task  (libtokio.dylib)
         …18 more frames
 ```
 
@@ -95,25 +100,26 @@ has reported spans.
 
 Per-thread and synthetic-lane active/off-CPU breakdown, sorted by total
 activity. CPU thread activity includes origin-linked target spans queued from
-that thread. Use it to decide *which thread or lane* is worth flaming before
-you call `stax flame --tid`.
+that thread. Synthetic target lanes with spans are included even when they
+would otherwise fall past the normal `-n` cutoff. Use it to decide *which
+thread or lane* is worth flaming before you call `stax flame --tid`.
 
 ```bash
 stax threads -n 5
 ```
 
 ```text
- active ms off-CPU ms    samples   blocked  tid    name
-   1240.20      31.40       1102      lock  501    main
-    860.00      99.00        710     sleep  592    tokio-runtime-worker
-    220.10      14.50        198      idle  600    grpc-pool
+    cpu ms  target ms off-CPU ms  samples    spans   blocked  tid    name
+   1240.20       0.00      31.40     1102        0      lock  501    main
+    860.00       0.00      99.00      710        0     sleep  592    tokio-runtime-worker
+      0.00     220.10       0.00      198      198         -  4293918720 GPU tq1s
     …
 ```
 
-The `active ms` column is on-CPU time for real CPU threads plus target spans
-whose origin points at that tid; for synthetic target lanes it is lane-active
-span duration. The `samples` column is PET sample count for CPU threads and
-span count for synthetic lanes.
+The `cpu ms` column is real on-CPU time. `target ms` is exact span duration:
+for synthetic lanes it is lane-active target time; for CPU threads it is
+origin-linked target work queued from that tid. `samples` is PET sample count
+and `spans` is target span count.
 
 The `blocked` column names the **largest off-CPU bucket** for that thread —
 one of `idle`, `lock`, `sem`, `ipc`, `ioR`, `ioW`, `ready`, `sleep`, `conn`,
