@@ -482,24 +482,32 @@ Current state:
 
 - Web UI receives target time/span fields in the same protocol as CLI.
 - Docs say hover text and flame/top surfaces expose target counts.
+- Added a target display mode. The topbar metric selector now includes target
+  time; flame widths, top-table bars/primary durations, thread dropdown
+  ordering/bars, and the timeline strip all pivot to target duration.
+- Target mode uses distinct target colors in the timeline, top table, and
+  thread switcher.
 
 Remaining work:
 
 - Metric selector:
-  - active time
-  - CPU time
-  - target time
-  - off-CPU time
-  - maybe wait reason
+  - done: active time
+  - done: target time
+  - done: off-CPU time
+  - done: wall time
+  - later: pure CPU time if useful as a separate metric
+  - later: wait-reason-specific modes
 - Flamegraph:
-  - target-time width mode
+  - done: target-time width mode
   - target-span count visible where useful
   - origin-linked target spans naturally visible under CPU callers
 - Threads/lanes:
-  - target lanes visually distinct from CPU threads
+  - started: target mode sorts/bars by target duration, so lanes float up
   - synthetic lanes not hidden in long thread lists
   - clicking a lane focuses flame/top/timeline to that tid
 - Timeline:
+  - done: selected metric drives the timeline area; target mode shows
+    target duration over time
   - lane track for target spans
   - span hover/detail:
     - name
@@ -695,7 +703,10 @@ Remaining:
 3. Span hover/detail.
 4. CPU origin navigation.
 5. Empty-state guidance.
-6. Browser verification.
+6. Started: browser verification. Production build passes; Playwright opened
+   the dev app and exposed a stale installed-daemon protocol mismatch on
+   `ws://127.0.0.1:8080`. A checkout-local server on an alternate WS port ran,
+   but the Playwright CLI wrapper hung on later snapshot commands.
 
 Done when:
 

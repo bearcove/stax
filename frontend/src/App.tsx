@@ -501,6 +501,7 @@ export function App() {
             threads={threads}
             selectedTid={selectedTid}
             onSelect={setSelectedTid}
+            displayMode={displayMode}
           />
           <span className="search-group">
             <input
@@ -551,6 +552,7 @@ export function App() {
             tid={selectedTid}
             range={filter.time_range}
             onRangeChange={setTimeRange}
+            displayMode={displayMode}
           />
         </section>
       )}
@@ -644,6 +646,7 @@ export function App() {
             matchText={matchText}
             hiddenKinds={hiddenKinds}
             pmuMetric={pmuMetric}
+            displayMode={displayMode}
             onContextMenu={openMenu}
           />
         </section>
@@ -866,10 +869,10 @@ export type LangKind = "rust" | "c" | "cpp" | "swift" | "asm" | "unknown";
 export type ObjKind = "main" | "system" | "dylib" | "unknown";
 type PaneTab = "asm" | "neighbors" | "intervals";
 
-/// What flame-box widths represent: active time, off-CPU waiting
-/// time, or wall (active + off). Display-only; the wire carries both
-/// dimensions on every node.
-export type DisplayMode = "on_cpu" | "off_cpu" | "wall";
+/// What visual widths/ordering represent: active time, target time,
+/// off-CPU waiting time, or wall (active + off). Display-only; the
+/// wire carries every dimension on every node.
+export type DisplayMode = "on_cpu" | "target" | "off_cpu" | "wall";
 
 /// Pick a language icon for a row. Prefers the server-side demangler
 /// classification (carried on every TopEntry / FlameNode); only falls
@@ -994,6 +997,11 @@ function DisplayModeFilter({
       id: "on_cpu",
       label: "active",
       title: "flame width = CPU time plus cooperating target spans (default)",
+    },
+    {
+      id: "target",
+      label: "target",
+      title: "flame width = cooperating target span duration",
     },
     {
       id: "off_cpu",
@@ -1290,6 +1298,7 @@ function TopTable({
   matchText,
   hiddenKinds,
   pmuMetric,
+  displayMode,
   onContextMenu,
 }: {
   entries: TopEntry[];
@@ -1302,6 +1311,7 @@ function TopTable({
   matchText: ((t: string) => boolean) | null;
   hiddenKinds: Set<ObjKind>;
   pmuMetric: PmuMetric;
+  displayMode: DisplayMode;
   onContextMenu: (t: ContextMenuTarget) => void;
 }) {
   void totalOnCpuNs;
@@ -1310,11 +1320,10 @@ function TopTable({
   // Scale every row's progress bar against the busiest visible row,
   // not the recording's grand total. With many symbols, the
   // grand-total denominator made every bar a hairline -- now the
-  // leader fills the bar and the rest are proportional to it (the
-  // "Activity Monitor" model). Rank by active time; target time and
-  // off-CPU time show up as secondary annotations.
+  // leader fills the bar and the rest are proportional to the selected
+  // display metric (the "Activity Monitor" model).
   const barDenom = visible.reduce((m, e) => {
-    const v = sort === "self" ? e.self_on_cpu_ns : e.total_on_cpu_ns;
+    const v = topMetricNs(e, sort, displayMode);
     return v > m ? v : m;
   }, 1n);
   return (
@@ -1347,8 +1356,16 @@ function TopTable({
           const binLabel = e.binary ?? "(no binary)";
           const selfTarget = e.self_target_ns;
           const totalTarget = e.total_target_ns;
+          const metricSelf = topMetricNs(e, "self", displayMode);
+          const metricTotal = topMetricNs(e, "total", displayMode);
           const targetLine =
-            selfTarget === 0n && totalTarget === 0n
+            displayMode === "target"
+              ? e.self_target_spans === 0n && e.total_target_spans === 0n
+                ? null
+                : e.self_target_spans === e.total_target_spans
+                  ? `${e.self_target_spans.toString()} spans · active ${formatDuration(e.self_on_cpu_ns)}`
+                  : `${e.self_target_spans.toString()} / ${e.total_target_spans.toString()} spans · active ${formatDuration(e.self_on_cpu_ns)} / ${formatDuration(e.total_on_cpu_ns)}`
+              : selfTarget === 0n && totalTarget === 0n
               ? null
               : selfTarget === totalTarget
                 ? `${formatDuration(selfTarget)} target · ${e.self_target_spans.toString()} spans`
@@ -1388,26 +1405,23 @@ function TopTable({
               </td>
               <td className="num">
                 <div className="num-line">
-                  {e.self_on_cpu_ns === e.total_on_cpu_ns ? (
-                    formatDuration(e.self_on_cpu_ns)
+                  {metricSelf === metricTotal ? (
+                    formatDuration(metricSelf)
                   ) : (
                     <>
-                      {formatDuration(e.self_on_cpu_ns)}
+                      {formatDuration(metricSelf)}
                       <span className="num-sep"> / </span>
                       <span className="num-total">
-                        {formatDuration(e.total_on_cpu_ns)}
+                        {formatDuration(metricTotal)}
                       </span>
                     </>
                   )}
                 </div>
                 <div className="num-bar">
                   <div
-                    className="num-bar-fill"
+                    className={`num-bar-fill metric-${displayMode}`}
                     style={{
-                      width: barPct(
-                        sort === "self" ? e.self_on_cpu_ns : e.total_on_cpu_ns,
-                        barDenom,
-                      ),
+                      width: barPct(topMetricNs(e, sort, displayMode), barDenom),
                     }}
                   />
                 </div>
@@ -1420,6 +1434,27 @@ function TopTable({
       </tbody>
     </table>
   );
+}
+
+function topMetricNs(
+  entry: TopEntry,
+  sort: SortKey,
+  mode: DisplayMode,
+): bigint {
+  const self = sort === "self";
+  switch (mode) {
+    case "on_cpu":
+      return self ? entry.self_on_cpu_ns : entry.total_on_cpu_ns;
+    case "target":
+      return self ? entry.self_target_ns : entry.total_target_ns;
+    case "off_cpu":
+      return offCpuTotal(self ? entry.self_off_cpu : entry.total_off_cpu);
+    case "wall":
+      return (
+        (self ? entry.self_on_cpu_ns : entry.total_on_cpu_ns) +
+        offCpuTotal(self ? entry.self_off_cpu : entry.total_off_cpu)
+      );
+  }
 }
 
 /// Map a sample count to a heat color. 0 → transparent; otherwise
@@ -1452,10 +1487,12 @@ function ThreadSwitcher({
   threads,
   selectedTid,
   onSelect,
+  displayMode,
 }: {
   threads: ThreadInfo[];
   selectedTid: number | null;
   onSelect: (tid: number | null) => void;
+  displayMode: DisplayMode;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -1487,25 +1524,44 @@ function ThreadSwitcher({
     }
   }, [open]);
 
-  // Rank by active time so CPU threads and cooperating target lanes
-  // both float up; mostly-parked workers stay near the bottom even
-  // though they may have a lot of blocked wall time.
-  const total = threads.reduce((s, t) => s + t.on_cpu_ns, 0n);
+  const orderedThreads = useMemo(
+    () =>
+      [...threads].sort((a, b) => {
+        const av = threadMetricNs(a, displayMode);
+        const bv = threadMetricNs(b, displayMode);
+        if (av !== bv) return av > bv ? -1 : 1;
+        if (a.target_spans !== b.target_spans) {
+          return a.target_spans > b.target_spans ? -1 : 1;
+        }
+        if (a.pet_samples !== b.pet_samples) {
+          return a.pet_samples > b.pet_samples ? -1 : 1;
+        }
+        return a.tid - b.tid;
+      }),
+    [threads, displayMode],
+  );
+  const total = orderedThreads.reduce(
+    (s, t) => s + threadMetricNs(t, displayMode),
+    0n,
+  );
   const totalF = total === 0n ? 1 : Number(total);
-  const max = threads.reduce(
-    (m, t) => (t.on_cpu_ns > m ? t.on_cpu_ns : m),
+  const max = orderedThreads.reduce(
+    (m, t) => {
+      const value = threadMetricNs(t, displayMode);
+      return value > m ? value : m;
+    },
     0n,
   );
   const maxF = max === 0n ? 1 : Number(max);
 
   const q = query.trim().toLowerCase();
   const filtered = q
-    ? threads.filter((t) => {
+    ? orderedThreads.filter((t) => {
         if (String(t.tid).includes(q)) return true;
         if (t.name && t.name.toLowerCase().includes(q)) return true;
         return false;
       })
-    : threads;
+    : orderedThreads;
 
   const triggerLabel = (() => {
     if (selectedTid === null) return "all threads";
@@ -1566,12 +1622,13 @@ function ThreadSwitcher({
             ) : (
               filtered.map((t) => {
                 const sel = selectedTid === t.tid;
+                const metricValue = threadMetricNs(t, displayMode);
                 const wPct =
-                  max === 0n ? 0 : (Number(t.on_cpu_ns) / maxF) * 100;
+                  max === 0n ? 0 : (Number(metricValue) / maxF) * 100;
                 const rPct =
                   total === 0n
                     ? 0
-                    : Math.round((Number(t.on_cpu_ns) / totalF) * 1000) /
+                    : Math.round((Number(metricValue) / totalF) * 1000) /
                       10;
                 const offTotal = offCpuTotal(t.off_cpu);
                 return (
@@ -1580,7 +1637,7 @@ function ThreadSwitcher({
                     key={t.tid}
                     className={`thread-row${sel ? " selected" : ""}`}
                     onClick={() => pick(t.tid)}
-                    title={`${formatDuration(t.on_cpu_ns)} active (${formatDuration(t.target_ns)} target) + ${formatDuration(offTotal)} off-CPU (${rPct}% of active time)`}
+                    title={`${formatDuration(metricValue)} ${displayModeLabel(displayMode)} (${rPct}%) · ${formatDuration(t.on_cpu_ns)} active · ${formatDuration(t.target_ns)} target · ${formatDuration(offTotal)} off-CPU`}
                   >
                     <span className="thread-check">{sel && <LuCheck />}</span>
                     <span className="thread-name">
@@ -1592,11 +1649,12 @@ function ThreadSwitcher({
                     <span className="thread-bar">
                       <span
                         className="thread-bar-fill"
+                        data-mode={displayMode}
                         style={{ width: `${wPct}%` }}
                       />
                     </span>
                     <span className="thread-count">
-                      {formatDuration(t.on_cpu_ns)}
+                      {formatDuration(metricValue)}
                       {t.target_spans > 0n ? (
                         <span className="thread-target-count">
                           {" "}
@@ -1610,12 +1668,39 @@ function ThreadSwitcher({
             )}
           </div>
           <div className="thread-popover-footer">
-            {threads.length} threads · sorted by active time
+            {threads.length} threads · sorted by {displayModeLabel(displayMode)}
           </div>
         </div>
       )}
     </div>
   );
+}
+
+function threadMetricNs(thread: ThreadInfo, mode: DisplayMode): bigint {
+  const offTotal = offCpuTotal(thread.off_cpu);
+  switch (mode) {
+    case "on_cpu":
+      return thread.on_cpu_ns;
+    case "target":
+      return thread.target_ns;
+    case "off_cpu":
+      return offTotal;
+    case "wall":
+      return thread.on_cpu_ns + offTotal;
+  }
+}
+
+function displayModeLabel(mode: DisplayMode): string {
+  switch (mode) {
+    case "on_cpu":
+      return "active time";
+    case "target":
+      return "target time";
+    case "off_cpu":
+      return "off-CPU time";
+    case "wall":
+      return "wall time";
+  }
 }
 
 function Annotation({

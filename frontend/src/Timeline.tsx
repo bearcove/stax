@@ -2,24 +2,28 @@ import { useEffect, useRef, useState } from "react";
 import { channel } from "@bearcove/vox-core";
 import type {
   ProfilerClient,
+  TimelineBucket,
   TimeRange,
   TimelineUpdate,
 } from "./generated/profiler.generated.ts";
+import type { DisplayMode } from "./App.tsx";
 
 /// Compact timeline strip across the top of the page. Each bucket is
-/// drawn as a compact area; height is proportional to active + off-CPU
-/// time relative to the busiest bucket in view. Drag across
+/// drawn as a compact area; height is proportional to the selected
+/// display metric relative to the busiest bucket in view. Drag across
 /// the bars to brush-select a time range; click to clear.
 export function Timeline({
   client,
   tid,
   range,
   onRangeChange,
+  displayMode,
 }: {
   client: ProfilerClient;
   tid: number | null;
   range: TimeRange | null;
   onRangeChange: (r: TimeRange | null) => void;
+  displayMode: DisplayMode;
 }) {
   const [update, setUpdate] = useState<TimelineUpdate | null>(null);
   const barsRef = useRef<SVGSVGElement | null>(null);
@@ -47,13 +51,12 @@ export function Timeline({
     return <div className="timeline placeholder">timeline (waiting for samples…)</div>;
   }
 
-  // Use total wall time per bucket (active + off) as the bar height: it's
-  // the most useful "what was the system doing here?" signal. The
-  // per-axis split is in the bucket fields; future iterations can
-  // stack active, target, and off-CPU as separate layers in the chart.
+  // The same display mode drives the flamegraph, thread selector, and
+  // this strip so a target-lane investigation can make target time the
+  // dominant visual signal everywhere at once.
   const max = update.buckets.reduce((m, b) => {
-    const total = b.on_cpu_ns + b.off_cpu_ns;
-    return total > m ? total : m;
+    const value = bucketMetricNs(b, displayMode);
+    return value > m ? value : m;
   }, 0n);
   const maxF = max === 0n ? 1 : Number(max);
   const durSec = Number(update.recording_duration_ns) / 1e9;
@@ -122,8 +125,8 @@ export function Timeline({
   for (let i = 0; i < n; i++) {
     const x = ((i + 0.5) / n) * 100;
     const b = update.buckets[i];
-    const total = Number(b.on_cpu_ns + b.off_cpu_ns);
-    const y = max === 0n ? 100 : 100 - (total / maxF) * 100;
+    const value = Number(bucketMetricNs(b, displayMode));
+    const y = max === 0n ? 100 : 100 - (value / maxF) * 100;
     points.push(`${x.toFixed(3)},${y.toFixed(3)}`);
   }
   const areaD =
@@ -140,7 +143,7 @@ export function Timeline({
         preserveAspectRatio="none"
         onMouseDown={onMouseDown}
       >
-        {areaD && <path className="timeline-area" d={areaD} />}
+        {areaD && <path className={`timeline-area mode-${displayMode}`} d={areaD} />}
         {overlay && (
           <rect
             className="timeline-brush"
@@ -152,6 +155,7 @@ export function Timeline({
         )}
       </svg>
       <div className="timeline-footer">
+        {displayModeLabel(displayMode)} ·{" "}
         {(Number(update.total_on_cpu_ns) / 1e9).toFixed(2)}s active ·{" "}
         {(Number(update.total_target_ns) / 1e9).toFixed(2)}s target ·{" "}
         {(Number(update.total_off_cpu_ns) / 1e9).toFixed(2)}s off-CPU ·{" "}
@@ -175,4 +179,30 @@ export function Timeline({
       </div>
     </div>
   );
+}
+
+function bucketMetricNs(bucket: TimelineBucket, mode: DisplayMode): bigint {
+  switch (mode) {
+    case "on_cpu":
+      return bucket.on_cpu_ns;
+    case "target":
+      return bucket.target_ns;
+    case "off_cpu":
+      return bucket.off_cpu_ns;
+    case "wall":
+      return bucket.on_cpu_ns + bucket.off_cpu_ns;
+  }
+}
+
+function displayModeLabel(mode: DisplayMode): string {
+  switch (mode) {
+    case "on_cpu":
+      return "active";
+    case "target":
+      return "target";
+    case "off_cpu":
+      return "off-CPU";
+    case "wall":
+      return "wall";
+  }
 }

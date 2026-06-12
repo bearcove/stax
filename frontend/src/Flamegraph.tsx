@@ -85,6 +85,8 @@ export function widthOf(node: FlameView, mode: DisplayMode): bigint {
   switch (mode) {
     case "on_cpu":
       return node.on_cpu_ns;
+    case "target":
+      return node.target_ns;
     case "off_cpu":
       return offCpuTotal(node.off_cpu);
     case "wall":
@@ -317,6 +319,8 @@ export function Flamegraph({
   const total =
     displayMode === "on_cpu"
       ? totalOn
+      : displayMode === "target"
+        ? update?.total_target_ns ?? 0n
       : displayMode === "off_cpu"
         ? totalOff
         : totalOn + totalOff;
@@ -469,6 +473,8 @@ function modeLabel(mode: DisplayMode): string {
   switch (mode) {
     case "on_cpu":
       return "active time";
+    case "target":
+      return "target time";
     case "off_cpu":
       return "off-CPU time";
     case "wall":

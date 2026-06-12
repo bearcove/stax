@@ -71,6 +71,8 @@
   --accent-bg-medium: rgba(211, 183, 95, 0.18);
   --accent-bg-active: rgba(211, 183, 95, 0.1);
   --accent-border-medium: rgba(211, 183, 95, 0.7);
+  --target-color: #56b6c2;
+  --target-bg-soft: rgba(86, 182, 194, 0.16);
 
   /* Per-kind palette: text/glyph color + flame-box bg/fg. */
   --kind-main-color: #98c379;
@@ -128,6 +130,8 @@
   --text-icon: #5a626c;
   --accent: #b88f1e;
   --danger: #c2483f;
+  --target-color: #0d7f8e;
+  --target-bg-soft: rgba(13, 127, 142, 0.14);
   --bg-button: #eceef1;
   --bg-button-hover: #dde0e5;
   --border-mid: #c2c8cf;
@@ -445,6 +449,18 @@ body {
   opacity: 0.65;
 }
 
+.thread-bar-fill[data-mode="target"] {
+  background: var(--target-color);
+}
+
+.thread-bar-fill[data-mode="off_cpu"] {
+  background: var(--reason-lock);
+}
+
+.thread-bar-fill[data-mode="wall"] {
+  background: var(--kind-dylib-color);
+}
+
 .thread-count {
   color: var(--text-tertiary);
   font-variant-numeric: tabular-nums;
@@ -700,6 +716,21 @@ table.top-table tr.match {
   stroke-width: 0;
   vector-effect: non-scaling-stroke;
   opacity: 0.85;
+}
+
+.timeline-area.mode-target {
+  fill: var(--target-bg-soft);
+  stroke: var(--target-color);
+}
+
+.timeline-area.mode-off_cpu {
+  fill: color-mix(in srgb, var(--reason-lock) 26%, transparent);
+  stroke: var(--reason-lock);
+}
+
+.timeline-area.mode-wall {
+  fill: color-mix(in srgb, var(--kind-dylib-color) 24%, transparent);
+  stroke: var(--kind-dylib-color);
 }
 
 .timeline-brush {
@@ -1176,6 +1207,18 @@ table.top-table td.num .num-bar-fill {
   background: var(--accent);
   border-radius: 1px;
   transition: width 250ms linear;
+}
+
+table.top-table td.num .num-bar-fill.metric-target {
+  background: var(--target-color);
+}
+
+table.top-table td.num .num-bar-fill.metric-off_cpu {
+  background: var(--reason-lock);
+}
+
+table.top-table td.num .num-bar-fill.metric-wall {
+  background: var(--kind-dylib-color);
 }
 
 table.top-table td.num .num-target-slot {
@@ -1672,6 +1715,10 @@ table.asm tr:not(.src-header) td.asm-line {
 .kind-pill.mode-on_cpu {
   color: var(--kind-main-color);
   border-color: color-mix(in srgb, var(--kind-main-color) 35%, transparent);
+}
+.kind-pill.mode-target {
+  color: var(--target-color);
+  border-color: color-mix(in srgb, var(--target-color) 35%, transparent);
 }
 .kind-pill.mode-off_cpu {
   color: var(--reason-lock);

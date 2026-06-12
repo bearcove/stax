@@ -56,22 +56,25 @@ there is nothing to reload. The layout, top to bottom:
 
 - **Topbar** — connection status, a pause toggle for ingestion, a thread
   switcher, a symbol search (substring or regex), display-mode pills
-  (on-CPU / off-CPU / wall), PMU-metric pills (IPC / L1-d misses / branch
-  mispredicts), a binary-kind filter, and a light/dark toggle.
-- **Timeline** — per-bucket wall time, with drag-to-brush time-range
-  selection that scopes every other panel.
+  (active / target / off-CPU / wall), PMU-metric pills (IPC / L1-d misses /
+  branch mispredicts), a binary-kind filter, and a light/dark toggle.
+- **Timeline** — the selected display metric per bucket. In target mode the
+  strip is target-span duration over time; in wall mode it is active plus
+  off-CPU. Drag-to-brush time-range selection scopes every other panel.
 - **Off-CPU reason legend** and a **wakers panel** — what threads were
   blocked on, and who woke them.
 - **Flamegraph** — the active tree (CPU time plus cooperating target spans),
   the same data as
   [`stax flame`](@/guide/inspecting-a-run.md#stax-flame), rendered as a
   zoomable graph with focus / drop-symbol / Esc keyboard shortcuts and
-  off-CPU reason stripes. Hover text breaks out target time and span counts.
+  off-CPU reason stripes. Target mode makes flame width equal exact
+  target-span duration. Hover text breaks out target time and span counts.
   Origin-linked target spans appear under the CPU stack that queued them when
   that thread is selected.
 - **Top-N table** — the hot-leaf or target-span leaderboard, the same data as
   [`stax top`](@/guide/inspecting-a-run.md#stax-top), sortable by self or
-  total, with target duration/span annotations on cooperating rows.
+  total. Its bar and primary duration follow the same display metric as the
+  flamegraph, with target span counts on cooperating rows.
 - **A tabbed detail pane** — *disassembly* (cost-annotated, source-headed,
   the same data as [`stax annotate`](@/guide/inspecting-a-run.md#stax-annotate)),
   *family tree* (callers/callees around a symbol), and *intervals* (the
