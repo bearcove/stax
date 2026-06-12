@@ -11,6 +11,9 @@ target can timestamp and name. GPU work is the first concrete consumer, but
 the mechanism is deliberately general — no export step, no second tool, no
 correlation pass.
 
+This page is the GPU specialization of the generic
+[target-span integration contract](@/guide/integrating-target-spans.md).
+
 ## How it works
 
 The app links the **`stax-target`** crate and does two things:

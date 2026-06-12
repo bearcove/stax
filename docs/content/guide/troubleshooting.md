@@ -1,6 +1,6 @@
 +++
 title = "Troubleshooting"
-weight = 6
+weight = 8
 insert_anchor_links = "heading"
 +++
 

@@ -14,7 +14,9 @@ then jump to whatever you need.
 3. [Inspecting a Run](@/guide/inspecting-a-run.md) — `top`, `flame`, `threads`, `annotate`
 4. [Run Lifecycle](@/guide/run-lifecycle.md) — `status`, `list`, `wait`, `stop`, and the one-active-run rule
 5. [The Web UI](@/guide/web-ui.md) — the live flamegraph in a browser
-6. [Profiling JIT Code](@/guide/profiling-jit-code.md) — make JIT'd functions show up by name
-7. [Troubleshooting](@/guide/troubleshooting.md) — diagnostics, logs, and common errors
+6. [Integrating Target Spans](@/guide/integrating-target-spans.md) — report executor/GPU/runtime work with origins
+7. [Profiling GPU Work](@/guide/profiling-gpu-work.md) — apply target spans to Metal/GPU timestamp counters
+8. [Profiling JIT Code](@/guide/profiling-jit-code.md) — make JIT'd functions show up by name
+9. [Troubleshooting](@/guide/troubleshooting.md) — diagnostics, logs, and common errors
 
 New here? Start with [Getting Started](@/guide/getting-started.md).

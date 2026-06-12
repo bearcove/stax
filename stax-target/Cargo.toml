@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.91"
 license = "MIT OR Apache-2.0"
-description = "Target-side latch for stax: report execution-lane spans (GPU kernels, accelerators) into a live stax recording."
+description = "Target-side latch for stax: report execution-lane spans (GPU kernels, accelerators, executors) into a live stax recording."
 
 [dependencies]
 libc = "0.2"

@@ -1,9 +1,10 @@
 //! Target-side latch for stax.
 //!
 //! A profiled app links this crate to put execution lanes the CPU
-//! sampler cannot see — GPU command queues, accelerators — on a live
-//! stax recording's timeline (see `stax-server`'s `TargetIngest`: spans
-//! become a synthetic thread with named frames in the existing views).
+//! sampler cannot see — GPU command queues, accelerators, runtime
+//! queues, worker pools — on a live stax recording's timeline (see
+//! `stax-server`'s `TargetIngest`: spans become a synthetic thread
+//! with named frames in the existing views).
 //! Targets can also attach a [`TargetSpanOrigin`] captured with
 //! [`current_span_origin`] so stax can place accelerator work under the
 //! CPU stack that queued it.
@@ -26,6 +27,29 @@
 //! platforms `mach_absolute_time` converted to ns (Apple Silicon GPU
 //! timestamps share that timebase), the same clock domain the sampler
 //! records in, so no correlation step exists anywhere.
+//!
+//! ## Executor-style integration
+//!
+//! ```no_run
+//! let lane = stax_target::Lane::new("decoder worker");
+//!
+//! // Queue side: capture provenance only while stax is recording us.
+//! let origin = lane
+//!     .reporting_active()
+//!     .then(|| lane.current_origin())
+//!     .flatten();
+//!
+//! // Worker side: time the work where it actually runs.
+//! if let Some(origin) = origin {
+//!     if let Some(open) = lane.begin_span_with_origin("decode chunk", origin) {
+//!         // decode_chunk();
+//!         open.finish_and_report(&lane);
+//!     }
+//! }
+//! ```
+//!
+//! For APIs that already return exact timestamps, use
+//! [`Lane::span_with_origin`] and [`Lane::report_one`].
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -59,6 +83,16 @@ static REPORTING_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub fn reporting_active() -> bool {
     let _ = worker_sender();
     REPORTING_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// Current timestamp in the same nanosecond clock domain stax uses for
+/// target spans.
+///
+/// On macOS this is `mach_absolute_time` converted to nanoseconds; on
+/// Linux it is `CLOCK_MONOTONIC`. Returns `None` on unsupported
+/// platforms.
+pub fn now_ns() -> Option<u64> {
+    clock_now_ns()
 }
 
 /// Capture the current target-side queue/dispatch origin.
@@ -106,6 +140,142 @@ pub fn report(lane: &str, spans: Vec<TargetSpan>) {
             tracing::debug!("stax-target queue full; dropping span batch");
         }
         Err(TrySendError::Disconnected(_)) => {}
+    }
+}
+
+/// Reusable handle for one cooperating target lane.
+///
+/// A lane becomes one synthetic thread in stax, so create one per queue,
+/// executor, GPU command stream, worker pool, or other logical place
+/// work runs away from the sampled CPU stack.
+#[derive(Clone, Debug)]
+pub struct Lane {
+    name: String,
+}
+
+impl Lane {
+    /// Create a lane handle. The name is what `stax threads` prints.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+
+    /// Lane name as it will appear in stax.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Same capture gate as [`reporting_active`], scoped for call sites
+    /// that already hold a lane handle.
+    pub fn reporting_active(&self) -> bool {
+        reporting_active()
+    }
+
+    /// Capture the current CPU-side origin for work that will later run
+    /// on this lane.
+    pub fn current_origin(&self) -> Option<TargetSpanOrigin> {
+        current_span_origin()
+    }
+
+    /// Construct a span for this lane without an origin.
+    pub fn span(&self, name: impl Into<String>, start_ns: u64, end_ns: u64) -> TargetSpan {
+        TargetSpan::new(name, start_ns, end_ns)
+    }
+
+    /// Construct a span for this lane with an explicit queue/dispatch
+    /// origin.
+    pub fn span_with_origin(
+        &self,
+        name: impl Into<String>,
+        start_ns: u64,
+        end_ns: u64,
+        origin: TargetSpanOrigin,
+    ) -> TargetSpan {
+        TargetSpan::new(name, start_ns, end_ns).with_origin(origin)
+    }
+
+    /// Construct a span for this lane with the current thread/timestamp
+    /// as origin when the platform exposes one.
+    pub fn span_with_current_origin(
+        &self,
+        name: impl Into<String>,
+        start_ns: u64,
+        end_ns: u64,
+    ) -> TargetSpan {
+        span_with_current_origin(name, start_ns, end_ns)
+    }
+
+    /// Begin timing a span with no origin. Useful for executor work
+    /// whose natural start/end timestamps are CPU-side.
+    pub fn begin_span(&self, name: impl Into<String>) -> Option<OpenSpan> {
+        OpenSpan::new(name, None)
+    }
+
+    /// Begin timing a span that was queued from a known CPU-side
+    /// origin.
+    pub fn begin_span_with_origin(
+        &self,
+        name: impl Into<String>,
+        origin: TargetSpanOrigin,
+    ) -> Option<OpenSpan> {
+        OpenSpan::new(name, Some(origin))
+    }
+
+    /// Report a batch of spans on this lane.
+    pub fn report(&self, spans: Vec<TargetSpan>) {
+        report(&self.name, spans);
+    }
+
+    /// Report one span on this lane.
+    pub fn report_one(&self, span: TargetSpan) {
+        self.report(vec![span]);
+    }
+}
+
+/// In-progress target-side span timed with [`now_ns`].
+///
+/// This type is explicit rather than RAII-on-drop: integrators decide
+/// when a span is complete and whether to report it, which matters for
+/// queues whose completion timestamp arrives from another API.
+#[derive(Debug)]
+pub struct OpenSpan {
+    name: String,
+    start_ns: u64,
+    origin: Option<TargetSpanOrigin>,
+}
+
+impl OpenSpan {
+    fn new(name: impl Into<String>, origin: Option<TargetSpanOrigin>) -> Option<Self> {
+        if !reporting_active() {
+            return None;
+        }
+        Some(Self {
+            name: name.into(),
+            start_ns: now_ns()?,
+            origin,
+        })
+    }
+
+    /// Finish the span and return the reportable [`TargetSpan`].
+    ///
+    /// Returns `None` if the platform clock is unavailable or went
+    /// backwards for this span.
+    pub fn finish(self) -> Option<TargetSpan> {
+        let end_ns = now_ns()?;
+        if end_ns <= self.start_ns {
+            return None;
+        }
+        let span = TargetSpan::new(self.name, self.start_ns, end_ns);
+        Some(match self.origin {
+            Some(origin) => span.with_origin(origin),
+            None => span,
+        })
+    }
+
+    /// Finish and report this span to `lane`.
+    pub fn finish_and_report(self, lane: &Lane) {
+        if let Some(span) = self.finish() {
+            lane.report_one(span);
+        }
     }
 }
 
