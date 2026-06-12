@@ -65,7 +65,8 @@ there is nothing to reload. The layout, top to bottom:
 - **Flamegraph** — the CPU/lane-active tree, the same data as
   [`stax flame`](@/guide/inspecting-a-run.md#stax-flame), rendered as a
   zoomable graph with focus / drop-symbol / Esc keyboard shortcuts and
-  off-CPU reason stripes.
+  off-CPU reason stripes. Origin-linked target spans appear under the CPU
+  stack that queued them when that thread is selected.
 - **Top-N table** — the hot-leaf or target-span leaderboard, the same data as
   [`stax top`](@/guide/inspecting-a-run.md#stax-top), sortable by self or
   total.

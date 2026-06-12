@@ -172,6 +172,10 @@ pub enum IntervalKind {
         /// Used for GPU / accelerator lanes where the target already
         /// knows the exact work item and duration.
         stack: Box<[u64]>,
+        /// Optional CPU thread that queued/submitted this target work.
+        /// Querying that tid includes this synthetic span under the
+        /// sampled CPU stack embedded in `stack`.
+        origin_tid: Option<u32>,
     },
     OffCpu {
         /// Stack at the moment the thread blocked, leaf-first. Empty
@@ -416,6 +420,24 @@ impl Aggregator {
         self.threads.get(&tid)
     }
 
+    /// Find the sampled user stack nearest to `timestamp_ns` on `tid`,
+    /// as long as it is within `max_distance_ns`.
+    pub fn nearest_pet_stack(
+        &self,
+        tid: u32,
+        timestamp_ns: u64,
+        max_distance_ns: u64,
+    ) -> Option<Box<[u64]>> {
+        let stats = self.threads.get(&tid)?;
+        let sample = stats
+            .pet_samples
+            .iter()
+            .filter(|sample| !sample.stack.is_empty())
+            .min_by_key(|sample| sample.timestamp_ns.abs_diff(timestamp_ns))?;
+        let distance = sample.timestamp_ns.abs_diff(timestamp_ns);
+        (distance <= max_distance_ns).then(|| sample.stack.clone())
+    }
+
     /// Iterate raw PET samples for a single thread, or every thread
     /// when `tid` is `None`.
     pub fn iter_pet_samples<'a>(
@@ -482,18 +504,12 @@ impl Aggregator {
         // streams independent of each other (an on-CPU interval for
         // tid A only consumes PET samples for tid A).
         let tids: Vec<u32> = match tid {
-            Some(tid) => {
-                if self.threads.contains_key(&tid) {
-                    vec![tid]
-                } else {
-                    Vec::new()
-                }
-            }
+            Some(_) => self.threads.keys().copied().collect(),
             None => self.threads.keys().copied().collect(),
         };
 
-        for tid in tids {
-            let stats = match self.threads.get(&tid) {
+        for event_tid in tids {
+            let stats = match self.threads.get(&event_tid) {
                 Some(s) => s,
                 None => continue,
             };
@@ -521,6 +537,9 @@ impl Aggregator {
 
                 match &interval.kind {
                     IntervalKind::OnCpu => {
+                        if tid.is_some_and(|query_tid| query_tid != event_tid) {
+                            continue;
+                        }
                         // Advance cursor past samples that end before
                         // this interval starts.
                         while sample_cursor < samples.len()
@@ -534,7 +553,7 @@ impl Aggregator {
                         while idx < samples.len() && samples[idx].timestamp_ns < end {
                             let s = &samples[idx];
                             if predicate(EventCtx::PetSample {
-                                tid,
+                                tid: event_tid,
                                 sample: s,
                                 binaries,
                             }) {
@@ -560,9 +579,14 @@ impl Aggregator {
                             );
                         }
                     }
-                    IntervalKind::SyntheticSpan { stack } => {
+                    IntervalKind::SyntheticSpan { stack, origin_tid } => {
+                        if tid.is_some_and(|query_tid| {
+                            query_tid != event_tid && Some(query_tid) != *origin_tid
+                        }) {
+                            continue;
+                        }
                         if !predicate(EventCtx::Interval {
-                            tid,
+                            tid: event_tid,
                             interval,
                             binaries,
                         }) {
@@ -582,8 +606,11 @@ impl Aggregator {
                         waker_tid: _,
                         waker_user_stack: _,
                     } => {
+                        if tid.is_some_and(|query_tid| query_tid != event_tid) {
+                            continue;
+                        }
                         if !predicate(EventCtx::Interval {
-                            tid,
+                            tid: event_tid,
                             interval,
                             binaries,
                         }) {

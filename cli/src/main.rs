@@ -995,7 +995,8 @@ fn maybe_print_metal_target_hint(threads: Option<&ThreadsUpdate>, saw_metal_disp
     eprintln!(
         "hint: Metal command/dispatch frames are visible, but no stax-target lane is present. \
          If the target can cooperate, report Metal 4 timestamp-counter spans with stax-target; \
-         then `stax threads` will show a synthetic GPU lane and `stax top --tid <tid>` will show per-kernel durations."
+         then `stax threads` will show a synthetic GPU lane, `stax top --tid <lane tid>` will show per-kernel durations, \
+         and span origins let `stax flame --tid <cpu tid>` show CPU stack -> GPU lane -> kernel."
     );
 }
 

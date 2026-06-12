@@ -127,9 +127,10 @@ stax top [OPTIONS]
 | `--tid <TID>`       | `u32`    | *(none)* | restrict to one thread; default is all threads       |
 
 For a synthetic target lane, `--tid <TID>` shows per-span durations and span
-counts. If Metal command/dispatch frames are visible but no target lane is
-present, `stax top` prints a stderr hint about `stax-target` Metal 4
-timestamp-counter cooperation.
+counts. When target spans carry origins, filtering to the origin CPU tid also
+includes those spans under the CPU dispatch stack. If Metal command/dispatch
+frames are visible but no target lane is present, `stax top` prints a stderr
+hint about `stax-target` Metal 4 timestamp-counter cooperation.
 
 ## `stax flame`
 
@@ -146,14 +147,17 @@ stax flame [OPTIONS]
 | `--threshold-pct <PCT>`    | `f64`   | `1.0`    | hide subtrees below this percent of total active time; `0` for all |
 | `--tid <TID>`              | `u32`   | *(none)* | restrict to one thread; default is all threads                  |
 
-Cooperating target lanes render as `(all) -> lane -> span name`. Like `top`,
-`flame` prints a Metal cooperation hint when Metal command/dispatch frames are
-visible but no synthetic target lane has reported spans.
+Cooperating target lanes render as `(all) -> lane -> span name`. When target
+spans carry origins, `--tid <cpu tid>` can render
+`(all) -> CPU caller -> lane -> span name`. Like `top`, `flame` prints a Metal
+cooperation hint when Metal command/dispatch frames are visible but no
+synthetic target lane has reported spans.
 
 ## `stax threads`
 
 Per-thread and synthetic-lane active/off-CPU breakdown for the current run,
-sorted by total activity. See
+sorted by total activity. CPU thread rows include origin-linked target spans
+queued from that thread. See
 [Inspecting a Run](@/guide/inspecting-a-run.md#stax-threads).
 
 ```text

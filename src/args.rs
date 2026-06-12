@@ -97,7 +97,8 @@ pub struct TopArgs {
     #[facet(args::named, default = "self")]
     pub sort: String,
 
-    /// Filter to one thread by tid. Default: all threads.
+    /// Filter to one thread by tid. Origin-linked target spans are included
+    /// for the CPU thread that queued them. Default: all threads.
     #[facet(args::named, default)]
     pub tid: Option<u32>,
 }
@@ -115,7 +116,8 @@ pub struct FlameArgs {
     /// Maximum tree depth to print. The flamegraph the server returns
     /// is unbounded; this just controls how deep the CLI prints
     /// (children below the cut-off are summarised as `…<N more
-    /// frames>`). Cooperating target lanes render as `lane -> span`.
+    /// frames>`). Cooperating target lanes render as `lane -> span`, or
+    /// `CPU stack -> lane -> span` when the target reports origins.
     #[facet(args::named, args::short = 'd', default = 12)]
     pub max_depth: usize,
 
@@ -124,7 +126,8 @@ pub struct FlameArgs {
     #[facet(args::named, default = 1.0)]
     pub threshold_pct: f64,
 
-    /// Filter to one thread by tid. Default: all threads.
+    /// Filter to one thread by tid. Origin-linked target spans are included
+    /// for the CPU thread that queued them. Default: all threads.
     #[facet(args::named, default)]
     pub tid: Option<u32>,
 }

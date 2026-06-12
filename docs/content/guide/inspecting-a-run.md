@@ -43,7 +43,10 @@ lane, time is the sum of reported span durations and samples are span count.
 answers "what work is responsible", and will rank callers like `main` or a
 runtime's poll loop highly because hot code runs *underneath* them.
 For target lanes, `--sort self --tid <synthetic>` shows per-span names;
-`--sort total --tid <synthetic>` can surface the lane aggregate.
+`--sort total --tid <synthetic>` can surface the lane aggregate. When spans
+carry origins, `--tid <real CPU tid>` includes the target work queued from
+that CPU thread; `--sort total` charges it to the dispatch stack, while
+`--sort self` still surfaces the span names.
 
 When `stax top` sees Metal command/dispatch frames but no synthetic target
 lane, it prints a hint to stderr suggesting Metal 4 timestamp-counter
@@ -73,7 +76,9 @@ stax flame -d 4 --threshold-pct 2
 
 Children are sorted by active time, descending, at every level. CPU threads
 contribute scheduler-derived on-CPU time; cooperating target lanes contribute
-reported span duration and render as `(all) -> lane -> span name`.
+reported span duration and render as `(all) -> lane -> span name`. When spans
+carry origins, filtering to the origin CPU tid can render
+`(all) -> CPU caller -> lane -> span name`.
 
 | flag                       | meaning                                                            |
 |----------------------------|--------------------------------------------------------------------|
@@ -89,8 +94,9 @@ has reported spans.
 ## stax threads
 
 Per-thread and synthetic-lane active/off-CPU breakdown, sorted by total
-activity. Use it to decide *which thread or lane* is worth flaming before you
-call `stax flame --tid`.
+activity. CPU thread activity includes origin-linked target spans queued from
+that thread. Use it to decide *which thread or lane* is worth flaming before
+you call `stax flame --tid`.
 
 ```bash
 stax threads -n 5
@@ -104,9 +110,10 @@ stax threads -n 5
     …
 ```
 
-The `active ms` column is on-CPU time for real CPU threads and lane-active
-span duration for synthetic target lanes. The `samples` column is PET sample
-count for CPU threads and span count for synthetic lanes.
+The `active ms` column is on-CPU time for real CPU threads plus target spans
+whose origin points at that tid; for synthetic target lanes it is lane-active
+span duration. The `samples` column is PET sample count for CPU threads and
+span count for synthetic lanes.
 
 The `blocked` column names the **largest off-CPU bucket** for that thread —
 one of `idle`, `lock`, `sem`, `ipc`, `ioR`, `ioW`, `ready`, `sleep`, `conn`,

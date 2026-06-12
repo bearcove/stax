@@ -4,6 +4,9 @@
 //! sampler cannot see — GPU command queues, accelerators — on a live
 //! stax recording's timeline (see `stax-server`'s `TargetIngest`: spans
 //! become a synthetic thread with named frames in the existing views).
+//! Targets can also attach a [`TargetSpanOrigin`] captured with
+//! [`current_span_origin`] so stax can place accelerator work under the
+//! CPU stack that queued it.
 //!
 //! The contract has two halves:
 //!
@@ -35,8 +38,8 @@ use std::time::{Duration, Instant};
 /// drop the client, reconnect on a later poll.
 const CALL_TIMEOUT: Duration = Duration::from_secs(3);
 
-pub use stax_live_proto::TargetSpan;
 use stax_live_proto::{TargetIngestClient, TargetSpanBatch};
+pub use stax_live_proto::{TargetSpan, TargetSpanOrigin};
 
 /// Bounded queue between reporting threads and the worker. Each entry
 /// is one batch; overflow drops the newest batch (profiling telemetry,
@@ -56,6 +59,30 @@ static REPORTING_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub fn reporting_active() -> bool {
     let _ = worker_sender();
     REPORTING_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// Capture the current target-side queue/dispatch origin.
+///
+/// Use this at the point where work is submitted to an executor the CPU
+/// sampler cannot see directly (for example, immediately before a GPU
+/// dispatch is encoded). Attach the returned origin to each
+/// [`TargetSpan`] that represents that work; stax-server will use it to
+/// borrow the nearest sampled CPU stack on the same thread.
+pub fn current_span_origin() -> Option<TargetSpanOrigin> {
+    Some(TargetSpanOrigin {
+        tid: current_thread_id()?,
+        timestamp_ns: clock_now_ns()?,
+    })
+}
+
+/// Construct a span with the current target-side origin attached when
+/// the platform exposes one.
+pub fn span_with_current_origin(name: impl Into<String>, start_ns: u64, end_ns: u64) -> TargetSpan {
+    let span = TargetSpan::new(name, start_ns, end_ns);
+    match current_span_origin() {
+        Some(origin) => span.with_origin(origin),
+        None => span,
+    }
 }
 
 /// Report one lane's spans. Cheap and non-blocking; safe to call from
@@ -213,4 +240,78 @@ fn stax_server_socket() -> Option<PathBuf> {
     let uid = unsafe { libc::getuid() };
     let p = PathBuf::from(format!("/tmp/stax-server-{uid}.sock"));
     p.exists().then_some(p)
+}
+
+#[cfg(target_os = "macos")]
+fn current_thread_id() -> Option<u32> {
+    unsafe extern "C" {
+        fn pthread_threadid_np(thread: *mut libc::c_void, thread_id: *mut u64) -> libc::c_int;
+    }
+
+    let mut tid = 0u64;
+    let rc = unsafe { pthread_threadid_np(std::ptr::null_mut(), &mut tid) };
+    if rc != 0 || tid > u32::MAX as u64 {
+        return None;
+    }
+    Some(tid as u32)
+}
+
+#[cfg(target_os = "linux")]
+fn current_thread_id() -> Option<u32> {
+    let tid = unsafe { libc::syscall(libc::SYS_gettid) };
+    if tid <= 0 || tid > u32::MAX as libc::c_long {
+        return None;
+    }
+    Some(tid as u32)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn current_thread_id() -> Option<u32> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn clock_now_ns() -> Option<u64> {
+    #[repr(C)]
+    struct MachTimebaseInfo {
+        numer: u32,
+        denom: u32,
+    }
+
+    unsafe extern "C" {
+        fn mach_absolute_time() -> u64;
+        fn mach_timebase_info(info: *mut MachTimebaseInfo) -> libc::c_int;
+    }
+
+    static TIMEBASE: OnceLock<Option<(u64, u64)>> = OnceLock::new();
+    let (numer, denom) = (*TIMEBASE.get_or_init(|| {
+        let mut info = MachTimebaseInfo { numer: 0, denom: 0 };
+        let rc = unsafe { mach_timebase_info(&mut info) };
+        if rc != 0 || info.denom == 0 {
+            return None;
+        }
+        Some((u64::from(info.numer), u64::from(info.denom)))
+    }))?;
+    let ticks = unsafe { mach_absolute_time() };
+    Some(((ticks as u128) * (numer as u128) / (denom as u128)) as u64)
+}
+
+#[cfg(target_os = "linux")]
+fn clock_now_ns() -> Option<u64> {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    if rc != 0 || ts.tv_sec < 0 || ts.tv_nsec < 0 {
+        return None;
+    }
+    let secs = u64::try_from(ts.tv_sec).ok()?;
+    let nanos = u64::try_from(ts.tv_nsec).ok()?;
+    secs.checked_mul(1_000_000_000)?.checked_add(nanos)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn clock_now_ns() -> Option<u64> {
+    None
 }

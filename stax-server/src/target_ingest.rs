@@ -16,6 +16,9 @@
 //! - each span records one sample marker plus one attributed synthetic
 //!   execution interval over `[start, end)`. The sample count is the
 //!   span count; the credited time is the exact sum of span durations.
+//!   If the span carries a CPU-side origin, the server also borrows the
+//!   nearest sampled stack on that origin tid, so per-thread top/flame
+//!   can render `CPU caller -> lane -> span name`.
 //!
 //! Timestamps arrive as absolute mach-derived nanoseconds (Apple
 //! Silicon GPU timestamps share mach_absolute_time's epoch and rate),
@@ -24,7 +27,7 @@
 use std::collections::HashMap;
 
 use stax_live::{IntervalKind, LiveSymbolOwned, LoadedBinary, PmuSample};
-use stax_live_proto::{TargetIngest, TargetSpanBatch};
+use stax_live_proto::{TargetIngest, TargetSpanBatch, TargetSpanOrigin};
 
 use crate::ServerState;
 
@@ -40,6 +43,12 @@ const SYNTH_BINARY_BASE_AVMA: u64 = 0xFFFF_0000_0000;
 
 /// Each span name owns one 16-byte synthetic "function".
 const SYNTH_SYMBOL_STRIDE: u64 = 16;
+
+/// Max distance between a span's CPU-side origin timestamp and the PET
+/// sample we borrow as its causal CPU stack. At the default 900Hz PET
+/// rate this is intentionally generous, but still refuses stale stacks
+/// from a different phase of work.
+const ORIGIN_STACK_MAX_DISTANCE_NS: u64 = 50_000_000;
 
 #[derive(Default)]
 pub(crate) struct TargetLaneRegistry {
@@ -58,6 +67,13 @@ pub(crate) struct TargetIngestService {
 enum SyntheticSymbolKey {
     Lane(String),
     Span(String),
+}
+
+struct SpanEvent {
+    start_ns: u64,
+    end_ns: u64,
+    span_addr: u64,
+    origin: Option<TargetSpanOrigin>,
 }
 
 impl SyntheticSymbolKey {
@@ -155,18 +171,47 @@ impl TargetIngest for TargetIngestService {
                 continue;
             }
             let span_addr = self.symbol_addr(SyntheticSymbolKey::Span(span.name.clone()));
-            events.push((span.start_ns, span.end_ns, [span_addr, lane_addr]));
+            events.push(SpanEvent {
+                start_ns: span.start_ns,
+                end_ns: span.end_ns,
+                span_addr,
+                origin: span.origin,
+            });
         }
-        events.sort_by_key(|(start_ns, end_ns, _)| (*start_ns, *end_ns));
+        events.sort_by_key(|event| (event.start_ns, event.end_ns));
         let mut total_duration_ns = 0u64;
         if !events.is_empty() {
             let mut aggregator = self.server.aggregator().write();
-            for (start_ns, end_ns, stack) in &events {
-                total_duration_ns = total_duration_ns.saturating_add(*end_ns - *start_ns);
+            let mut linked_origins = 0u64;
+            for event in &events {
+                total_duration_ns = total_duration_ns.saturating_add(event.end_ns - event.start_ns);
+                let origin_tid = event
+                    .origin
+                    .map(|origin| origin.tid)
+                    .filter(|&tid| tid < SYNTH_TID_BASE);
+                let origin_stack = event.origin.and_then(|origin| {
+                    if origin.tid >= SYNTH_TID_BASE {
+                        return None;
+                    }
+                    aggregator.nearest_pet_stack(
+                        origin.tid,
+                        origin.timestamp_ns,
+                        ORIGIN_STACK_MAX_DISTANCE_NS,
+                    )
+                });
+                let mut stack =
+                    Vec::with_capacity(2 + origin_stack.as_ref().map_or(0, |stack| stack.len()));
+                stack.push(event.span_addr);
+                stack.push(lane_addr);
+                if let Some(origin_stack) = origin_stack.as_deref() {
+                    linked_origins += 1;
+                    stack.extend_from_slice(origin_stack);
+                }
+                let stack = stack.into_boxed_slice();
                 aggregator.record_pet_sample(
                     tid,
-                    *start_ns,
-                    stack,
+                    event.start_ns,
+                    &stack,
                     &[],
                     PmuSample {
                         cycles: 0,
@@ -177,13 +222,17 @@ impl TargetIngest for TargetIngestService {
                 );
                 aggregator.record_interval(
                     tid,
-                    *start_ns,
-                    *end_ns,
-                    IntervalKind::SyntheticSpan {
-                        stack: stack.to_vec().into_boxed_slice(),
-                    },
+                    event.start_ns,
+                    event.end_ns,
+                    IntervalKind::SyntheticSpan { stack, origin_tid },
                 );
             }
+            tracing::debug!(
+                pid = batch.pid,
+                lane = %batch.lane,
+                linked_origins,
+                "target span CPU origins linked"
+            );
         }
         if !events.is_empty() {
             self.server.bump_revision();
@@ -327,12 +376,114 @@ mod tests {
         assert_eq!(thread.pet_samples, 2);
     }
 
+    #[tokio::test]
+    async fn ingest_links_spans_to_origin_cpu_stack() {
+        let server = ServerState::new_for_tests();
+        let service = TargetIngestService::new(server.clone());
+        server.set_active_run_for_tests(42);
+
+        const CPU_TID: u32 = 1234;
+        const CPU_BASE: u64 = 0x1000_0000;
+        const CPU_PARENT: u64 = CPU_BASE + 0x10;
+        const CPU_LEAF: u64 = CPU_BASE + 0x20;
+
+        server.binaries().write().insert(LoadedBinary {
+            path: "/tmp/stax-origin-test".to_owned(),
+            base_avma: CPU_BASE,
+            avma_end: CPU_BASE + 0x40,
+            text_svma: 0,
+            arch: None,
+            is_executable: true,
+            symbols: vec![
+                LiveSymbolOwned {
+                    start_svma: CPU_PARENT - CPU_BASE,
+                    end_svma: CPU_PARENT - CPU_BASE + 0x10,
+                    name: b"cpu_parent".to_vec(),
+                },
+                LiveSymbolOwned {
+                    start_svma: CPU_LEAF - CPU_BASE,
+                    end_svma: CPU_LEAF - CPU_BASE + 0x10,
+                    name: b"cpu_leaf".to_vec(),
+                },
+            ],
+            text_bytes: None,
+        });
+        server.aggregator().write().record_pet_sample(
+            CPU_TID,
+            950_000,
+            &[CPU_LEAF, CPU_PARENT],
+            &[],
+            PmuSample::default(),
+        );
+
+        service
+            .ingest(TargetSpanBatch {
+                pid: 42,
+                lane: "GPU test".to_owned(),
+                spans: vec![span_with_origin(
+                    "kernel_a",
+                    1_000_000,
+                    4_000_000,
+                    TargetSpanOrigin {
+                        tid: CPU_TID,
+                        timestamp_ns: 951_000,
+                    },
+                )],
+            })
+            .await;
+
+        let profiler = server.profiler();
+        let cpu_top = profiler
+            .top(10, TopSort::BySelf, view_params(Some(CPU_TID)))
+            .await;
+        assert_eq!(cpu_top[0].function_name.as_deref(), Some("kernel_a"));
+        assert_eq!(cpu_top[0].self_on_cpu_ns, 3_000_000);
+        assert_eq!(cpu_top[0].self_pet_samples, 1);
+
+        let flame = profiler.flamegraph(view_params(Some(CPU_TID))).await;
+        assert_eq!(flame.total_on_cpu_ns, 3_000_000);
+        assert_eq!(flame.root.children.len(), 1);
+        let cpu_parent = &flame.root.children[0];
+        assert_eq!(
+            flame_node_name(cpu_parent, &flame.strings),
+            Some("cpu_parent")
+        );
+        let cpu_leaf = &cpu_parent.children[0];
+        assert_eq!(flame_node_name(cpu_leaf, &flame.strings), Some("cpu_leaf"));
+        let lane = &cpu_leaf.children[0];
+        assert_eq!(flame_node_name(lane, &flame.strings), Some("GPU test"));
+        let span = &lane.children[0];
+        assert_eq!(flame_node_name(span, &flame.strings), Some("kernel_a"));
+        assert_eq!(span.on_cpu_ns, 3_000_000);
+
+        let threads = profiler.threads().await;
+        let cpu_thread = threads
+            .threads
+            .iter()
+            .find(|thread| thread.tid == CPU_TID)
+            .expect("origin CPU thread row");
+        assert_eq!(cpu_thread.on_cpu_ns, 3_000_000);
+        assert_eq!(cpu_thread.pet_samples, 1);
+        let lane_thread = threads
+            .threads
+            .iter()
+            .find(|thread| thread.tid == SYNTH_TID_BASE)
+            .expect("synthetic lane row");
+        assert_eq!(lane_thread.on_cpu_ns, 3_000_000);
+        assert_eq!(lane_thread.pet_samples, 1);
+    }
+
     fn span(name: &str, start_ns: u64, end_ns: u64) -> TargetSpan {
-        TargetSpan {
-            name: name.to_owned(),
-            start_ns,
-            end_ns,
-        }
+        TargetSpan::new(name, start_ns, end_ns)
+    }
+
+    fn span_with_origin(
+        name: &str,
+        start_ns: u64,
+        end_ns: u64,
+        origin: TargetSpanOrigin,
+    ) -> TargetSpan {
+        TargetSpan::new(name, start_ns, end_ns).with_origin(origin)
     }
 
     fn view_params(tid: Option<u32>) -> ViewParams {

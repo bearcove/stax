@@ -773,7 +773,7 @@ fn make_predicate<'a>(
             } => {
                 let stack: Vec<u64> = match &interval.kind {
                     IntervalKind::OnCpu => Vec::new(),
-                    IntervalKind::SyntheticSpan { stack } => stack.iter().copied().collect(),
+                    IntervalKind::SyntheticSpan { stack, .. } => stack.iter().copied().collect(),
                     IntervalKind::OffCpu { stack, .. } => stack.iter().copied().collect(),
                 };
                 (interval.start_ns, Box::new(stack.into_iter()), binaries)

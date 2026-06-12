@@ -27,8 +27,10 @@ still the right tool — that is the whole point. One recording holds:
   same timebase as everything else. Span names are synthetic symbols, so
   `stax top --tid <synthetic>` and `stax flame --tid <synthetic>` render
   per-kernel frames; the `samples` column is span count and the time column
-  is lane active time. No correlation step, no chrome-trace export, no
-  second tool. See `stax-target/src/lib.rs` and
+  is lane active time. If the target also reports a span origin, `top` and
+  `flame` for the origin CPU tid include that GPU work under the sampled CPU
+  stack that queued it: `CPU caller -> lane -> kernel`. No correlation step,
+  no chrome-trace export, no second tool. See `stax-target/src/lib.rs` and
   `stax-server/src/target_ingest.rs`; the guide page is
   `docs/content/guide/profiling-gpu-work.md`.
 
@@ -52,6 +54,11 @@ Gotchas that have actually misled agents (verified 2026-06-12):
   `(all) -> lane -> span name`. If either is empty while `stax threads`
   shows spans for that tid, treat it as a regression in the target-ingest
   aggregation path.
+- When the target reports span origins, `stax flame --tid <real CPU tid>`
+  can show the causal path as `(all) -> CPU caller -> lane -> span name`.
+  `stax top --tid <real CPU tid> --sort total` will then attribute the span
+  duration to the CPU dispatch stack; `--sort self` still surfaces the
+  per-kernel span names.
 - A GPU-bound target looks nearly EMPTY in `stax top` — a handful of
   samples, allocator noise at the top. That is not "stax doesn't work";
   that is the answer (the CPU is idle). The story is in `threads`, the
@@ -356,6 +363,9 @@ Snapshot the top-N hottest functions in the active run.
   code, including their callers).
 
 Output is one line per entry: `<self ms> <self samples> <function> (<binary>)`.
+For synthetic target lanes, `self ms` is span duration and `samples` is span
+count. When spans carry origins, `--tid <real CPU tid>` includes those spans
+under the CPU stack that queued them.
 
 ```
 $ stax top -n 5
@@ -379,12 +389,13 @@ $ stax threads -n 5
     …
 ```
 
-The `active ms` column is on-CPU time for CPU threads and reported span
-duration for synthetic target lanes. The `samples` column is PET sample
-count for CPU threads and span count for synthetic lanes. The `blocked`
-column names the largest off-CPU bucket for that thread (`idle`, `lock`,
-`sem`, `ipc`, `ioR`, `ioW`, `ready`, `sleep`, `conn`, `other`). Off-CPU
-intervals are recorded on both macOS and Linux.
+The `active ms` column is on-CPU time for CPU threads, plus any target spans
+whose origin points at that CPU tid. For synthetic target lanes it is reported
+span duration. The `samples` column is PET sample count for CPU threads and
+span count for synthetic lanes. The `blocked` column names the largest
+off-CPU bucket for that thread (`idle`, `lock`, `sem`, `ipc`, `ioR`, `ioW`,
+`ready`, `sleep`, `conn`, `other`). Off-CPU intervals are recorded on both
+macOS and Linux.
 
 `-n 0` prints every thread. Default 20.
 
@@ -393,13 +404,15 @@ intervals are recorded on both macOS and Linux.
 Print the CPU/lane-active flamegraph as an indented Markdown tree, sorted by
 active time descending at each level. Same data the web UI renders; this is
 the agent-friendly view of "where is the time going." Cooperating target
-lanes render as `(all) -> lane -> span name`.
+lanes render as `(all) -> lane -> span name`; when spans carry origins,
+filtering to the origin CPU tid renders `(all) -> CPU caller -> lane -> span`.
 
 - `-d / --max-depth N` — cut off the tree at depth N (default 12).
   Children below the cut-off are summarised as `…N more frames`.
 - `--threshold-pct PCT` — hide subtrees whose share of total active time
   falls below `PCT` (default 1%; pass `0` for the whole tree).
-- `--tid` — filter to one thread.
+- `--tid` — filter to one thread. Origin-linked target spans are included
+  for the CPU thread that queued them.
 
 Operates on the current run's aggregator (same rules as `stax top`).
 

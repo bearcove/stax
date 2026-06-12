@@ -40,11 +40,11 @@ fn main() {
             let batch = TargetSpanBatch {
                 pid,
                 lane: "GPU probe".to_owned(),
-                spans: vec![TargetSpan {
-                    name: "probe_fake_kernel".to_owned(),
-                    start_ns: now_ns - 50_000_000,
-                    end_ns: now_ns,
-                }],
+                spans: vec![TargetSpan::new(
+                    "probe_fake_kernel",
+                    now_ns - 50_000_000,
+                    now_ns,
+                )],
             };
             match client.ingest(batch).await {
                 Ok(()) => println!("ingest ok (50ms fake span sent)"),

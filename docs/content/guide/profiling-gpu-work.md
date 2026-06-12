@@ -26,13 +26,18 @@ The app links the **`stax-target`** crate and does two things:
    forget, bounded queue, drop-newest; each `TargetSpan` is a name plus
    absolute `mach_absolute_time`-derived nanoseconds (Apple Silicon GPU
    timestamps share that timebase, which is why no correlation step exists
-   anywhere).
+   anywhere). A target can also attach a `TargetSpanOrigin` captured with
+   `stax_target::current_span_origin()` at dispatch/queue time; that gives
+   stax the CPU tid and timestamp needed to borrow the nearest sampled CPU
+   stack.
 
 Server-side (`TargetIngest`), each `(pid, lane)` becomes a **synthetic
 thread** — a pseudo-tid at/above `0xFFF0_0000` — and each distinct span
 name becomes a synthetic symbol. Each reported span records one sample
 marker plus one attributed synthetic execution interval, so kernel names
-render like function names in `top`, `flame`, and the web UI timeline.
+render like function names in `top`, `flame`, and the web UI timeline. With
+origins, `top`/`flame` for the dispatching CPU tid include the span under the
+sampled CPU stack that queued it: `CPU caller -> lane -> span name`.
 
 ## A worked example: bee's `hx`
 
@@ -60,6 +65,10 @@ span durations.
   per-kernel aggregation. `top` reports total span duration in the `ms`
   column and span count in the `samples` column. `flame` renders
   `(all) -> lane -> span name`.
+- **`stax top --tid <cpu tid>` / `stax flame --tid <cpu tid>`** — when the
+  target reports span origins, these thread-scoped views include the GPU work
+  queued from that CPU thread. `--sort total` is useful for charging GPU time
+  to dispatch callers; `--sort self` still shows the kernel/span names.
 
 ## Interpreting a GPU-bound target
 

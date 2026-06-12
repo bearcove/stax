@@ -581,6 +581,25 @@ pub struct CfgUpdate {
     pub edges: Vec<CfgEdge>,
 }
 
+/// Where target-side work was queued/submitted from.
+///
+/// This is optional provenance for execution lanes the CPU sampler
+/// cannot directly observe. When a target can report the OS thread id
+/// and timestamp at the moment it queued the work, stax can borrow the
+/// nearest sampled CPU stack on that thread and render:
+///
+/// `CPU caller -> lane -> span name`
+///
+/// in the ordinary top/flame views. `tid` is the same OS thread-id
+/// namespace used by the recorder (Mach thread_id on macOS, gettid on
+/// Linux). `timestamp_ns` is in the same clock domain as span
+/// timestamps.
+#[derive(Clone, Copy, Debug, Facet)]
+pub struct TargetSpanOrigin {
+    pub tid: u32,
+    pub timestamp_ns: u64,
+}
+
 /// One execution span reported by an instrumented TARGET process —
 /// e.g. a GPU kernel's execution window captured via Metal 4 timestamp
 /// counters. Timestamps are absolute mach-derived nanoseconds, the same
@@ -594,6 +613,27 @@ pub struct TargetSpan {
     pub name: String,
     pub start_ns: u64,
     pub end_ns: u64,
+    /// Optional CPU-side queue/dispatch origin. When present and a
+    /// nearby PET sample exists on that thread, top/flame can place
+    /// the span under the sampled CPU stack as well as under its
+    /// synthetic lane.
+    pub origin: Option<TargetSpanOrigin>,
+}
+
+impl TargetSpan {
+    pub fn new(name: impl Into<String>, start_ns: u64, end_ns: u64) -> Self {
+        Self {
+            name: name.into(),
+            start_ns,
+            end_ns,
+            origin: None,
+        }
+    }
+
+    pub fn with_origin(mut self, origin: TargetSpanOrigin) -> Self {
+        self.origin = Some(origin);
+        self
+    }
 }
 
 /// A batch of target-reported spans for one execution lane.
