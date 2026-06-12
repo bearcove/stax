@@ -37,7 +37,10 @@ still the right tool — that is the whole point. One recording holds:
 
 A cooperating process pays nothing when not recorded: the target polls a
 capture gate (~1s) and only captures spans while a recording of its pid is
-active (`stax_target::reporting_active()`).
+active (`stax_target::reporting_active()`). For target-side health checks,
+`stax_target::reporter_stats()` / `Lane::reporter_stats()` reports whether
+the worker has been armed, whether the gate is currently active, whether the
+worker is connected to `stax-server`, and local queue/disconnect drops.
 
 Known consumer: **bee's `hx`** reports Metal 4 per-dispatch GPU timestamps
 as the `"GPU tq1s"` lane (and TTS lanes) — see

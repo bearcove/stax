@@ -23,7 +23,9 @@
 //!   drop-newest. The server is the authority: it drops batches whose
 //!   pid doesn't match the active run's target. Lossy by design. Local
 //!   queue drops are counted in [`reporter_stats`] and sent to
-//!   `stax diagnose` while capture is active.
+//!   `stax diagnose` while capture is active. [`reporter_stats`] also
+//!   exposes target-local worker/gate/connection state for integration
+//!   health checks.
 //!
 //! Span timestamps are absolute mach-derived nanoseconds — on Apple
 //! platforms `mach_absolute_time` converted to ns (Apple Silicon GPU
@@ -42,6 +44,11 @@
 //! if let Some(open) = lane.begin_span_with_captured_origin("decode chunk", origin) {
 //!     // decode_chunk();
 //!     open.finish_and_report(&lane);
+//! }
+//!
+//! let stats = lane.reporter_stats();
+//! if stats.batches_dropped_queue_full > 0 {
+//!     // Consider batching spans more coarsely.
 //! }
 //! ```
 //!
@@ -72,16 +79,35 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Whether the app's pid is currently being recorded.
 static REPORTING_ACTIVE: AtomicBool = AtomicBool::new(false);
+static WORKER_STARTED: AtomicBool = AtomicBool::new(false);
+static CONNECTED_TO_SERVER: AtomicBool = AtomicBool::new(false);
 static BATCHES_DROPPED_QUEUE_FULL: AtomicU64 = AtomicU64::new(0);
 static SPANS_DROPPED_QUEUE_FULL: AtomicU64 = AtomicU64::new(0);
 static BATCHES_DROPPED_WORKER_DISCONNECTED: AtomicU64 = AtomicU64::new(0);
 static SPANS_DROPPED_WORKER_DISCONNECTED: AtomicU64 = AtomicU64::new(0);
 
+/// Target-local reporter health snapshot.
+///
+/// This is intentionally passive: unlike [`reporting_active`], reading
+/// stats does not arm the background worker. Use it for status logs,
+/// admin endpoints, or test assertions around integration health.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ReporterStats {
+    /// Whether the background worker has been armed at least once.
+    pub worker_started: bool,
+    /// Last capture-gate state observed by the worker.
+    pub reporting_active: bool,
+    /// Whether the worker currently has a live stax-server connection.
+    pub connected_to_server: bool,
+    /// Batches dropped because the bounded target-local queue was full.
     pub batches_dropped_queue_full: u64,
+    /// Spans in batches dropped because the bounded target-local queue
+    /// was full.
     pub spans_dropped_queue_full: u64,
+    /// Batches dropped because the background worker disconnected.
     pub batches_dropped_worker_disconnected: u64,
+    /// Spans in batches dropped because the background worker
+    /// disconnected.
     pub spans_dropped_worker_disconnected: u64,
 }
 
@@ -94,8 +120,16 @@ pub fn reporting_active() -> bool {
     REPORTING_ACTIVE.load(Ordering::Relaxed)
 }
 
+/// Return a passive snapshot of target-side reporter health.
+///
+/// This does not start the background worker. The capture gate is still
+/// [`reporting_active`]; call that from instrumentation sites when you
+/// want stax-target to begin polling for an active recording.
 pub fn reporter_stats() -> ReporterStats {
     ReporterStats {
+        worker_started: WORKER_STARTED.load(Ordering::Relaxed),
+        reporting_active: REPORTING_ACTIVE.load(Ordering::Relaxed),
+        connected_to_server: CONNECTED_TO_SERVER.load(Ordering::Relaxed),
         batches_dropped_queue_full: BATCHES_DROPPED_QUEUE_FULL.load(Ordering::Relaxed),
         spans_dropped_queue_full: SPANS_DROPPED_QUEUE_FULL.load(Ordering::Relaxed),
         batches_dropped_worker_disconnected: BATCHES_DROPPED_WORKER_DISCONNECTED
@@ -353,6 +387,11 @@ impl Lane {
         reporting_active()
     }
 
+    /// Passive snapshot of target-side reporter health.
+    pub fn reporter_stats(&self) -> ReporterStats {
+        reporter_stats()
+    }
+
     /// Capture the current CPU-side origin for work that will later run
     /// on this lane.
     pub fn current_origin(&self) -> Option<TargetSpanOrigin> {
@@ -543,6 +582,7 @@ fn worker_sender() -> &'static SyncSender<TargetSpanBatch> {
             .name("stax-target".to_owned())
             .spawn(move || worker(rx))
             .expect("spawn stax-target worker thread");
+        WORKER_STARTED.store(true, Ordering::Relaxed);
         tx
     })
 }
@@ -561,6 +601,8 @@ fn worker(rx: Receiver<TargetSpanBatch>) {
     {
         Ok(runtime) => runtime,
         Err(e) => {
+            REPORTING_ACTIVE.store(false, Ordering::Relaxed);
+            CONNECTED_TO_SERVER.store(false, Ordering::Relaxed);
             tracing::warn!("stax-target: no tokio runtime, span reporting disabled: {e}");
             for _ in rx {}
             return;
@@ -586,6 +628,7 @@ fn worker(rx: Receiver<TargetSpanBatch>) {
                                 tracing::debug!(
                                     "stax-target: gate poll failed, dropping connection: {e}"
                                 );
+                                CONNECTED_TO_SERVER.store(false, Ordering::Relaxed);
                                 client = None;
                                 false
                             }
@@ -593,6 +636,7 @@ fn worker(rx: Receiver<TargetSpanBatch>) {
                                 tracing::debug!(
                                     "stax-target: gate poll timed out, dropping connection"
                                 );
+                                CONNECTED_TO_SERVER.store(false, Ordering::Relaxed);
                                 client = None;
                                 false
                             }
@@ -618,12 +662,14 @@ fn worker(rx: Receiver<TargetSpanBatch>) {
                             tracing::debug!(
                                 "stax-target: reporter stats failed, dropping connection: {e}"
                             );
+                            CONNECTED_TO_SERVER.store(false, Ordering::Relaxed);
                             client = None;
                         }
                         Err(_) => {
                             tracing::debug!(
                                 "stax-target: reporter stats timed out, dropping connection"
                             );
+                            CONNECTED_TO_SERVER.store(false, Ordering::Relaxed);
                             client = None;
                         }
                     }
@@ -644,29 +690,40 @@ fn worker(rx: Receiver<TargetSpanBatch>) {
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => {
                         tracing::debug!("stax-target: ingest failed, dropping connection: {e}");
+                        CONNECTED_TO_SERVER.store(false, Ordering::Relaxed);
                         client = None;
                     }
                     Err(_) => {
                         tracing::debug!("stax-target: ingest timed out, dropping connection");
+                        CONNECTED_TO_SERVER.store(false, Ordering::Relaxed);
                         client = None;
                     }
                 }
             }),
             Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => return,
+            Err(RecvTimeoutError::Disconnected) => {
+                REPORTING_ACTIVE.store(false, Ordering::Relaxed);
+                CONNECTED_TO_SERVER.store(false, Ordering::Relaxed);
+                return;
+            }
         }
     }
 }
 
 async fn connect() -> Option<TargetIngestClient> {
-    let socket = stax_server_socket()?;
+    let Some(socket) = stax_server_socket() else {
+        CONNECTED_TO_SERVER.store(false, Ordering::Relaxed);
+        return None;
+    };
     let url = format!("local://{}", socket.display());
     match vox::connect(&url).await {
         Ok(client) => {
+            CONNECTED_TO_SERVER.store(true, Ordering::Relaxed);
             tracing::debug!("stax-target: connected to {url}");
             Some(client)
         }
         Err(e) => {
+            CONNECTED_TO_SERVER.store(false, Ordering::Relaxed);
             tracing::debug!("stax-target: connect to {url} failed: {e}");
             None
         }
@@ -843,6 +900,17 @@ mod tests {
         assert_eq!(stats.spans_dropped_queue_full, 3);
         assert_eq!(stats.batches_dropped_worker_disconnected, 1);
         assert_eq!(stats.spans_dropped_worker_disconnected, 5);
+
+        reset_reporter_stats();
+    }
+
+    #[test]
+    fn lane_reporter_stats_matches_global_snapshot() {
+        reset_reporter_stats();
+        record_queue_full_drop(2);
+
+        let lane = Lane::new("stats lane");
+        assert_eq!(lane.reporter_stats(), reporter_stats());
 
         reset_reporter_stats();
     }

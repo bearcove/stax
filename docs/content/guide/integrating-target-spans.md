@@ -90,6 +90,13 @@ Use `stax_target::now_ns()` when your target-side timestamps should come from
 the same host clock stax expects. Use `SpanBuilder` when an integration wants
 to validate or attach origins before deciding where to report a span.
 
+For integration health logs, admin endpoints, or assertions in your own test
+fixtures, read `lane.reporter_stats()` or `stax_target::reporter_stats()`.
+That snapshot is passive: it reports whether the background worker has been
+armed, the last capture-gate state, whether the worker currently has a
+stax-server connection, and local drop counters, but it does not start polling
+by itself. Use `lane.reporting_active()` as the real capture gate.
+
 ## Recipes by integration style
 
 ### Thread pools
@@ -262,6 +269,12 @@ origin counters first. Unlinked origins usually mean the target captured the
 origin too far from the queue point, used the wrong thread, or the CPU sampler
 did not catch a nearby PET sample. If `too_far` dominates, the average/max
 distance tells you how stale the origin was relative to the nearest CPU stack.
+
+Inside the cooperating process, `reporter_stats()` answers a different
+question: whether the local reporter worker is armed/connected and whether it
+has already dropped batches before the server could see them. That is the
+right signal for target-side logs such as "we are being recorded but the local
+queue is overflowing".
 
 ## Specializations
 

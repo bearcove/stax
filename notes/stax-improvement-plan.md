@@ -80,6 +80,7 @@ other execution lanes the CPU sampler cannot observe directly.
 Current API:
 
 - `reporting_active()`
+- `reporter_stats()`
 - `current_span_origin()`
 - `span_with_current_origin(...)`
 - `report(lane, spans)`
@@ -88,6 +89,7 @@ Current API:
 - `SpanBuilder`
 - `Lane::new(name)`
 - `Lane::{reporting_active,current_origin,origin_if_active,capture_origin}`
+- `Lane::reporter_stats`
 - `Lane::{span,span_builder,span_with_origin,span_with_captured_origin,span_with_current_origin}`
 - `Lane::{begin_span,begin_span_with_origin,begin_span_with_captured_origin}`
 - `Lane::{report,try_report,report_if_active,report_one,report_one_if_active}`
@@ -102,10 +104,12 @@ Remaining API polish:
   - A RAII guard could be convenient, but only if it is opt-in and clearly
     documented as best-effort telemetry.
 - Add queue/backpressure observability from the target side:
-  - local dropped-batch count is now exposed through `ReporterStats` and
+  - done: local dropped-batch count is exposed through `ReporterStats` and
     `stax diagnose` while capture is active
-  - connection state and last gate state remain useful future additions
-  - maybe exposed through tracing and/or a lightweight accessor
+  - done: `ReporterStats` also exposes `worker_started`, `reporting_active`,
+    and `connected_to_server` as target-local health state
+  - done: `Lane::reporter_stats()` gives lane-centric integrations the same
+    passive snapshot without arming the background worker
 
 Acceptance criteria:
 
