@@ -838,6 +838,7 @@ fn run_compare(args: CompareArgs) -> Result<(), Box<dyn Error>> {
 }
 
 const ARCHIVE_FILE_NAME: &str = "archive.json";
+const ARCHIVE_FORMAT_VERSION: u32 = 1;
 
 fn read_saved_archive(path: &Path) -> Result<SavedRunArchive, Box<dyn Error>> {
     let archive_path = if path.is_dir() {
@@ -847,8 +848,18 @@ fn read_saved_archive(path: &Path) -> Result<SavedRunArchive, Box<dyn Error>> {
     };
     let bytes = std::fs::read(&archive_path)
         .map_err(|e| format!("read {}: {e}", archive_path.display()))?;
-    facet_json::from_slice(&bytes)
-        .map_err(|e| format!("parse {}: {e}", archive_path.display()).into())
+    let archive: SavedRunArchive = facet_json::from_slice(&bytes)
+        .map_err(|e| format!("parse {}: {e}", archive_path.display()))?;
+    if archive.format_version != ARCHIVE_FORMAT_VERSION {
+        return Err(format!(
+            "unsupported stax archive version {} in {} (expected {})",
+            archive.format_version,
+            archive_path.display(),
+            ARCHIVE_FORMAT_VERSION
+        )
+        .into());
+    }
+    Ok(archive)
 }
 
 #[derive(Clone, Copy, Debug, Default)]

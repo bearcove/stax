@@ -131,6 +131,9 @@ stax save <PATH>
 `stax save` works while a run is active, and after `stax stop`, until the
 next recording resets the live aggregator.
 
+Archive compatibility is strict in the current format: `open` and `compare`
+accept `format_version = 1` and reject other versions loudly.
+
 ## `stax open`
 
 Open a saved run archive into `stax-server`'s current query state.

@@ -153,6 +153,11 @@ for later `threads`, `top`, `flame`, and `diagnose` queries.
 `stax save` works while a run is active, and after `stax stop`, until the
 next `stax record` resets the live aggregator.
 
+Archive compatibility is strict in the current format: `stax open` and
+`stax compare` accept `format_version = 1` and reject other versions loudly.
+Treat saved archives as developer/regression artifacts for the matching stax
+format until a migration policy or stable package format lands.
+
 ## stax open
 
 Load a saved run archive into the daemon's current query state.
@@ -182,6 +187,16 @@ counts, origin-link counts, ingest drops, and the top target lanes by
 duration. Use it for quick before/after checks and regression notes; use
 `stax open` when you want to inspect one archive through `threads`, `top`,
 `flame`, `diagnose`, or the web UI.
+
+For a live persistence smoke with the blessed target-span corpus:
+
+```bash
+just archive-smoke
+```
+
+That recipe records `stax-target/examples/corpus.rs`, saves the run to a
+temporary archive directory, reopens it, queries the restored run through
+`threads`/`top`/`flame`/`diagnose`, and runs `stax compare` against itself.
 
 ## Putting it together
 

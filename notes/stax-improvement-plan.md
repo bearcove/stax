@@ -290,6 +290,8 @@ Status as of 2026-06-12:
     target-side queue drops
 - Reopened archives are queryable through the normal `threads`, `top`,
   `flame`, and `diagnose` surfaces.
+- Archive compatibility is strict for now: `stax open` and `stax compare`
+  accept `format_version = 1` and reject other versions loudly.
 - Current deliberate non-goals:
   - no per-`RunId` query selector yet
   - no structured compare output yet
@@ -639,7 +641,8 @@ Tasks:
   - docs build
   - frontend build
   - blessed demo run
-  - save/reopen smoke after persistence exists
+  - done: `just archive-smoke` for save/reopen/compare using the blessed
+    target-span corpus
 
 Acceptance criteria:
 
@@ -698,7 +701,8 @@ Done when:
 3. Done: reopen saved run into server query state.
 4. Done: query saved run through existing CLI surfaces.
 5. Done: preserve target spans, origin-linked stacks, and ingest diagnostics.
-6. Started: document archive compatibility.
+6. Done: document archive compatibility.
+7. Done: add `just archive-smoke` for the blessed corpus persistence path.
 
 Done when:
 
@@ -706,9 +710,8 @@ Done when:
 
 Remaining:
 
-- Add a live CLI smoke using the blessed demo corpus once daemon lifecycle is
-  stable in CI.
-- Make archive compatibility policy explicit in docs.
+- Decide when `just archive-smoke` should run in CI; it needs daemon lifecycle
+  support.
 - Decide whether format v2 becomes chunked directory layout or single-file
   package first.
 
@@ -776,10 +779,11 @@ plainly when they block broad verification.
 
 ## Open design decisions
 
-- Should persistence be a directory archive first, or a single `.stax` file
-  immediately?
-- Should saved-run querying load into `stax-server`, or should the CLI be able
-  to query archives directly?
+- Should format v2 become a chunked directory layout or a single `.stax`
+  package first?
+- Should archive-local CLI queries grow beyond `stax compare`, or should
+  detailed archive inspection continue to load into `stax-server` with
+  `stax open`?
 - Should target-side queue-drop counters be pushed to the server, exposed
   locally through an API, or both?
 - Should there be a distinct `stax lanes` command, or should `stax threads`

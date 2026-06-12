@@ -387,6 +387,8 @@ saved: /tmp/stax-demo.staxdir
 
 `stax save` needs some queryable run state. It works while a run is active,
 and after `stax stop`, until the next recording resets the live aggregator.
+Archive compatibility is strict in the current format: `stax open` and
+`stax compare` accept `format_version = 1` and reject other versions loudly.
 
 ### `stax open <PATH>`
 
@@ -418,6 +420,16 @@ PET samples, on/off-CPU interval time, target time, target span counts,
 origin-link counts, ingest drops, and the top target lanes by duration. Use
 `stax open` when you want to inspect one archive through `threads`, `top`,
 `flame`, or `diagnose`; use `compare` for quick before/after notes.
+
+For a live save/reopen smoke with the blessed target-span corpus:
+
+```
+just archive-smoke
+```
+
+That records `stax-target/examples/corpus.rs`, saves it to a temporary
+archive directory, reopens it, queries `threads`/`top`/`flame`/`diagnose`,
+and runs `stax compare` against the archive itself.
 
 ### `stax top [-n N] [--sort self|total] [--tid TID]`
 
