@@ -101,6 +101,7 @@ The repo includes several target-span demos:
 | `async_executor` | scheduling work into an async channel, then timing it in the async worker |
 | `codec` | exact host timestamps with decode/encode lanes |
 | `model_runtime` | semantic model-runtime lanes with `SpanBuilder` |
+| `gpu_timestamps` | Metal-style timestamp-counter conversion without SDK dependencies |
 | `bad_origins` | intentionally missing/stale/wrong-thread origins for `stax diagnose` |
 
 For example:

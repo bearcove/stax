@@ -149,6 +149,11 @@ Already present:
 - `examples/model_runtime.rs`
   - Simulates prefill/decode/attention/cache update lanes.
   - Mirrors the bee/hx shape without depending on bee.
+- `examples/gpu_timestamps.rs`
+  - Compile-checked Metal-style timestamp-counter skeleton without SDK
+    dependencies.
+  - Shows dispatch origin capture, external timestamp conversion, and
+    completion-time reporting.
 - `examples/bad_origins.rs`
   - Intentionally captures origins too early, from the wrong thread, or too
     far from available CPU samples.
@@ -158,13 +163,14 @@ Already present:
 
 Add a GPU-facing example or guide-backed skeleton:
 
-- If a real Metal example is practical in this repo, add one that shows:
+- A compile-checked skeleton now exists in `examples/gpu_timestamps.rs`.
+- If a real Metal example becomes practical in this repo, add one that shows:
   - command encoding
   - timestamp-counter start/end conversion
   - origin capture at dispatch/queue time
   - reporting from the completion/reporting thread
-- If a real Metal example would introduce too much platform or SDK surface,
-  add a compile-checked skeleton and keep the full worked example in docs.
+- Until then, keep the full worked Metal example in docs and real consumers
+  such as bee/hx.
 
 Acceptance criteria:
 
