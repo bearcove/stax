@@ -71,7 +71,9 @@ interesting lives:
 Recording happens **in-process**: `stax-server` drives a per-run task that
 reads from the capture backend (`staxd` on macOS; `staxd` *or* an in-process
 `perf_event_open` on Linux) and feeds the aggregator directly. There is no
-separate recording-driver process and no on-disk archive in the loop.
+separate recording-driver process and no mandatory on-disk archive in the
+capture loop; saving and reopening runs is a query-state/archive feature built
+on top of the live aggregator.
 
 ## stax — the CLI
 
