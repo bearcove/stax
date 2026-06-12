@@ -286,6 +286,7 @@ just check-live              # cargo check -p stax-live --all-targets
 just check-server            # cargo check -p stax-server --all-targets
 just check-mac-kperf-parse   # macOS: check kperf parser/timestamp pipeline
 just test-cli-target-lanes   # stable CLI synthetic-lane regression
+just test-cli-compare-json   # stable stax compare --json report regression
 just test-server-target-ingest # TargetIngest -> Profiler target-span regression
 just test-mac-kperf-timebase # macOS: mach tick -> ns clock-domain regression
 just docs                    # ddc build
@@ -478,7 +479,7 @@ stax diagnose --run 1
 This shorthand has the same server-memory lifetime and the same active-run
 refusal as `select-run`.
 
-### `stax compare <BASELINE> <CANDIDATE>`
+### `stax compare [--json] <BASELINE> <CANDIDATE>`
 
 Compare two saved archives without touching `stax-server` state.
 
@@ -489,6 +490,9 @@ $ stax compare /tmp/before.staxdir /tmp/after.staxdir
 It reads each archive's typed manifest/chunks directly and prints deltas for
 PET samples, on/off-CPU interval time, target time, target span counts,
 origin-link counts, ingest drops, and the top target lanes by duration.
+Pass `--json` for a facet-json report with named baseline/candidate/delta
+fields for each metric and target-lane delta; use that in CI or benchmark
+notes instead of scraping the human table.
 Legacy v1 `archive.json` inputs are accepted for comparison. Use `stax open`
 when you want to inspect one archive through `threads`, `top`, `flame`, or
 `diagnose`; use `compare` for quick before/after notes.
@@ -503,7 +507,8 @@ That starts a checkout-local `stax-server` on a temporary socket, records
 `stax-target/examples/corpus.rs` with the checkout CLI, saves it to a
 temporary archive directory, reopens it, exercises `stax select-run` plus the
 per-command `--run` shorthand, queries `threads`/`top`/`flame`/`diagnose`,
-and runs `stax compare` against the archive itself.
+and runs both `stax compare` and `stax compare --json` against the archive
+itself.
 
 For the browser surface, use the checkout-local web target smoke:
 

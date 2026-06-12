@@ -61,8 +61,9 @@ nothing depends on it.
 - **Live first, saveable when needed.** The aggregator updates continuously;
   `stax top`, `stax flame`, and the web UI all read the *current* state of a
   run that is still going. Use `stax select-run` or per-command `--run` for
-  stopped in-memory history, and `stax save`, `stax open`, and `stax compare`
-  when you need a durable artifact or before/after notes.
+  stopped in-memory history, and `stax save`, `stax open`, `stax compare`,
+  and `stax compare --json` when you need durable artifacts, before/after
+  notes, or CI-readable deltas.
 - **Built for agents as much as humans.** Every query is a subcommand with
   plain-text output and meaningful exit codes. `stax wait --for-samples N`
   lets a script block until there's enough data to look at.

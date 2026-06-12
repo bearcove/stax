@@ -87,6 +87,10 @@ pub struct ArchiveArgs {
 
 #[derive(Facet, Debug)]
 pub struct CompareArgs {
+    /// Print a machine-readable facet-json report instead of the human table.
+    #[facet(args::named, default)]
+    pub json: bool,
+
     /// Baseline archive directory, v2 manifest.json, or legacy v1 archive.json.
     #[facet(args::positional)]
     pub baseline: String,

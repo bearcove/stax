@@ -213,12 +213,15 @@ Compare two saved archives without loading either one into `stax-server`.
 
 ```bash
 stax compare /tmp/before.staxdir /tmp/after.staxdir
+stax compare --json /tmp/before.staxdir /tmp/after.staxdir > /tmp/stax-compare.json
 ```
 
 The command reads each archive's typed manifest/chunks directly and prints
 deltas for PET samples, on/off-CPU interval time, target time, target span
 counts, origin-link counts, ingest drops, and the top target lanes by
-duration. Legacy v1 `archive.json` inputs are accepted too. Use it for quick
+duration. The default is a human table; `--json` prints a facet-json report
+with named baseline/candidate/delta fields for scripts and benchmark notes.
+Legacy v1 `archive.json` inputs are accepted too. Use it for quick
 before/after checks and regression notes; use `stax open` when you want to
 inspect one archive through `threads`, `top`, `flame`, `diagnose`, or the web
 UI.
@@ -233,7 +236,8 @@ That recipe starts a checkout-local `stax-server` on a temporary socket,
 records `stax-target/examples/corpus.rs` with the checkout CLI, saves the run
 to a temporary archive directory, reopens it, exercises `stax select-run` and
 per-command `--run`, queries the restored run through
-`threads`/`top`/`flame`/`diagnose`, and runs `stax compare` against itself.
+`threads`/`top`/`flame`/`diagnose`, and runs text plus JSON `stax compare`
+against itself.
 
 The focused target-span workflow runs the static verifier on normal PRs. The
 archive and web smokes are available as manual `workflow_dispatch` checks in

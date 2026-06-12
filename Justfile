@@ -43,6 +43,10 @@ test-cli-target-lanes:
     cargo nextest list -p stax --all-targets -E 'test(threads_output_keeps_target_lanes_past_limit)'
     cargo nextest run -p stax --all-targets -E 'test(threads_output_keeps_target_lanes_past_limit)'
 
+test-cli-compare-json:
+    cargo nextest list -p stax --all-targets -E 'test(compare_report_serializes_machine_readable_deltas)'
+    cargo nextest run -p stax --all-targets -E 'test(compare_report_serializes_machine_readable_deltas)'
+
 test-server-target-ingest:
     cargo nextest list -p stax-server --all-targets -E 'test(ingest_links_spans_to_origin_cpu_stack)'
     cargo nextest run -p stax-server --all-targets -E 'test(ingest_links_spans_to_origin_cpu_stack)'
@@ -67,7 +71,7 @@ frontend-check:
 web-target-smoke:
     bash frontend/scripts/web-target-smoke.sh
 
-target-span-check: fmt-check check-target check-live-proto check-live check-server check-mac-kperf-parse test-target test-cli-target-lanes test-server-target-ingest test-mac-kperf-timebase check-cli docs frontend-check diff-check
+target-span-check: fmt-check check-target check-live-proto check-live check-server check-mac-kperf-parse test-target test-cli-target-lanes test-cli-compare-json test-server-target-ingest test-mac-kperf-timebase check-cli docs frontend-check diff-check
 
 install:
     cargo xtask install
@@ -114,3 +118,7 @@ archive-smoke:
     STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- flame --run 1 --threshold-pct 2 -d 4
     STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- diagnose --run 1
     STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- compare "$archive" "$archive"
+    compare_json="$(mktemp "${TMPDIR:-/tmp}/stax-compare.XXXXXX")"
+    STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- compare --json "$archive" "$archive" > "$compare_json"
+    ruby -rjson -e 'j=JSON.parse(File.read(ARGV[0])); abort "missing target delta" unless j.dig("metrics","target_time","delta_ns") == 0; abort "missing lanes" unless j.fetch("top_target_lanes").any?' "$compare_json"
+    rm -f "$compare_json"

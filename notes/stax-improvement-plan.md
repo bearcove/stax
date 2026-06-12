@@ -287,8 +287,9 @@ Status as of 2026-06-12:
   - `stax open <PATH>` loads that archive back into `stax-server`'s current
     query state.
   - `open` refuses to replace state while a recording is active.
-  - `stax compare <BASELINE> <CANDIDATE>` reads two archives directly and
-    prints regression-oriented deltas.
+- `stax compare <BASELINE> <CANDIDATE>` reads two archives directly and
+  prints regression-oriented deltas. `stax compare --json` emits the same
+  comparison as a facet-json report for CI and benchmark notes.
 - The archive is facet-json and versioned (`format_version = 2` for new
   saves). `stax open` and `stax compare` still read legacy v1 `archive.json`
   archives.
@@ -312,7 +313,6 @@ Status as of 2026-06-12:
   selecting that stopped run before querying.
 - Current deliberate non-goals:
   - no non-mutating per-RPC `RunId` query parameter yet
-  - no structured compare output yet
   - no single-file `.stax` packaging yet
   - no append-friendly event log or `blobs/` layout yet
   - annotate depends on saved/host-available bytes in the same way the live
@@ -338,6 +338,8 @@ Add commands along these lines:
   - implemented for typed directory archives
   - compares PET sample counts, on/off-CPU interval time, target time, target
     span counts, origin-link counts, ingest drops, and top target lanes
+  - done: `--json` produces named baseline/candidate/delta fields without
+    scraping the human table
 
 ### 4.2 Storage model
 
@@ -680,8 +682,9 @@ Tasks:
     formatting
   - done: focused Rust checks (`just check-target`, `just test-target`,
     `just check-cli`, `just test-cli-target-lanes`, `just check-live-proto`,
-    `just check-live`, `just check-server`, `just test-server-target-ingest`,
-    `just check-mac-kperf-parse`, `just test-mac-kperf-timebase`)
+    `just check-live`, `just check-server`, `just test-cli-compare-json`,
+    `just test-server-target-ingest`, `just check-mac-kperf-parse`,
+    `just test-mac-kperf-timebase`)
   - done: docs build (`just docs`)
   - done: frontend build/typecheck (`just frontend-check`)
   - done: aggregate focused target-span verification (`just target-span-check`)

@@ -178,18 +178,20 @@ a stopped in-memory run before querying it.
 Compare two saved run archives without touching `stax-server` state.
 
 ```text
-stax compare <BASELINE> <CANDIDATE>
+stax compare [OPTIONS] <BASELINE> <CANDIDATE>
 ```
 
-| arg           | type                | meaning                                               |
-|---------------|---------------------|-------------------------------------------------------|
-| `<BASELINE>`  | positional `String` | baseline archive directory, v2 manifest, or legacy v1 `archive.json` |
-| `<CANDIDATE>` | positional `String` | candidate archive directory, v2 manifest, or legacy v1 `archive.json` |
+| flag / arg    | type                | default | meaning                                               |
+|---------------|---------------------|---------|-------------------------------------------------------|
+| `--json`      | `bool`              | `false` | print a machine-readable facet-json report            |
+| `<BASELINE>`  | positional `String` | *(required)* | baseline archive directory, v2 manifest, or legacy v1 `archive.json` |
+| `<CANDIDATE>` | positional `String` | *(required)* | candidate archive directory, v2 manifest, or legacy v1 `archive.json` |
 
 The comparison reads the typed archive manifest/chunks directly and prints
 deltas for PET samples, on/off-CPU interval time, target time, target span
 counts, origin-link counts, ingest drops, and the top target lanes by
-duration.
+duration. `--json` emits the same comparison as named baseline/candidate/delta
+fields for CI and benchmark notes.
 
 ## `stax top`
 

@@ -5,6 +5,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::exit;
 
+use facet::Facet;
 use figue as args;
 use stax_core::args::{
     AnnotateArgs, ArchiveArgs, Cli, Command, CompareArgs, DiagnoseArgs, FlameArgs, RecordArgs,
@@ -766,10 +767,34 @@ fn run_compare(args: CompareArgs) -> Result<(), Box<dyn Error>> {
     let candidate = read_saved_archive(Path::new(&args.candidate))?;
     let baseline_stats = summarize_archive(&baseline);
     let candidate_stats = summarize_archive(&candidate);
+    let report = build_compare_report(&args, &baseline_stats, &candidate_stats);
 
+    if args.json {
+        let mut bytes = facet_json::to_vec_pretty(&report)
+            .map_err(|e| format!("serialize compare report: {e}"))?;
+        bytes.push(b'\n');
+        io::stdout().write_all(&bytes)?;
+        return Ok(());
+    }
+
+    print_compare_text(&report, &baseline_stats, &candidate_stats);
+    Ok(())
+}
+
+fn print_compare_text(
+    report: &CompareReport,
+    baseline_stats: &ArchiveCompareStats,
+    candidate_stats: &ArchiveCompareStats,
+) {
     println!("stax compare");
-    println!("baseline:  {}  ({})", baseline_stats.label, args.baseline);
-    println!("candidate: {}  ({})", candidate_stats.label, args.candidate);
+    println!(
+        "baseline:  {}  ({})",
+        report.baseline.label, report.baseline.path
+    );
+    println!(
+        "candidate: {}  ({})",
+        report.candidate.label, report.candidate.path
+    );
     println!();
     println!(
         "{:<28} {:>14} {:>14} {:>14}",
@@ -867,7 +892,164 @@ fn run_compare(args: CompareArgs) -> Result<(), Box<dyn Error>> {
             );
         }
     }
-    Ok(())
+}
+
+#[derive(Clone, Debug, Facet)]
+struct CompareReport {
+    baseline: CompareInputReport,
+    candidate: CompareInputReport,
+    metrics: CompareMetricsReport,
+    top_target_lanes: Vec<CompareLaneReport>,
+}
+
+#[derive(Clone, Debug, Facet)]
+struct CompareInputReport {
+    label: String,
+    path: String,
+}
+
+#[derive(Clone, Debug, Facet)]
+struct CompareMetricsReport {
+    pet_samples: CountDeltaReport,
+    on_cpu: DurationDeltaReport,
+    off_cpu: DurationDeltaReport,
+    target_time: DurationDeltaReport,
+    target_spans: CountDeltaReport,
+    target_lanes: CountDeltaReport,
+    spans_with_origin: CountDeltaReport,
+    linked_origins: CountDeltaReport,
+    unlinked_origins: CountDeltaReport,
+    missing_origins: CountDeltaReport,
+    bad_duration_drops: CountDeltaReport,
+    target_queue_drops: CountDeltaReport,
+    worker_disconnect_drops: CountDeltaReport,
+}
+
+#[derive(Clone, Debug, Facet)]
+struct CountDeltaReport {
+    baseline: u64,
+    candidate: u64,
+    delta: i64,
+}
+
+#[derive(Clone, Debug, Facet)]
+struct DurationDeltaReport {
+    baseline_ns: u64,
+    candidate_ns: u64,
+    delta_ns: i64,
+}
+
+#[derive(Clone, Debug, Facet)]
+struct CompareLaneReport {
+    name: String,
+    baseline_target_ns: u64,
+    baseline_target_spans: u64,
+    candidate_target_ns: u64,
+    candidate_target_spans: u64,
+    delta_target_ns: i64,
+    delta_target_spans: i64,
+}
+
+fn build_compare_report(
+    args: &CompareArgs,
+    baseline_stats: &ArchiveCompareStats,
+    candidate_stats: &ArchiveCompareStats,
+) -> CompareReport {
+    let top_target_lanes = compare_lanes(&baseline_stats.lanes, &candidate_stats.lanes)
+        .into_iter()
+        .take(10)
+        .map(|name| {
+            let baseline = baseline_stats.lanes.get(&name).copied().unwrap_or_default();
+            let candidate = candidate_stats
+                .lanes
+                .get(&name)
+                .copied()
+                .unwrap_or_default();
+            CompareLaneReport {
+                name,
+                baseline_target_ns: baseline.target_ns,
+                baseline_target_spans: baseline.target_spans,
+                candidate_target_ns: candidate.target_ns,
+                candidate_target_spans: candidate.target_spans,
+                delta_target_ns: delta_u64(candidate.target_ns, baseline.target_ns),
+                delta_target_spans: delta_u64(candidate.target_spans, baseline.target_spans),
+            }
+        })
+        .collect();
+
+    CompareReport {
+        baseline: CompareInputReport {
+            label: baseline_stats.label.clone(),
+            path: args.baseline.clone(),
+        },
+        candidate: CompareInputReport {
+            label: candidate_stats.label.clone(),
+            path: args.candidate.clone(),
+        },
+        metrics: CompareMetricsReport {
+            pet_samples: count_delta(baseline_stats.pet_samples, candidate_stats.pet_samples),
+            on_cpu: duration_delta(baseline_stats.on_cpu_ns, candidate_stats.on_cpu_ns),
+            off_cpu: duration_delta(baseline_stats.off_cpu_ns, candidate_stats.off_cpu_ns),
+            target_time: duration_delta(baseline_stats.target_ns, candidate_stats.target_ns),
+            target_spans: count_delta(baseline_stats.target_spans, candidate_stats.target_spans),
+            target_lanes: count_delta(baseline_stats.target_lanes, candidate_stats.target_lanes),
+            spans_with_origin: count_delta(
+                baseline_stats.spans_with_origin,
+                candidate_stats.spans_with_origin,
+            ),
+            linked_origins: count_delta(
+                baseline_stats.spans_linked_origin,
+                candidate_stats.spans_linked_origin,
+            ),
+            unlinked_origins: count_delta(
+                baseline_stats.spans_unlinked_origin,
+                candidate_stats.spans_unlinked_origin,
+            ),
+            missing_origins: count_delta(
+                baseline_stats.spans_missing_origin,
+                candidate_stats.spans_missing_origin,
+            ),
+            bad_duration_drops: count_delta(
+                baseline_stats.spans_dropped_bad_duration,
+                candidate_stats.spans_dropped_bad_duration,
+            ),
+            target_queue_drops: count_delta(
+                baseline_stats.spans_dropped_target_queue_full,
+                candidate_stats.spans_dropped_target_queue_full,
+            ),
+            worker_disconnect_drops: count_delta(
+                baseline_stats.spans_dropped_target_worker_disconnected,
+                candidate_stats.spans_dropped_target_worker_disconnected,
+            ),
+        },
+        top_target_lanes,
+    }
+}
+
+fn count_delta(baseline: u64, candidate: u64) -> CountDeltaReport {
+    CountDeltaReport {
+        baseline,
+        candidate,
+        delta: delta_u64(candidate, baseline),
+    }
+}
+
+fn duration_delta(baseline_ns: u64, candidate_ns: u64) -> DurationDeltaReport {
+    DurationDeltaReport {
+        baseline_ns,
+        candidate_ns,
+        delta_ns: delta_u64(candidate_ns, baseline_ns),
+    }
+}
+
+fn delta_u64(candidate: u64, baseline: u64) -> i64 {
+    if candidate >= baseline {
+        let delta = candidate - baseline;
+        delta.min(i64::MAX as u64) as i64
+    } else {
+        let delta = baseline - candidate;
+        -(delta.min(i64::MAX as u64) as i64)
+    }
 }
 
 const ARCHIVE_FORMAT_VERSION: u32 = 2;
@@ -1674,8 +1856,9 @@ mod tests {
     use super::{
         ARCHIVE_AGGREGATOR_FILE_NAME, ARCHIVE_BINARIES_FILE_NAME, ARCHIVE_FORMAT_VERSION,
         ARCHIVE_MANIFEST_FILE_NAME, ARCHIVE_TARGET_INGEST_FILE_NAME, ARCHIVE_V1_FILE_NAME,
-        ARCHIVE_V1_FORMAT_VERSION, SYNTH_TID_BASE, empty_view_hint, mentions_metal_cooperation,
-        read_saved_archive, summarize_archive, target_ingest_hints, thread_kind, write_threads,
+        ARCHIVE_V1_FORMAT_VERSION, SYNTH_TID_BASE, build_compare_report, empty_view_hint,
+        mentions_metal_cooperation, read_saved_archive, summarize_archive, target_ingest_hints,
+        thread_kind, write_threads,
     };
     use stax_live_proto::{
         OffCpuBreakdown, SavedAggregator, SavedBinaryRegistry, SavedInterval, SavedIntervalKind,
@@ -1988,6 +2171,61 @@ mod tests {
         assert_eq!(stats.spans_dropped_target_worker_disconnected, 4);
         assert_eq!(stats.lanes["GPU lane"].target_ns, 6_000);
         assert_eq!(stats.lanes["GPU lane"].target_spans, 3);
+    }
+
+    #[test]
+    fn compare_report_serializes_machine_readable_deltas() {
+        let mut baseline = super::ArchiveCompareStats {
+            label: "before".to_owned(),
+            pet_samples: 10,
+            target_ns: 1_000,
+            target_spans: 2,
+            target_lanes: 1,
+            spans_linked_origin: 1,
+            ..super::ArchiveCompareStats::default()
+        };
+        baseline.lanes.insert(
+            "GPU lane".to_owned(),
+            super::LaneCompareStats {
+                target_ns: 1_000,
+                target_spans: 2,
+            },
+        );
+        let mut candidate = super::ArchiveCompareStats {
+            label: "after".to_owned(),
+            pet_samples: 16,
+            target_ns: 1_750,
+            target_spans: 3,
+            target_lanes: 1,
+            spans_linked_origin: 3,
+            ..super::ArchiveCompareStats::default()
+        };
+        candidate.lanes.insert(
+            "GPU lane".to_owned(),
+            super::LaneCompareStats {
+                target_ns: 1_750,
+                target_spans: 3,
+            },
+        );
+        let args = super::CompareArgs {
+            json: true,
+            baseline: "/tmp/before.staxdir".to_owned(),
+            candidate: "/tmp/after.staxdir".to_owned(),
+        };
+
+        let report = build_compare_report(&args, &baseline, &candidate);
+
+        assert_eq!(report.baseline.label, "before");
+        assert_eq!(report.metrics.pet_samples.delta, 6);
+        assert_eq!(report.metrics.target_time.delta_ns, 750);
+        assert_eq!(report.metrics.linked_origins.delta, 2);
+        assert_eq!(report.top_target_lanes.len(), 1);
+        assert_eq!(report.top_target_lanes[0].delta_target_ns, 750);
+        let json = facet_json::to_vec_pretty(&report).expect("serialize compare report");
+        let json = String::from_utf8(json).expect("utf8 compare report");
+        assert!(json.contains("\"target_time\""));
+        assert!(json.contains("\"delta_ns\""));
+        assert!(json.contains("\"GPU lane\""));
     }
 
     #[test]
