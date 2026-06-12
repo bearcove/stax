@@ -268,6 +268,18 @@ stax flame --tid <cpu-tid> --threshold-pct 0
 waits, synthetic target lanes (`corpus executor`, `corpus gpu`,
 `corpus bad origins`), linked origins, and intentional bad-origin diagnostics.
 
+Routine verification recipes:
+
+```
+just check-target            # cargo check -p stax-target --all-targets
+just test-target             # nextest list/run for stax-target
+just check-cli               # cargo check -p stax --all-targets
+just test-cli-target-lanes   # stable CLI synthetic-lane regression
+just docs                    # ddc build
+just frontend-check          # pnpm typecheck + vite build
+just target-span-check       # all focused target-span checks above
+```
+
 If you need to abort:
 
 ```

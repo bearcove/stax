@@ -647,10 +647,12 @@ Tasks:
   - persistence/reopen semantics
   - diagnostics/hints
 - Add `just` recipes or documented commands for:
-  - focused Rust checks
-  - docs build
-  - frontend build
-  - blessed demo run
+  - done: focused Rust checks (`just check-target`, `just test-target`,
+    `just check-cli`, `just test-cli-target-lanes`)
+  - done: docs build (`just docs`)
+  - done: frontend build/typecheck (`just frontend-check`)
+  - done: aggregate focused target-span verification (`just target-span-check`)
+  - done: blessed demo run (`just demo-corpus`)
   - done: `just archive-smoke` for save/reopen/compare using the blessed
     target-span corpus
 
