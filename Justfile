@@ -92,6 +92,7 @@ archive-smoke:
     socket_dir="$(mktemp -d "${TMPDIR:-/tmp}/stax-server.XXXXXX")"
     socket="$socket_dir/server.sock"
     archive="$(mktemp -d "${TMPDIR:-/tmp}/stax-demo-corpus.XXXXXX")"
+    package="${archive}.stax"
     echo "archive: $archive"
     STAX_SERVER_SOCKET="$socket" STAX_SERVER_WS_BIND=127.0.0.1:0 cargo run -q -p stax-server &
     server_pid=$!
@@ -119,6 +120,8 @@ archive-smoke:
     test -f "$archive/binaries.json"
     test -f "$archive/target-ingest.json"
     test -f "$archive/events.jsonl"
+    STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- save "$package"
+    test -f "$package"
     STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- open "$archive"
     STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- list
     STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- select-run 1
@@ -126,7 +129,10 @@ archive-smoke:
     STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- top --run 1 -n 20 --sort self
     STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- flame --run 1 --threshold-pct 2 -d 4
     STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- diagnose --run 1
+    STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- open "$package"
+    STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- diagnose --run 1
     STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- compare "$archive" "$archive"
+    STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- compare "$archive" "$package"
     compare_json="$(mktemp "${TMPDIR:-/tmp}/stax-compare.XXXXXX")"
     STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- compare --json --fail-target-delta-ms 0 --fail-unlinked-origins-delta 0 "$archive" "$archive" > "$compare_json"
     ruby -rjson -e 'j=JSON.parse(File.read(ARGV[0])); abort "missing target delta" unless j.dig("metrics","target_time","delta_ns") == 0; abort "missing lanes" unless j.fetch("top_target_lanes").any?; abort "unexpected failures" unless j.fetch("threshold_failures").empty?' "$compare_json"

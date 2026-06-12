@@ -29,10 +29,10 @@ use stax_live_proto::{
     NeighborsUpdate, PetSampleListUpdate, Profiler, ProfilerDispatcher, RunConfig, RunControl,
     RunControlDispatcher, RunControlError, RunId, RunState, RunSummary, RunViewParams,
     SavedAggregator, SavedBinaryRegistry, SavedEventLogEntry, SavedRunArchive,
-    SavedRunArchiveFiles, SavedRunArchiveManifest, SavedRunArchiveProvenance, ServerStatus,
-    StopReason, TargetIngestDiagnostics, TargetIngestDispatcher, TargetSpanListUpdate,
-    ThreadsUpdate, TimelineParams, TimelineUpdate, TopEntry, TopSort, TopUpdate, ViewParams,
-    WaitCondition, WaitOutcome, WakersUpdate,
+    SavedRunArchiveBundle, SavedRunArchiveFiles, SavedRunArchiveManifest,
+    SavedRunArchiveProvenance, ServerStatus, StopReason, TargetIngestDiagnostics,
+    TargetIngestDispatcher, TargetSpanListUpdate, ThreadsUpdate, TimelineParams, TimelineUpdate,
+    TopEntry, TopSort, TopUpdate, ViewParams, WaitCondition, WaitOutcome, WakersUpdate,
 };
 
 use crate::target_ingest::{TargetIngestService, TargetLaneRegistry};
@@ -49,6 +49,7 @@ const ARCHIVE_AGGREGATOR_FILE_NAME: &str = "aggregator.json";
 const ARCHIVE_BINARIES_FILE_NAME: &str = "binaries.json";
 const ARCHIVE_TARGET_INGEST_FILE_NAME: &str = "target-ingest.json";
 const ARCHIVE_EVENTS_FILE_NAME: &str = "events.jsonl";
+const ARCHIVE_SINGLE_FILE_EXTENSION: &str = "stax";
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
@@ -1162,6 +1163,13 @@ impl RunControl for ServerState {
 }
 
 fn write_archive(path: &Path, archive: &SavedRunArchive) -> Result<(), String> {
+    if is_single_file_archive_path(path) {
+        return write_archive_bundle(path, archive);
+    }
+    write_archive_directory(path, archive)
+}
+
+fn write_archive_directory(path: &Path, archive: &SavedRunArchive) -> Result<(), String> {
     if path.exists() && !path.is_dir() {
         return Err(format!(
             "archive path {} exists and is not a directory",
@@ -1191,6 +1199,28 @@ fn write_archive(path: &Path, archive: &SavedRunArchive) -> Result<(), String> {
     write_event_log(path.join(ARCHIVE_EVENTS_FILE_NAME), archive)
 }
 
+fn write_archive_bundle(path: &Path, archive: &SavedRunArchive) -> Result<(), String> {
+    if path.exists() && path.is_dir() {
+        return Err(format!(
+            "archive package path {} exists and is a directory",
+            path.display()
+        ));
+    }
+    let bundle = SavedRunArchiveBundle {
+        format_version: archive.format_version,
+        saved_at_unix_ns: archive.saved_at_unix_ns,
+        provenance: archive_provenance(),
+        runs: archive.runs.clone(),
+        aggregator: archive.aggregator.clone(),
+        binaries: archive.binaries.clone(),
+        target_ingest: archive.target_ingest.clone(),
+        events: archive_event_log_entries(archive),
+    };
+    let bytes = facet_json::to_vec_pretty(&bundle)
+        .map_err(|e| format!("serialize {}: {e}", path.display()))?;
+    fs::write(path, bytes).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
 fn archive_provenance() -> SavedRunArchiveProvenance {
     SavedRunArchiveProvenance {
         producer: env!("CARGO_PKG_NAME").to_owned(),
@@ -1209,7 +1239,9 @@ fn read_archive(path: &Path) -> Result<SavedRunArchive, String> {
         return read_archive_v1(&path.join(ARCHIVE_V1_FILE_NAME));
     }
 
-    if path
+    if is_single_file_archive_path(path) {
+        read_archive_bundle(path)
+    } else if path
         .file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name == ARCHIVE_MANIFEST_FILE_NAME)
@@ -1261,54 +1293,47 @@ fn write_target_ingest(path: PathBuf, value: &TargetIngestDiagnostics) -> Result
 fn write_event_log(path: PathBuf, archive: &SavedRunArchive) -> Result<(), String> {
     let file = fs::File::create(&path).map_err(|e| format!("create {}: {e}", path.display()))?;
     let mut writer = BufWriter::new(file);
-    write_event_log_entry(
-        &mut writer,
-        &path,
-        SavedEventLogEntry::ArchiveSaved {
-            saved_at_unix_ns: archive.saved_at_unix_ns,
-        },
-    )?;
-    for run in &archive.runs {
-        write_event_log_entry(
-            &mut writer,
-            &path,
-            SavedEventLogEntry::RunSummary { run: run.clone() },
-        )?;
+    for entry in archive_event_log_entries(archive) {
+        write_event_log_entry(&mut writer, &path, entry)?;
     }
-    write_event_log_entry(
-        &mut writer,
-        &path,
-        SavedEventLogEntry::AggregatorClock {
-            session_start_ns: archive.aggregator.session_start_ns,
-            last_event_ns: archive.aggregator.last_event_ns,
-        },
-    )?;
-    for thread_name in &archive.aggregator.thread_names {
-        write_event_log_entry(
-            &mut writer,
-            &path,
-            SavedEventLogEntry::ThreadName {
-                tid: thread_name.tid,
-                name: thread_name.name.clone(),
-            },
-        )?;
-    }
-    for binary in &archive.binaries.binaries {
-        write_event_log_entry(
-            &mut writer,
-            &path,
-            SavedEventLogEntry::BinaryLoaded {
-                binary: binary.clone(),
-            },
-        )?;
-    }
-    write_event_log_entry(
-        &mut writer,
-        &path,
-        SavedEventLogEntry::TargetIngestDiagnostics {
-            diagnostics: archive.target_ingest.clone(),
-        },
-    )?;
+    writer
+        .flush()
+        .map_err(|e| format!("flush {}: {e}", path.display()))
+}
+
+fn archive_event_log_entries(archive: &SavedRunArchive) -> Vec<SavedEventLogEntry> {
+    let mut entries = Vec::new();
+    entries.push(SavedEventLogEntry::ArchiveSaved {
+        saved_at_unix_ns: archive.saved_at_unix_ns,
+    });
+    entries.extend(
+        archive
+            .runs
+            .iter()
+            .cloned()
+            .map(|run| SavedEventLogEntry::RunSummary { run }),
+    );
+    entries.push(SavedEventLogEntry::AggregatorClock {
+        session_start_ns: archive.aggregator.session_start_ns,
+        last_event_ns: archive.aggregator.last_event_ns,
+    });
+    entries.extend(archive.aggregator.thread_names.iter().map(|thread_name| {
+        SavedEventLogEntry::ThreadName {
+            tid: thread_name.tid,
+            name: thread_name.name.clone(),
+        }
+    }));
+    entries.extend(
+        archive
+            .binaries
+            .binaries
+            .iter()
+            .cloned()
+            .map(|binary| SavedEventLogEntry::BinaryLoaded { binary }),
+    );
+    entries.push(SavedEventLogEntry::TargetIngestDiagnostics {
+        diagnostics: archive.target_ingest.clone(),
+    });
 
     let mut timed = Vec::new();
     for thread in &archive.aggregator.threads {
@@ -1347,12 +1372,8 @@ fn write_event_log(path: PathBuf, archive: &SavedRunArchive) -> Result<(), Strin
         }
     }
     timed.sort_by_key(|(timestamp_ns, order, tid, _)| (*timestamp_ns, *order, *tid));
-    for (_, _, _, entry) in timed {
-        write_event_log_entry(&mut writer, &path, entry)?;
-    }
-    writer
-        .flush()
-        .map_err(|e| format!("flush {}: {e}", path.display()))
+    entries.extend(timed.into_iter().map(|(_, _, _, entry)| entry));
+    entries
 }
 
 fn write_event_log_entry(
@@ -1374,6 +1395,21 @@ fn read_archive_v1(archive_path: &Path) -> Result<SavedRunArchive, String> {
     let bytes =
         fs::read(&archive_path).map_err(|e| format!("read {}: {e}", archive_path.display()))?;
     facet_json::from_slice(&bytes).map_err(|e| format!("parse {}: {e}", archive_path.display()))
+}
+
+fn read_archive_bundle(bundle_path: &Path) -> Result<SavedRunArchive, String> {
+    let bytes =
+        fs::read(bundle_path).map_err(|e| format!("read {}: {e}", bundle_path.display()))?;
+    let bundle: SavedRunArchiveBundle = facet_json::from_slice(&bytes)
+        .map_err(|e| format!("parse {}: {e}", bundle_path.display()))?;
+    Ok(SavedRunArchive {
+        format_version: bundle.format_version,
+        saved_at_unix_ns: bundle.saved_at_unix_ns,
+        runs: bundle.runs,
+        aggregator: bundle.aggregator,
+        binaries: bundle.binaries,
+        target_ingest: bundle.target_ingest,
+    })
 }
 
 fn read_archive_manifest(manifest_path: &Path) -> Result<SavedRunArchive, String> {
@@ -1447,6 +1483,12 @@ fn archive_member_path(base: &Path, member: &str) -> Result<PathBuf, String> {
 
 fn is_supported_archive_version(version: u32) -> bool {
     matches!(version, ARCHIVE_V1_FORMAT_VERSION | ARCHIVE_FORMAT_VERSION)
+}
+
+fn is_single_file_archive_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension == ARCHIVE_SINGLE_FILE_EXTENSION)
 }
 
 fn init_logging() {
@@ -1584,6 +1626,32 @@ mod tests {
                         && interval.end_ns == 16_000_000
             )
         }));
+        let package_path = archive_dir.with_extension(ARCHIVE_SINGLE_FILE_EXTENSION);
+        let _ = std::fs::remove_file(&package_path);
+        server
+            .save_current_archive(package_path.clone())
+            .expect("save single-file archive");
+        assert!(package_path.is_file());
+        let bundle_bytes = std::fs::read(&package_path).expect("read bundle");
+        let bundle: SavedRunArchiveBundle =
+            facet_json::from_slice(&bundle_bytes).expect("parse bundle");
+        assert_eq!(bundle.format_version, ARCHIVE_FORMAT_VERSION);
+        assert_eq!(bundle.provenance.producer, env!("CARGO_PKG_NAME"));
+        assert!(bundle.events.iter().any(|entry| {
+            matches!(
+                entry,
+                SavedEventLogEntry::Interval { tid, interval }
+                    if *tid == SYNTH_TID_BASE
+                        && interval.start_ns == 10_000_000
+                        && interval.end_ns == 16_000_000
+            )
+        }));
+        let bundle_archive = read_archive(&package_path).expect("read single-file archive");
+        assert_eq!(bundle_archive.format_version, ARCHIVE_FORMAT_VERSION);
+        assert_eq!(
+            bundle_archive.runs.last().map(|run| run.label.as_str()),
+            Some("archive-source")
+        );
         let manifest_bytes =
             std::fs::read(archive_dir.join(ARCHIVE_MANIFEST_FILE_NAME)).expect("read manifest");
         let manifest: SavedRunArchiveManifest =
@@ -1680,6 +1748,7 @@ mod tests {
         assert_eq!(diagnostics.lanes[0].name, "GPU archive");
 
         let _ = std::fs::remove_dir_all(&archive_dir);
+        let _ = std::fs::remove_file(&package_path);
     }
 
     #[tokio::test]

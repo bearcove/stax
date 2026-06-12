@@ -411,31 +411,33 @@ Exits non-zero if there's no active run.
 
 ### `stax save <PATH>`
 
-Write the current or most recent queryable run to a directory archive. The
-current archive format is v2: `manifest.json` plus typed facet-json chunks
+Write the current or most recent queryable run to an archive. Paths ending in
+`.stax` create a single-file facet-json package. Other paths create the v2
+directory layout: `manifest.json` plus typed facet-json chunks
 (`aggregator.json`, `binaries.json`, and `target-ingest.json`) plus an
-append-friendly `events.jsonl` sidecar. The manifest records archive version,
-save time, producer/version, OS/arch, run summaries, and archive-relative chunk
-filenames. The chunks store raw aggregator streams, binary/symbol metadata, and
-target-ingest diagnostics; `events.jsonl` serializes typed event records
-(`SavedEventLogEntry`) for future replay/import tooling. It is meant for bug
-reports, handoff, and replaying `threads`/`top`/`flame` after the live process
-is gone.
+append-friendly `events.jsonl` sidecar. The manifest/package records archive
+version, save time, producer/version, OS/arch, and run summaries. The chunks
+or package store raw aggregator streams, binary/symbol metadata, target-ingest
+diagnostics, and typed event records (`SavedEventLogEntry`) for future
+replay/import tooling. It is meant for bug reports, handoff, and replaying
+`threads`/`top`/`flame` after the live process is gone.
 
 ```
 $ stax save /tmp/stax-demo.staxdir
 saved: /tmp/stax-demo.staxdir
+$ stax save /tmp/stax-demo.stax
+saved: /tmp/stax-demo.stax
 ```
 
 `stax save` needs some queryable run state. It works while a run is active,
 and after `stax stop`, until the next recording resets the live aggregator.
 Archive compatibility is strict in the current format: `stax open` and
-`stax compare` accept v2 manifest archives and legacy v1 `archive.json`
-archives, and reject other versions loudly.
+`stax compare` accept v2 directory archives, `.stax` packages, and legacy v1
+`archive.json` archives, and reject other versions loudly.
 
 ### `stax open <PATH>`
 
-Load a saved directory archive into `stax-server`'s current query state.
+Load a saved archive into `stax-server`'s current query state.
 After opening, the usual views operate on the restored run:
 
 ```
@@ -447,8 +449,8 @@ $ stax flame --threshold-pct 0
 ```
 
 `stax open` refuses to replace state while a recording is active. Stop the
-run first. It accepts the archive directory, the v2 `manifest.json` file, or
-a legacy v1 `archive.json` file.
+run first. It accepts an archive directory, a `.stax` package, the v2
+`manifest.json` file, or a legacy v1 `archive.json` file.
 
 ### `stax select-run <RUN_ID>`
 
@@ -490,9 +492,10 @@ Compare two saved archives without touching `stax-server` state.
 $ stax compare /tmp/before.staxdir /tmp/after.staxdir
 ```
 
-It reads each archive's typed manifest/chunks directly and prints deltas for
-PET samples, on/off-CPU interval time, target time, target span counts,
-origin-link counts, ingest drops, and the top target lanes by duration.
+It reads each archive directly (directory, `.stax` package, v2 manifest path,
+or legacy v1 `archive.json`) and prints deltas for PET samples, on/off-CPU
+interval time, target time, target span counts, origin-link counts, ingest
+drops, and the top target lanes by duration.
 Pass `--json` for a facet-json report with named baseline/candidate/delta
 fields for each metric and target-lane delta; use that in CI or benchmark
 notes instead of scraping the human table. CI can fail the command directly
@@ -514,11 +517,11 @@ just archive-smoke
 ```
 
 That starts a checkout-local `stax-server` on a temporary socket, records
-`stax-target/examples/corpus.rs` with the checkout CLI, saves it to a
-temporary archive directory, reopens it, exercises `stax select-run` plus the
-non-mutating per-command `--run` path, queries
-`threads`/`top`/`flame`/`diagnose`, and runs both `stax compare` and
-`stax compare --json` against the archive itself.
+`stax-target/examples/corpus.rs` with the checkout CLI, saves it to both a
+temporary archive directory and a `.stax` package, reopens both forms,
+exercises `stax select-run` plus the non-mutating per-command `--run` path,
+queries `threads`/`top`/`flame`/`diagnose`, and runs `stax compare` across
+directory/package inputs plus `stax compare --json` against the archive itself.
 
 For the browser surface, use the checkout-local web target smoke:
 

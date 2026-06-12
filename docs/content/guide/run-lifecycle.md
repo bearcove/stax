@@ -148,30 +148,31 @@ discard its data — the aggregator stays queryable until the next recording
 
 ## stax save
 
-Write the current or most recent queryable run to a directory archive.
+Write the current or most recent queryable run to an archive.
 
 ```bash
 stax save /tmp/stax-demo.staxdir
+stax save /tmp/stax-demo.stax
 ```
 
-The current archive format is v2: `manifest.json` plus typed facet-json
-chunks (`aggregator.json`, `binaries.json`, and `target-ingest.json`) plus an
-append-friendly `events.jsonl` sidecar. The manifest records archive version,
-save time, producer/version, OS/arch, run summaries, and archive-relative chunk
-filenames. The chunks store raw aggregator streams, binary/symbol metadata, and
-target-ingest diagnostics; `events.jsonl` serializes typed `SavedEventLogEntry`
-records for future replay/import tooling. The archive preserves target spans
-and origin-linked stacks for later `threads`, `top`, `flame`, and `diagnose`
-queries.
+Paths ending in `.stax` create a single-file facet-json package. Other paths
+create the v2 directory layout: `manifest.json` plus typed facet-json chunks
+(`aggregator.json`, `binaries.json`, and `target-ingest.json`) plus an
+append-friendly `events.jsonl` sidecar. The manifest/package records archive
+version, save time, producer/version, OS/arch, and run summaries. The chunks
+or package store raw aggregator streams, binary/symbol metadata, target-ingest
+diagnostics, and typed `SavedEventLogEntry` records for future replay/import
+tooling. The archive preserves target spans and origin-linked stacks for later
+`threads`, `top`, `flame`, and `diagnose` queries.
 
 `stax save` works while a run is active, and after `stax stop`, until the
 next `stax record` resets the live aggregator.
 
 Archive compatibility is strict in the current format: `stax open` and
-`stax compare` accept v2 manifest archives and legacy v1 `archive.json`
-archives, and reject other versions loudly. Treat saved archives as
-developer/regression artifacts for the matching stax format until a migration
-policy or stable package format lands.
+`stax compare` accept v2 directory archives, `.stax` packages, and legacy v1
+`archive.json` archives, and reject other versions loudly. Treat saved
+archives as developer/regression artifacts for the matching stax format until
+a migration policy lands.
 
 ## stax open
 
@@ -184,9 +185,10 @@ stax top -n 20
 stax flame --threshold-pct 0
 ```
 
-`stax open` accepts the archive directory, the v2 `manifest.json` inside it,
-or a legacy v1 `archive.json`. It refuses to replace state while a recording
-is active; stop the active run first.
+`stax open` accepts an archive directory, a `.stax` package, the v2
+`manifest.json` inside a directory archive, or a legacy v1 `archive.json`. It
+refuses to replace state while a recording is active; stop the active run
+first.
 
 ## stax select-run
 
@@ -223,11 +225,12 @@ stax compare \
   /tmp/before.staxdir /tmp/after.staxdir
 ```
 
-The command reads each archive's typed manifest/chunks directly and prints
-deltas for PET samples, on/off-CPU interval time, target time, target span
-counts, origin-link counts, ingest drops, and the top target lanes by
-duration. The default is a human table; `--json` prints a facet-json report
-with named baseline/candidate/delta fields for scripts and benchmark notes.
+The command reads each archive directly (directory, `.stax` package, v2
+manifest path, or legacy v1 `archive.json`) and prints deltas for PET samples,
+on/off-CPU interval time, target time, target span counts, origin-link counts,
+ingest drops, and the top target lanes by duration. The default is a human
+table; `--json` prints a facet-json report with named baseline/candidate/delta
+fields for scripts and benchmark notes.
 Threshold flags make the command fail directly when a candidate regresses
 past your limit, and JSON output includes the same decision in
 `threshold_failures`.
@@ -244,10 +247,10 @@ just archive-smoke
 
 That recipe starts a checkout-local `stax-server` on a temporary socket,
 records `stax-target/examples/corpus.rs` with the checkout CLI, saves the run
-to a temporary archive directory, reopens it, exercises `stax select-run` and
-non-mutating per-command `--run`, queries the restored run through
-`threads`/`top`/`flame`/`diagnose`, and runs text plus JSON `stax compare`
-against itself.
+to both a temporary archive directory and a `.stax` package, reopens both
+forms, exercises `stax select-run` and non-mutating per-command `--run`,
+queries the restored run through `threads`/`top`/`flame`/`diagnose`, and runs
+text plus JSON `stax compare` across the saved artifacts.
 
 The focused target-span workflow runs the static verifier on normal PRs. The
 archive and web smokes are available as manual `workflow_dispatch` checks in

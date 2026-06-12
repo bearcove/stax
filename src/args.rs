@@ -50,12 +50,13 @@ pub enum Command {
     /// Ask stax-server to stop the active run cleanly.
     Stop,
 
-    /// Save the current or most recent queryable run to a v2 directory archive
-    /// with aggregate chunks and an events.jsonl replay sidecar.
-    Save(ArchiveArgs),
+    /// Save the current or most recent queryable run to a v2 archive.
+    /// Paths ending in .stax create a single-file package; other paths create
+    /// a directory with aggregate chunks and an events.jsonl replay sidecar.
+    Save(SaveArgs),
 
     /// Open a saved run archive into stax-server's query state.
-    Open(ArchiveArgs),
+    Open(OpenArgs),
 
     /// Restore a stopped in-memory run into stax-server's query state.
     SelectRun(SelectRunArgs),
@@ -80,8 +81,15 @@ pub enum Command {
 }
 
 #[derive(Facet, Debug)]
-pub struct ArchiveArgs {
-    /// Archive directory, v2 manifest.json, or legacy v1 archive.json file.
+pub struct SaveArgs {
+    /// Directory archive to create, or .stax package file to write.
+    #[facet(args::positional)]
+    pub path: String,
+}
+
+#[derive(Facet, Debug)]
+pub struct OpenArgs {
+    /// Archive directory, .stax package, v2 manifest.json, or legacy v1 archive.json file.
     #[facet(args::positional)]
     pub path: String,
 }
@@ -129,11 +137,11 @@ pub struct CompareArgs {
     #[facet(args::named, default)]
     pub fail_worker_disconnect_drops_delta: Option<u64>,
 
-    /// Baseline archive directory, v2 manifest.json, or legacy v1 archive.json.
+    /// Baseline archive directory, .stax package, v2 manifest.json, or legacy v1 archive.json.
     #[facet(args::positional)]
     pub baseline: String,
 
-    /// Candidate archive directory, v2 manifest.json, or legacy v1 archive.json.
+    /// Candidate archive directory, .stax package, v2 manifest.json, or legacy v1 archive.json.
     #[facet(args::positional)]
     pub candidate: String,
 }

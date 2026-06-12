@@ -8,8 +8,8 @@ use std::process::exit;
 use facet::Facet;
 use figue as args;
 use stax_core::args::{
-    AnnotateArgs, ArchiveArgs, Cli, Command, CompareArgs, DiagnoseArgs, FlameArgs, RecordArgs,
-    ThreadsArgs, TopArgs, WaitArgs,
+    AnnotateArgs, Cli, Command, CompareArgs, DiagnoseArgs, FlameArgs, OpenArgs, RecordArgs,
+    SaveArgs, ThreadsArgs, TopArgs, WaitArgs,
 };
 #[cfg(target_os = "linux")]
 use stax_core::cmd_setup_linux;
@@ -18,8 +18,9 @@ use stax_core::cmd_setup_mac;
 use stax_live_proto::{
     DiagnosticsSnapshot, FlameNode, FlamegraphUpdate, LiveFilter, OffCpuBreakdown, ProfilerClient,
     RunControlClient, RunId, RunSummary, RunViewParams, SavedIntervalKind, SavedRunArchive,
-    SavedRunArchiveManifest, ServerStatus, StopReason, TargetIngestDiagnostics, ThreadsUpdate,
-    TopEntry, TopSort, TopUpdate, ViewParams, WaitCondition, WaitOutcome,
+    SavedRunArchiveBundle, SavedRunArchiveManifest, ServerStatus, StopReason,
+    TargetIngestDiagnostics, ThreadsUpdate, TopEntry, TopSort, TopUpdate, ViewParams,
+    WaitCondition, WaitOutcome,
 };
 
 #[cfg(target_os = "macos")]
@@ -711,7 +712,7 @@ async fn run_stop() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn run_save(args: ArchiveArgs) -> Result<(), Box<dyn Error>> {
+async fn run_save(args: SaveArgs) -> Result<(), Box<dyn Error>> {
     let url = require_server_socket()?;
     let client: RunControlClient = vox::connect(&url).await?;
     let _debug_registration = register_run_control_client("save", &client);
@@ -723,7 +724,7 @@ async fn run_save(args: ArchiveArgs) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn run_open(args: ArchiveArgs) -> Result<(), Box<dyn Error>> {
+async fn run_open(args: OpenArgs) -> Result<(), Box<dyn Error>> {
     let url = require_server_socket()?;
     let client: RunControlClient = vox::connect(&url).await?;
     let _debug_registration = register_run_control_client("open", &client);
@@ -1256,6 +1257,7 @@ const ARCHIVE_FORMAT_VERSION: u32 = 2;
 const ARCHIVE_V1_FORMAT_VERSION: u32 = 1;
 const ARCHIVE_V1_FILE_NAME: &str = "archive.json";
 const ARCHIVE_MANIFEST_FILE_NAME: &str = "manifest.json";
+const ARCHIVE_SINGLE_FILE_EXTENSION: &str = "stax";
 #[cfg(test)]
 const ARCHIVE_AGGREGATOR_FILE_NAME: &str = "aggregator.json";
 #[cfg(test)]
@@ -1271,6 +1273,8 @@ fn read_saved_archive(path: &Path) -> Result<SavedRunArchive, Box<dyn Error>> {
         } else {
             read_saved_archive_v1(&path.join(ARCHIVE_V1_FILE_NAME))?
         }
+    } else if is_single_file_archive_path(path) {
+        read_saved_archive_bundle(path)?
     } else if path
         .file_name()
         .and_then(|name| name.to_str())
@@ -1298,6 +1302,21 @@ fn read_saved_archive_v1(archive_path: &Path) -> Result<SavedRunArchive, Box<dyn
         .map_err(|e| format!("read {}: {e}", archive_path.display()))?;
     facet_json::from_slice(&bytes)
         .map_err(|e| format!("parse {}: {e}", archive_path.display()).into())
+}
+
+fn read_saved_archive_bundle(bundle_path: &Path) -> Result<SavedRunArchive, Box<dyn Error>> {
+    let bytes =
+        std::fs::read(bundle_path).map_err(|e| format!("read {}: {e}", bundle_path.display()))?;
+    let bundle: SavedRunArchiveBundle = facet_json::from_slice(&bytes)
+        .map_err(|e| format!("parse {}: {e}", bundle_path.display()))?;
+    Ok(SavedRunArchive {
+        format_version: bundle.format_version,
+        saved_at_unix_ns: bundle.saved_at_unix_ns,
+        runs: bundle.runs,
+        aggregator: bundle.aggregator,
+        binaries: bundle.binaries,
+        target_ingest: bundle.target_ingest,
+    })
 }
 
 fn read_saved_archive_manifest(manifest_path: &Path) -> Result<SavedRunArchive, Box<dyn Error>> {
@@ -1359,6 +1378,12 @@ fn archive_member_path(base: &Path, member: &str) -> Result<PathBuf, Box<dyn Err
 
 fn is_supported_archive_version(version: u32) -> bool {
     matches!(version, ARCHIVE_V1_FORMAT_VERSION | ARCHIVE_FORMAT_VERSION)
+}
+
+fn is_single_file_archive_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension == ARCHIVE_SINGLE_FILE_EXTENSION)
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -2036,16 +2061,16 @@ fn mentions_metal_cooperation(function_name: Option<&str>, binary: Option<&str>)
 mod tests {
     use super::{
         ARCHIVE_AGGREGATOR_FILE_NAME, ARCHIVE_BINARIES_FILE_NAME, ARCHIVE_FORMAT_VERSION,
-        ARCHIVE_MANIFEST_FILE_NAME, ARCHIVE_TARGET_INGEST_FILE_NAME, ARCHIVE_V1_FILE_NAME,
-        ARCHIVE_V1_FORMAT_VERSION, SYNTH_TID_BASE, build_compare_report, empty_view_hint,
-        mentions_metal_cooperation, read_saved_archive, summarize_archive, target_ingest_hints,
-        thread_kind, write_threads,
+        ARCHIVE_MANIFEST_FILE_NAME, ARCHIVE_SINGLE_FILE_EXTENSION, ARCHIVE_TARGET_INGEST_FILE_NAME,
+        ARCHIVE_V1_FILE_NAME, ARCHIVE_V1_FORMAT_VERSION, SYNTH_TID_BASE, build_compare_report,
+        empty_view_hint, mentions_metal_cooperation, read_saved_archive, summarize_archive,
+        target_ingest_hints, thread_kind, write_threads,
     };
     use stax_live_proto::{
         OffCpuBreakdown, SavedAggregator, SavedBinaryRegistry, SavedInterval, SavedIntervalKind,
-        SavedPetSample, SavedPmuSample, SavedRunArchive, SavedRunArchiveFiles,
-        SavedRunArchiveManifest, SavedRunArchiveProvenance, SavedThread, SavedThreadName,
-        TargetIngestDiagnostics, ThreadInfo, ThreadsUpdate,
+        SavedPetSample, SavedPmuSample, SavedRunArchive, SavedRunArchiveBundle,
+        SavedRunArchiveFiles, SavedRunArchiveManifest, SavedRunArchiveProvenance, SavedThread,
+        SavedThreadName, TargetIngestDiagnostics, ThreadInfo, ThreadsUpdate,
     };
 
     #[test]
@@ -2515,6 +2540,31 @@ mod tests {
         assert_eq!(from_manifest.saved_at_unix_ns, 123);
 
         let _ = std::fs::remove_dir_all(&archive_dir);
+    }
+
+    #[test]
+    fn read_saved_archive_accepts_single_file_package() {
+        let package_path =
+            temp_archive_dir("cli-package").with_extension(ARCHIVE_SINGLE_FILE_EXTENSION);
+        let _ = std::fs::remove_file(&package_path);
+
+        let bundle = SavedRunArchiveBundle {
+            format_version: ARCHIVE_FORMAT_VERSION,
+            saved_at_unix_ns: 789,
+            provenance: test_provenance(),
+            runs: Vec::new(),
+            aggregator: SavedAggregator::default(),
+            binaries: SavedBinaryRegistry::default(),
+            target_ingest: TargetIngestDiagnostics::default(),
+            events: Vec::new(),
+        };
+        write_test_json(&package_path, &bundle);
+
+        let from_package = read_saved_archive(&package_path).expect("read package archive");
+        assert_eq!(from_package.format_version, ARCHIVE_FORMAT_VERSION);
+        assert_eq!(from_package.saved_at_unix_ns, 789);
+
+        let _ = std::fs::remove_file(&package_path);
     }
 
     #[test]

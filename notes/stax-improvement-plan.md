@@ -283,6 +283,8 @@ Status as of 2026-06-12:
     plus typed chunks: `aggregator.json`, `binaries.json`, and
     `target-ingest.json`, plus an append-friendly typed `events.jsonl`
     sidecar.
+  - `stax save <PATH>.stax` writes the same saved run as a single-file
+    facet-json package containing aggregate chunks and event records.
   - `manifest.json` records archive version, save time, producer/version,
     OS/arch, run summaries, and archive-relative chunk filenames.
   - `stax open <PATH>` loads that archive back into `stax-server`'s current
@@ -310,15 +312,14 @@ Status as of 2026-06-12:
 - Reopened archives are queryable through the normal `threads`, `top`,
   `flame`, and `diagnose` surfaces.
 - Archive compatibility is strict for now: `stax open` and `stax compare`
-  accept v2 manifest archives and legacy v1 `archive.json` archives, and
-  reject other versions loudly.
+  accept v2 directory archives, `.stax` packages, and legacy v1
+  `archive.json` archives, and reject other versions loudly.
 - Stopped/opened runs now keep an in-memory query snapshot while
   `stax-server` stays alive. `stax select-run <ID>` restores one stopped run
   from `stax list` into the current query state. `top`, `flame`, `threads`,
   `annotate`, and `diagnose` accept `--run <ID>` as a non-mutating one-off
   query against stopped in-memory history.
 - Current deliberate non-goals:
-  - no single-file `.stax` packaging yet
   - no `blobs/` layout yet
   - `events.jsonl` is emitted as a sidecar but does not replace the aggregate
     chunks as the `open` source of truth yet
@@ -335,6 +336,8 @@ Add commands along these lines:
   - implemented as a v2 directory archive containing `manifest.json`,
     `aggregator.json`, `binaries.json`, `target-ingest.json`, and
     `events.jsonl`
+  - done: paths ending in `.stax` create a single-file package instead of a
+    directory
 - `stax open <PATH>`
   - loads a saved run into a queryable local server state
   - implemented by replacing the current server query state; active recordings
@@ -343,7 +346,7 @@ Add commands along these lines:
   - optional after the internal format exists
   - not a substitute for native persisted runs
 - `stax compare <A> <B>`
-  - implemented for typed directory archives
+  - implemented for typed directory archives and `.stax` packages
   - compares PET sample counts, on/off-CPU interval time, target time, target
     span counts, origin-link counts, ingest drops, and top target lanes
   - done: `--json` produces named baseline/candidate/delta fields without
@@ -393,7 +396,8 @@ Implementation direction:
   - done: `events.jsonl` sidecar
   - `symbols`
   - `blobs/`
-- A single-file `.stax` archive can come after the schema is proven.
+- Done: a single-file `.stax` package wraps the current schema without adding
+  compression/container dependencies.
 - Keep run persistence orthogonal to live recording. The live aggregator should
   remain fast and simple.
 
@@ -423,7 +427,7 @@ Acceptance criteria:
   - `stax annotate` where code bytes/symbols are available
 - Saved runs preserve target spans and origin-linked flame paths.
 - The archive format has a version and clear compatibility story.
-- Bug reports can attach one file or one directory.
+- Done: bug reports can attach one `.stax` file or one `.staxdir` directory.
 - Before/after notes can use `stax compare` without mutating live server state.
 
 Verification:
@@ -786,6 +790,8 @@ Done when:
 10. Done: normalize macOS kdebug mach tick timestamps to nanoseconds at the
     parser pipeline boundary, so `stax-target` origin timestamps and PET
     sample timestamps share one clock domain on Intel and Apple Silicon Macs.
+11. Done: add single-file `.stax` packages for save/open/compare without
+    introducing a new compression/container dependency.
 
 Done when:
 
@@ -802,8 +808,8 @@ Deferred:
 - `just archive-smoke` / `just web-target-smoke` are wired as manual
   `workflow_dispatch` checks; making them required by default waits until the
   runner contract for local stax server/browser/profiling access is settled.
-- `blobs/`, event-log-driven `open`, and single-file packaging remain future
-  work after the v2 aggregate chunk layout.
+- `blobs/` and event-log-driven `open` remain future work after the v2
+  aggregate chunk layout.
 
 ### Phase E: web target-time polish
 
@@ -879,9 +885,10 @@ plainly when they block broad verification.
 
 Resolved for this phase:
 
-- Format v2 should become a chunked directory layout before a single-file
-  `.stax` package. The directory shape keeps manifests, events, symbols, and
-  blobs inspectable while the schema settles; packaging can wrap it later.
+- Format v2 became a chunked directory layout first, then a single-file
+  `.stax` package that wraps the same data. The directory shape keeps
+  manifests, events, symbols, and future blobs inspectable while the schema
+  settles.
 - Detailed archive inspection should continue through `stax open` and the
   normal query surfaces. Direct archive-local CLI should stay focused on
   `stax compare` until there is a clear use case for a second query engine.
@@ -904,12 +911,13 @@ Resolved for this phase:
   Live `just archive-smoke` / `just web-target-smoke` are gated by manual
   workflow dispatch until the runner contract for recording and browser access
   is settled.
-- Saved-run format v2 is implemented as a chunked directory layout for new
-  saves and now includes an append-friendly `events.jsonl` sidecar. Stopped-run
-  history has both a state-changing selector via `select-run` and
-  non-mutating per-RPC `RunId` selectors for reporting surfaces. The next
-  persistence question is when `open` should replay events instead of trusting
-  aggregate chunks.
+- Saved-run format v2 is implemented as a chunked directory layout and a
+  single-file `.stax` package for new saves, with an append-friendly
+  `events.jsonl` sidecar in the directory form and embedded event records in
+  the package form. Stopped-run history has both a state-changing selector via
+  `select-run` and non-mutating per-RPC `RunId` selectors for reporting
+  surfaces. The next persistence question is when `open` should replay events
+  instead of trusting aggregate chunks.
 
 Still open:
 

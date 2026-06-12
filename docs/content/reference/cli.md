@@ -116,14 +116,15 @@ Takes no options. Exits non-zero if there is no active run. See
 
 ## `stax save`
 
-Save the current or most recent queryable run to a directory archive. The
-current archive format is v2: `manifest.json` plus typed facet-json chunks
+Save the current or most recent queryable run to an archive. Paths ending in
+`.stax` create a single-file facet-json package. Other paths create the v2
+directory layout: `manifest.json` plus typed facet-json chunks
 (`aggregator.json`, `binaries.json`, and `target-ingest.json`) plus an
-append-friendly `events.jsonl` sidecar. The manifest records archive version,
-save time, producer/version, OS/arch, run summaries, and archive-relative chunk
-filenames. The chunks store raw aggregator streams, binary/symbol metadata, and
-target-ingest diagnostics; `events.jsonl` serializes typed `SavedEventLogEntry`
-records for future replay/import tooling.
+append-friendly `events.jsonl` sidecar. The manifest/package records archive
+version, save time, producer/version, OS/arch, and run summaries. The chunks
+or package store raw aggregator streams, binary/symbol metadata, target-ingest
+diagnostics, and typed `SavedEventLogEntry` records for future replay/import
+tooling.
 
 ```text
 stax save <PATH>
@@ -131,14 +132,14 @@ stax save <PATH>
 
 | arg      | type                | meaning                                      |
 |----------|---------------------|----------------------------------------------|
-| `<PATH>` | positional `String` | directory archive to create or overwrite into |
+| `<PATH>` | positional `String` | directory archive to create, or `.stax` package file to write |
 
 `stax save` works while a run is active, and after `stax stop`, until the
 next recording resets the live aggregator.
 
 Archive compatibility is strict in the current format: `open` and `compare`
-accept v2 manifest archives and legacy v1 `archive.json` archives, and reject
-other versions loudly.
+accept v2 directory archives, `.stax` packages, and legacy v1 `archive.json`
+archives, and reject other versions loudly.
 
 ## `stax open`
 
@@ -150,7 +151,7 @@ stax open <PATH>
 
 | arg      | type                | meaning                                                    |
 |----------|---------------------|------------------------------------------------------------|
-| `<PATH>` | positional `String` | archive directory, v2 `manifest.json`, or legacy v1 `archive.json` |
+| `<PATH>` | positional `String` | archive directory, `.stax` package, v2 `manifest.json`, or legacy v1 `archive.json` |
 
 After `stax open`, `threads`, `top`, `flame`, and `diagnose` operate on the
 restored run. `open` refuses to replace state while a recording is active.
@@ -195,16 +196,16 @@ stax compare [OPTIONS] <BASELINE> <CANDIDATE>
 | `--fail-bad-duration-drops-delta <COUNT>`  | `u64`               | *(none)* | fail if bad-duration drops increase past this         |
 | `--fail-target-queue-drops-delta <COUNT>`  | `u64`               | *(none)* | fail if target-side queue drops increase past this    |
 | `--fail-worker-disconnect-drops-delta <COUNT>` | `u64`          | *(none)* | fail if worker-disconnect drops increase past this    |
-| `<BASELINE>`                               | positional `String` | *(required)* | baseline archive directory, v2 manifest, or legacy v1 `archive.json` |
-| `<CANDIDATE>`                              | positional `String` | *(required)* | candidate archive directory, v2 manifest, or legacy v1 `archive.json` |
+| `<BASELINE>`                               | positional `String` | *(required)* | baseline archive directory, `.stax` package, v2 manifest, or legacy v1 `archive.json` |
+| `<CANDIDATE>`                              | positional `String` | *(required)* | candidate archive directory, `.stax` package, v2 manifest, or legacy v1 `archive.json` |
 
-The comparison reads the typed archive manifest/chunks directly and prints
-deltas for PET samples, on/off-CPU interval time, target time, target span
-counts, origin-link counts, ingest drops, and the top target lanes by
-duration. `--json` emits the same comparison as named baseline/candidate/delta
-fields for CI and benchmark notes. Threshold flags fail the command when a
-positive candidate delta exceeds the limit; those failures are also reported
-as `threshold_failures` in JSON.
+The comparison reads each archive directly and prints deltas for PET samples,
+on/off-CPU interval time, target time, target span counts, origin-link counts,
+ingest drops, and the top target lanes by duration. `--json` emits the same
+comparison as named baseline/candidate/delta fields for CI and benchmark
+notes. Threshold flags fail the command when a positive candidate delta
+exceeds the limit; those failures are also reported as `threshold_failures` in
+JSON.
 
 ## `stax top`
 

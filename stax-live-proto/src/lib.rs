@@ -1089,6 +1089,18 @@ pub struct SavedRunArchive {
 }
 
 #[derive(Clone, Debug, Facet)]
+pub struct SavedRunArchiveBundle {
+    pub format_version: u32,
+    pub saved_at_unix_ns: u64,
+    pub provenance: SavedRunArchiveProvenance,
+    pub runs: Vec<RunSummary>,
+    pub aggregator: SavedAggregator,
+    pub binaries: SavedBinaryRegistry,
+    pub target_ingest: TargetIngestDiagnostics,
+    pub events: Vec<SavedEventLogEntry>,
+}
+
+#[derive(Clone, Debug, Facet)]
 pub struct SavedRunArchiveManifest {
     pub format_version: u32,
     pub saved_at_unix_ns: u64,
@@ -1373,7 +1385,8 @@ pub trait RunControl {
     async fn save_current(&self, path: String) -> Result<(), RunControlError>;
 
     /// Open a saved archive into the server's current query state. Accepts
-    /// v2 archive directories/manifests and legacy v1 archive.json files.
+    /// v2 archive directories/manifests, `.stax` packages, and legacy v1
+    /// archive.json files.
     /// Fails while a recording is active.
     async fn open_saved(&self, path: String) -> Result<(), RunControlError>;
 
