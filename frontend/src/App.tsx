@@ -51,6 +51,7 @@ import {
 } from "./wire.ts";
 
 type Status = "pending" | "ok" | "err";
+const SYNTH_TID_BASE = 0xfff00000;
 
 /// Map a syntax `TokenClass` to its arborium custom-element tag, so the
 /// generated `theme.css` palette colours it with no extra CSS. `Plain`
@@ -261,6 +262,10 @@ export function App() {
   const [displayMode, setDisplayMode] = useState<DisplayMode>("on_cpu");
   const [theme, setTheme] = useState<Theme>(initialTheme);
   const [paused, setPaused] = useState(false);
+  const emptyRunContext = useMemo(
+    () => buildEmptyRunContext(threads, selectedTid, displayMode, displayed),
+    [threads, selectedTid, displayMode, displayed],
+  );
   const selectOrigin = (tid: number, address: bigint | null) => {
     setSelectedTid(tid);
     if (address !== null && address !== 0n) {
@@ -633,6 +638,8 @@ export function App() {
             onContextMenu={openMenu}
             onDropSymbol={dropSymbol}
             onUpdate={setLatestFlame}
+            emptyContext={emptyRunContext}
+            onSelectTid={setSelectedTid}
           />
         </section>
       )}
@@ -655,6 +662,8 @@ export function App() {
             pmuMetric={pmuMetric}
             displayMode={displayMode}
             onContextMenu={openMenu}
+            emptyContext={emptyRunContext}
+            onSelectTid={setSelectedTid}
           />
         </section>
         <section className="pane ann-pane">
@@ -898,6 +907,80 @@ type PaneTab = "asm" | "neighbors" | "intervals" | "target-spans";
 /// off-CPU waiting time, or wall (active + off). Display-only; the
 /// wire carries every dimension on every node.
 export type DisplayMode = "on_cpu" | "target" | "off_cpu" | "wall";
+
+export type EmptyRunContext = {
+  displayMode: DisplayMode;
+  selectedTid: number | null;
+  selectedLabel: string;
+  selectedIsTargetLane: boolean;
+  selectedActiveNs: bigint;
+  selectedTargetNs: bigint;
+  selectedOffCpuNs: bigint;
+  totalActiveNs: bigint;
+  totalTargetNs: bigint;
+  totalOffCpuNs: bigint;
+  threadCount: number;
+  targetLanes: ThreadInfo[];
+};
+
+function buildEmptyRunContext(
+  threads: ThreadInfo[],
+  selectedTid: number | null,
+  displayMode: DisplayMode,
+  displayed: TopUpdate | null,
+): EmptyRunContext {
+  const selectedThread =
+    selectedTid == null ? null : threads.find((t) => t.tid === selectedTid) ?? null;
+  const totalActiveNs =
+    displayed?.total_on_cpu_ns ??
+    threads.reduce((sum, t) => sum + t.on_cpu_ns, 0n);
+  const totalTargetNs =
+    displayed?.total_target_ns ??
+    threads.reduce((sum, t) => sum + t.target_ns, 0n);
+  const totalOffCpuNs =
+    (displayed ? offCpuTotal(displayed.total_off_cpu) : null) ??
+    threads.reduce((sum, t) => sum + offCpuTotal(t.off_cpu), 0n);
+  const selectedActiveNs =
+    selectedThread?.on_cpu_ns ?? (selectedTid == null ? totalActiveNs : 0n);
+  const selectedTargetNs =
+    selectedThread?.target_ns ?? (selectedTid == null ? totalTargetNs : 0n);
+  const selectedOffCpuNs =
+    selectedThread == null
+      ? selectedTid == null
+        ? totalOffCpuNs
+        : 0n
+      : offCpuTotal(selectedThread.off_cpu);
+  const targetLanes = threads
+    .filter((thread) => thread.tid >= SYNTH_TID_BASE && thread.target_spans > 0n)
+    .sort((a, b) => {
+      if (a.target_ns !== b.target_ns) return a.target_ns > b.target_ns ? -1 : 1;
+      if (a.target_spans !== b.target_spans) {
+        return a.target_spans > b.target_spans ? -1 : 1;
+      }
+      return a.tid - b.tid;
+    })
+    .slice(0, 4);
+
+  return {
+    displayMode,
+    selectedTid,
+    selectedLabel:
+      selectedTid == null
+        ? "all threads"
+        : selectedThread
+          ? threadLabel(selectedThread)
+          : `tid ${selectedTid}`,
+    selectedIsTargetLane: selectedTid != null && selectedTid >= SYNTH_TID_BASE,
+    selectedActiveNs,
+    selectedTargetNs,
+    selectedOffCpuNs,
+    totalActiveNs,
+    totalTargetNs,
+    totalOffCpuNs,
+    threadCount: threads.length,
+    targetLanes,
+  };
+}
 
 /// Pick a language icon for a row. Prefers the server-side demangler
 /// classification (carried on every TopEntry / FlameNode); only falls
@@ -1325,6 +1408,8 @@ function TopTable({
   pmuMetric,
   displayMode,
   onContextMenu,
+  emptyContext,
+  onSelectTid,
 }: {
   entries: TopEntry[];
   totalOnCpuNs: bigint;
@@ -1338,6 +1423,8 @@ function TopTable({
   pmuMetric: PmuMetric;
   displayMode: DisplayMode;
   onContextMenu: (t: ContextMenuTarget) => void;
+  emptyContext: EmptyRunContext;
+  onSelectTid: (tid: number) => void;
 }) {
   void totalOnCpuNs;
   void totalTargetNs;
@@ -1374,7 +1461,19 @@ function TopTable({
         </tr>
       </thead>
       <tbody>
-        {visible.map((e) => {
+        {visible.length === 0 ? (
+          <tr className="top-empty-row">
+            <td className="top-empty-cell" colSpan={2}>
+              <EmptyRunHint
+                surface="top"
+                context={emptyContext}
+                filtersHideAll={entries.length > 0}
+                onSelectTid={onSelectTid}
+              />
+            </td>
+          </tr>
+        ) : (
+          visible.map((e) => {
           const lang = langOf(e);
           const obj = objKindOf(e);
           const fnLabel = e.function_name ?? `0x${e.address.toString(16)}`;
@@ -1395,67 +1494,70 @@ function TopTable({
               : selfTarget === totalTarget
                 ? `${formatDuration(selfTarget)} target · ${e.self_target_spans.toString()} spans`
                 : `${formatDuration(selfTarget)} / ${formatDuration(totalTarget)} target · ${e.self_target_spans.toString()} / ${e.total_target_spans.toString()} spans`;
-          return (
-            <tr
-              key={String(e.address)}
-              className={
-                (selected === e.address ? "selected " : "") +
-                (e.is_main ? "main " : "") +
-                (entryMatches(e, matchText) ? "match" : "")
-              }
-              onClick={() => onSelect(e.address)}
-              onContextMenu={(ev) => {
-                ev.preventDefault();
-                onContextMenu({
-                  x: ev.clientX,
-                  y: ev.clientY,
-                  address: e.address,
-                  functionName: e.function_name,
-                  binary: e.binary,
-                  kind: obj,
-                });
-              }}
-            >
-              <td className="entry">
-                <div className="entry-line fn-line">
-                  <span className={`glyph lang-${lang}`}>
-                    {langIcon(lang)}
-                  </span>
-                  <span className="fn-name">{fnLabel}</span>
-                </div>
-                <div className="entry-line bin-line">
-                  <span className={`glyph obj-${obj}`}>{objIcon(obj)}</span>
-                  <span className="bin-name">{binLabel}</span>
-                </div>
-              </td>
-              <td className="num">
-                <div className="num-line">
-                  {metricSelf === metricTotal ? (
-                    formatDuration(metricSelf)
-                  ) : (
-                    <>
-                      {formatDuration(metricSelf)}
-                      <span className="num-sep"> / </span>
-                      <span className="num-total">
-                        {formatDuration(metricTotal)}
-                      </span>
-                    </>
+            return (
+              <tr
+                key={String(e.address)}
+                className={
+                  (selected === e.address ? "selected " : "") +
+                  (e.is_main ? "main " : "") +
+                  (entryMatches(e, matchText) ? "match" : "")
+                }
+                onClick={() => onSelect(e.address)}
+                onContextMenu={(ev) => {
+                  ev.preventDefault();
+                  onContextMenu({
+                    x: ev.clientX,
+                    y: ev.clientY,
+                    address: e.address,
+                    functionName: e.function_name,
+                    binary: e.binary,
+                    kind: obj,
+                  });
+                }}
+              >
+                <td className="entry">
+                  <div className="entry-line fn-line">
+                    <span className={`glyph lang-${lang}`}>
+                      {langIcon(lang)}
+                    </span>
+                    <span className="fn-name">{fnLabel}</span>
+                  </div>
+                  <div className="entry-line bin-line">
+                    <span className={`glyph obj-${obj}`}>{objIcon(obj)}</span>
+                    <span className="bin-name">{binLabel}</span>
+                  </div>
+                </td>
+                <td className="num">
+                  <div className="num-line">
+                    {metricSelf === metricTotal ? (
+                      formatDuration(metricSelf)
+                    ) : (
+                      <>
+                        {formatDuration(metricSelf)}
+                        <span className="num-sep"> / </span>
+                        <span className="num-total">
+                          {formatDuration(metricTotal)}
+                        </span>
+                      </>
+                    )}
+                  </div>
+                  <div className="num-bar">
+                    <div
+                      className={`num-bar-fill metric-${displayMode}`}
+                      style={{
+                        width: barPct(topMetricNs(e, sort, displayMode), barDenom),
+                      }}
+                    />
+                  </div>
+                  {targetLine && (
+                    <div className="num-target-slot">{targetLine}</div>
                   )}
-                </div>
-                <div className="num-bar">
-                  <div
-                    className={`num-bar-fill metric-${displayMode}`}
-                    style={{
-                      width: barPct(topMetricNs(e, sort, displayMode), barDenom),
-                    }}
-                  />
-                </div>
-                {targetLine && <div className="num-target-slot">{targetLine}</div>}
-                <div className="num-ipc-slot">{pmuLabel(e, pmuMetric)}</div>
-              </td>
-            </tr>
-          );
-        })}
+                  <div className="num-ipc-slot">{pmuLabel(e, pmuMetric)}</div>
+                </td>
+              </tr>
+            );
+          })
+        )}
       </tbody>
     </table>
   );
@@ -1726,6 +1828,112 @@ function displayModeLabel(mode: DisplayMode): string {
     case "wall":
       return "wall time";
   }
+}
+
+export function EmptyRunHint({
+  surface,
+  context,
+  filtersHideAll = false,
+  onSelectTid,
+}: {
+  surface: "top" | "flame";
+  context: EmptyRunContext;
+  filtersHideAll?: boolean;
+  onSelectTid?: (tid: number) => void;
+}) {
+  const selectedMetric =
+    context.displayMode === "target"
+      ? context.selectedTargetNs
+      : context.displayMode === "off_cpu"
+        ? context.selectedOffCpuNs
+        : context.displayMode === "wall"
+          ? context.selectedActiveNs + context.selectedOffCpuNs
+          : context.selectedActiveNs;
+  const hasTargetElsewhere =
+    context.targetLanes.length > 0 &&
+    !context.targetLanes.some((lane) => lane.tid === context.selectedTid);
+  let title = `${surface === "top" ? "no top rows" : "empty flame"} for ${displayModeLabel(context.displayMode)}`;
+  let detail = `No ${displayModeLabel(context.displayMode)} is attributed to ${context.selectedLabel}.`;
+
+  if (filtersHideAll) {
+    title = "rows hidden by object filters";
+    detail = "The current object-kind filters hide every row in this view.";
+  } else if (context.threadCount === 0) {
+    title = "waiting for a recording";
+    detail = "No thread, CPU, off-CPU, or target-lane activity has arrived yet.";
+  } else if (context.displayMode === "target" && selectedMetric === 0n) {
+    if (hasTargetElsewhere) {
+      title = "target spans are on another lane";
+      detail = `No target spans are linked to ${context.selectedLabel}; choose a target lane below.`;
+    } else {
+      title = "no target spans reported";
+      detail =
+        "A cooperating target has not reported spans for this selection yet.";
+    }
+  } else if (
+    context.displayMode === "off_cpu" &&
+    selectedMetric === 0n &&
+    context.selectedActiveNs > 0n
+  ) {
+    title = "no off-CPU time in this selection";
+    detail = `${context.selectedLabel} has active time but no recorded waits in this view.`;
+  } else if (
+    context.displayMode === "on_cpu" &&
+    selectedMetric === 0n &&
+    context.selectedOffCpuNs > 0n
+  ) {
+    title = "this selection is wait-bound";
+    detail = `${context.selectedLabel} has ${formatDuration(context.selectedOffCpuNs)} off-CPU time and no active stack samples in this view.`;
+  } else if (
+    context.displayMode === "on_cpu" &&
+    selectedMetric === 0n &&
+    context.selectedTargetNs > 0n
+  ) {
+    title = "this selection is target-bound";
+    detail = `${context.selectedLabel} has ${formatDuration(context.selectedTargetNs)} of target spans and no CPU stack samples in this view.`;
+  } else if (
+    selectedMetric === 0n &&
+    context.totalTargetNs > 0n &&
+    context.totalActiveNs === 0n
+  ) {
+    title = "CPU stacks are empty; target lanes have work";
+    detail = `The run has ${formatDuration(context.totalTargetNs)} of target spans.`;
+  } else if (
+    selectedMetric === 0n &&
+    context.totalOffCpuNs > 0n &&
+    context.totalActiveNs === 0n
+  ) {
+    title = "CPU stacks are empty; waits were recorded";
+    detail = `The run has ${formatDuration(context.totalOffCpuNs)} of off-CPU intervals.`;
+  }
+
+  return (
+    <div className="placeholder empty-run-hint">
+      <div className="empty-run-title">{title}</div>
+      <div className="empty-run-detail">{detail}</div>
+      {hasTargetElsewhere && onSelectTid ? (
+        <div className="target-empty-lanes">
+          {context.targetLanes.map((lane) => (
+            <button
+              key={lane.tid}
+              type="button"
+              className="target-empty-lane"
+              onClick={() => onSelectTid(lane.tid)}
+              title={`tid ${lane.tid}`}
+            >
+              <span className="target-empty-lane-name">
+                {lane.name ?? `tid ${lane.tid}`}
+              </span>
+              <span className="target-empty-lane-meta">
+                {formatDuration(lane.target_ns)} ·{" "}
+                {lane.target_spans.toString()} spans
+              </span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function Annotation({

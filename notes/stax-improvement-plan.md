@@ -546,12 +546,13 @@ Remaining work:
   - done: linked origin cells focus the origin symbol's family tree after
     selecting the CPU thread
 - Empty states:
-  - started: target-span detail pane distinguishes no reported spans from
+  - done: target-span detail pane distinguishes no reported spans from
     target lanes that exist outside the selected thread
-  - started: target-span detail pane offers direct lane selection when
+  - done: target-span detail pane offers direct lane selection when
     synthetic lanes have spans
-  - remaining: mirror the CLI's off-CPU/no-samples guidance across the rest of
-    the web detail panes
+  - done: top table and flamegraph zero-data states now distinguish waiting
+    for a recording, hidden rows, off-CPU-only selections, target-bound
+    selections, and target spans on another lane
 
 Acceptance criteria:
 

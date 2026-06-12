@@ -14,12 +14,14 @@ import {
   type FlameView,
 } from "./wire.ts";
 import {
+  EmptyRunHint,
   langIcon,
   langOf,
   objKindOf,
   viewParams,
   type ContextMenuTarget,
   type DisplayMode,
+  type EmptyRunContext,
   type ObjKind,
 } from "./App.tsx";
 
@@ -156,6 +158,8 @@ export function Flamegraph({
   onContextMenu,
   onDropSymbol,
   onUpdate,
+  emptyContext,
+  onSelectTid,
 }: {
   client: ProfilerClient;
   tid: number | null;
@@ -183,6 +187,8 @@ export function Flamegraph({
   /// menu can do whole-tree operations like "copy as text" without
   /// re-subscribing.
   onUpdate?: (u: FlamegraphView | null) => void;
+  emptyContext: EmptyRunContext;
+  onSelectTid: (tid: number) => void;
 }) {
   const [update, setUpdate] = useState<FlamegraphView | null>(null);
   const [hover, setHover] = useState<Box | null>(null);
@@ -324,6 +330,8 @@ export function Flamegraph({
       : displayMode === "off_cpu"
         ? totalOff
         : totalOn + totalOff;
+  const metricEmpty = update !== null && total === 0n;
+  const renderedBoxes = metricEmpty ? [] : boxes;
 
   return (
     <div
@@ -335,11 +343,23 @@ export function Flamegraph({
       }}
     >
       <div ref={containerRef} className="flame">
-        <div className="flame-inner" style={{ height: `${innerHeight}px` }} />
+        <div
+          className="flame-inner"
+          style={{ height: `${metricEmpty ? ROW_H : innerHeight}px` }}
+        />
         {!update && (
           <div className="flame-placeholder">building flamegraph…</div>
         )}
-        {boxes.map((b) => {
+        {metricEmpty && (
+          <div className="flame-placeholder flame-empty-hint">
+            <EmptyRunHint
+              surface="flame"
+              context={emptyContext}
+              onSelectTid={onSelectTid}
+            />
+          </div>
+        )}
+        {renderedBoxes.map((b) => {
           const widthPct = (b.x1 - b.x0) * 100;
           const isMatch = nodeMatches(b.node, matchText);
           return (

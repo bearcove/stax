@@ -957,6 +957,10 @@ table.top-table tr.match {
   pointer-events: none;
 }
 
+.flame-placeholder.flame-empty-hint {
+  pointer-events: auto;
+}
+
 .flame-box {
   position: absolute;
   height: 17px;
@@ -1111,6 +1115,26 @@ table.top-table tr.match {
   font-size: 13px;
 }
 
+.empty-run-hint {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+  justify-content: center;
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.empty-run-title {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.empty-run-detail {
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
 /* ---------- top-N table ---------- */
 
 table.top-table {
@@ -1132,6 +1156,15 @@ table.top-table th {
   position: sticky;
   top: 0;
   z-index: 1;
+}
+
+table.top-table tr.top-empty-row:hover {
+  background: transparent;
+}
+
+table.top-table td.top-empty-cell {
+  padding: 0;
+  border-bottom: 0;
 }
 
 table.top-table th.num-h {
