@@ -413,7 +413,7 @@ Implemented test coverage:
 
 ```bash
 cargo nextest run -p stax-server --all-targets -E 'test(save_open_restores_query_state_and_target_diagnostics)'
-cargo nextest run -p stax --all-targets -E 'test(summarize_archive_counts_target_and_origin_dimensions)'
+cargo nextest run -p stax --all-targets -E 'test(read_saved_archive_accepts_v2_manifest_layout) | test(read_saved_archive_accepts_legacy_v1_archive_json_layout) | test(summarize_archive_counts_target_and_origin_dimensions)'
 ```
 
 ## Workstream 5: blessed integration test/demo corpus
@@ -732,8 +732,8 @@ Deferred:
 
 - `just archive-smoke` should run in CI only after the runner can manage the
   stax daemon lifecycle.
-- Format v2 should be chunked-directory-first; implementation is deferred
-  until the next archive-format slice.
+- Append-friendly event logs, `blobs/`, and single-file packaging remain
+  future work after the v2 aggregate chunk layout.
 
 ### Phase E: web target-time polish
 
@@ -829,12 +829,15 @@ Resolved for this phase:
 - Stable CI corpus checks should be compile/unit/CLI-format checks first.
   Live `just demo-corpus` / `just archive-smoke` belongs in gated CI once the
   runner can manage the stax daemon lifecycle.
+- Saved-run format v2 is implemented as a chunked directory layout for new
+  saves. The next persistence question is whether append-friendly event logs
+  and per-`RunId` query selectors should share a single query model.
 
 Still open:
 
-- Should saved-run format v2 be implemented before per-`RunId` live querying,
-  or should those land together so archives and live history share one query
-  selector model?
+- Should append-friendly saved-run event logs land before per-`RunId` live
+  querying, or should those land together so archives and live history share
+  one query selector model?
 - Which web visual checks are stable enough for automated CI once the browser
   smoke has a deterministic saved/demo run to load?
 
