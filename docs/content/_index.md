@@ -64,9 +64,10 @@ nothing depends on it.
   in-memory history, per-command `--run` to query it without changing state,
   and `stax save`, `stax open`, `stax compare`,
   and `stax compare --json` when you need durable artifacts, before/after
-  notes, or CI-readable deltas. `compare` threshold flags such as
-  `--fail-target-delta-ms` and `--fail-unlinked-origins-delta` turn saved
-  runs into direct regression gates.
+  notes, or CI-readable deltas. Saved archives can be a directory or one
+  `.stax` package; v2 archives replay typed event records when present.
+  `compare` threshold flags such as `--fail-target-delta-ms` and
+  `--fail-unlinked-origins-delta` turn saved runs into direct regression gates.
 - **Built for agents as much as humans.** Every query is a subcommand with
   plain-text output and meaningful exit codes. `stax wait --for-samples N`
   lets a script block until there's enough data to look at.

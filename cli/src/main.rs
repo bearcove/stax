@@ -17,8 +17,8 @@ use stax_core::cmd_setup_linux;
 use stax_core::cmd_setup_mac;
 use stax_live_proto::{
     DiagnosticsSnapshot, FlameNode, FlamegraphUpdate, LiveFilter, OffCpuBreakdown, ProfilerClient,
-    RunControlClient, RunId, RunSummary, RunViewParams, SavedIntervalKind, SavedRunArchive,
-    SavedRunArchiveBundle, SavedRunArchiveManifest, ServerStatus, StopReason,
+    RunControlClient, RunId, RunSummary, RunViewParams, SavedEventLogEntry, SavedIntervalKind,
+    SavedRunArchive, SavedRunArchiveBundle, SavedRunArchiveManifest, ServerStatus, StopReason,
     TargetIngestDiagnostics, ThreadsUpdate, TopEntry, TopSort, TopUpdate, ViewParams,
     WaitCondition, WaitOutcome,
 };
@@ -1257,6 +1257,7 @@ const ARCHIVE_FORMAT_VERSION: u32 = 2;
 const ARCHIVE_V1_FORMAT_VERSION: u32 = 1;
 const ARCHIVE_V1_FILE_NAME: &str = "archive.json";
 const ARCHIVE_MANIFEST_FILE_NAME: &str = "manifest.json";
+const ARCHIVE_EVENTS_FILE_NAME: &str = "events.jsonl";
 const ARCHIVE_SINGLE_FILE_EXTENSION: &str = "stax";
 #[cfg(test)]
 const ARCHIVE_AGGREGATOR_FILE_NAME: &str = "aggregator.json";
@@ -1309,6 +1310,17 @@ fn read_saved_archive_bundle(bundle_path: &Path) -> Result<SavedRunArchive, Box<
         std::fs::read(bundle_path).map_err(|e| format!("read {}: {e}", bundle_path.display()))?;
     let bundle: SavedRunArchiveBundle = facet_json::from_slice(&bytes)
         .map_err(|e| format!("parse {}: {e}", bundle_path.display()))?;
+    if !bundle.events.is_empty() {
+        let mut archive = SavedRunArchive::from_event_log_entries(
+            bundle.format_version,
+            bundle.saved_at_unix_ns,
+            bundle.events,
+        );
+        if archive.runs.is_empty() {
+            archive.runs = bundle.runs;
+        }
+        return Ok(archive);
+    }
     Ok(SavedRunArchive {
         format_version: bundle.format_version,
         saved_at_unix_ns: bundle.saved_at_unix_ns,
@@ -1340,6 +1352,21 @@ fn read_saved_archive_manifest(manifest_path: &Path) -> Result<SavedRunArchive, 
             manifest_path.display()
         )
     })?;
+    let event_log_path = base.join(ARCHIVE_EVENTS_FILE_NAME);
+    if event_log_path.exists() {
+        let entries = read_saved_event_log(&event_log_path)?;
+        if !entries.is_empty() {
+            let mut archive = SavedRunArchive::from_event_log_entries(
+                manifest.format_version,
+                manifest.saved_at_unix_ns,
+                entries,
+            );
+            if archive.runs.is_empty() {
+                archive.runs = manifest.runs;
+            }
+            return Ok(archive);
+        }
+    }
     Ok(SavedRunArchive {
         format_version: manifest.format_version,
         saved_at_unix_ns: manifest.saved_at_unix_ns,
@@ -1353,6 +1380,26 @@ fn read_saved_archive_manifest(manifest_path: &Path) -> Result<SavedRunArchive, 
 fn read_saved_json<T: facet::Facet<'static>>(path: &Path) -> Result<T, Box<dyn Error>> {
     let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     facet_json::from_slice(&bytes).map_err(|e| format!("parse {}: {e}", path.display()).into())
+}
+
+fn read_saved_event_log(path: &Path) -> Result<Vec<SavedEventLogEntry>, Box<dyn Error>> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let mut entries = Vec::new();
+    for (line_index, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let entry = facet_json::from_slice(line.as_bytes()).map_err(|e| {
+            format!(
+                "parse {} line {}: {e}",
+                path.display(),
+                line_index.saturating_add(1)
+            )
+        })?;
+        entries.push(entry);
+    }
+    Ok(entries)
 }
 
 fn archive_member_path(base: &Path, member: &str) -> Result<PathBuf, Box<dyn Error>> {
@@ -2060,15 +2107,15 @@ fn mentions_metal_cooperation(function_name: Option<&str>, binary: Option<&str>)
 #[cfg(test)]
 mod tests {
     use super::{
-        ARCHIVE_AGGREGATOR_FILE_NAME, ARCHIVE_BINARIES_FILE_NAME, ARCHIVE_FORMAT_VERSION,
-        ARCHIVE_MANIFEST_FILE_NAME, ARCHIVE_SINGLE_FILE_EXTENSION, ARCHIVE_TARGET_INGEST_FILE_NAME,
-        ARCHIVE_V1_FILE_NAME, ARCHIVE_V1_FORMAT_VERSION, SYNTH_TID_BASE, build_compare_report,
-        empty_view_hint, mentions_metal_cooperation, read_saved_archive, summarize_archive,
-        target_ingest_hints, thread_kind, write_threads,
+        ARCHIVE_AGGREGATOR_FILE_NAME, ARCHIVE_BINARIES_FILE_NAME, ARCHIVE_EVENTS_FILE_NAME,
+        ARCHIVE_FORMAT_VERSION, ARCHIVE_MANIFEST_FILE_NAME, ARCHIVE_SINGLE_FILE_EXTENSION,
+        ARCHIVE_TARGET_INGEST_FILE_NAME, ARCHIVE_V1_FILE_NAME, ARCHIVE_V1_FORMAT_VERSION,
+        SYNTH_TID_BASE, build_compare_report, empty_view_hint, mentions_metal_cooperation,
+        read_saved_archive, summarize_archive, target_ingest_hints, thread_kind, write_threads,
     };
     use stax_live_proto::{
-        OffCpuBreakdown, SavedAggregator, SavedBinaryRegistry, SavedInterval, SavedIntervalKind,
-        SavedPetSample, SavedPmuSample, SavedRunArchive, SavedRunArchiveBundle,
+        OffCpuBreakdown, SavedAggregator, SavedBinaryRegistry, SavedEventLogEntry, SavedInterval,
+        SavedIntervalKind, SavedPetSample, SavedPmuSample, SavedRunArchive, SavedRunArchiveBundle,
         SavedRunArchiveFiles, SavedRunArchiveManifest, SavedRunArchiveProvenance, SavedThread,
         SavedThreadName, TargetIngestDiagnostics, ThreadInfo, ThreadsUpdate,
     };
@@ -2543,6 +2590,52 @@ mod tests {
     }
 
     #[test]
+    fn read_saved_archive_prefers_event_log_replay_over_aggregate_chunks() {
+        let archive_dir = temp_archive_dir("cli-v2-events");
+        let _ = std::fs::remove_dir_all(&archive_dir);
+        std::fs::create_dir_all(&archive_dir).expect("create archive dir");
+
+        let manifest = SavedRunArchiveManifest {
+            format_version: ARCHIVE_FORMAT_VERSION,
+            saved_at_unix_ns: 321,
+            provenance: test_provenance(),
+            runs: Vec::new(),
+            files: SavedRunArchiveFiles {
+                aggregator: ARCHIVE_AGGREGATOR_FILE_NAME.to_owned(),
+                binaries: ARCHIVE_BINARIES_FILE_NAME.to_owned(),
+                target_ingest: ARCHIVE_TARGET_INGEST_FILE_NAME.to_owned(),
+            },
+        };
+        write_test_json(&archive_dir.join(ARCHIVE_MANIFEST_FILE_NAME), &manifest);
+        write_test_json(
+            &archive_dir.join(ARCHIVE_AGGREGATOR_FILE_NAME),
+            &SavedAggregator::default(),
+        );
+        write_test_json(
+            &archive_dir.join(ARCHIVE_BINARIES_FILE_NAME),
+            &SavedBinaryRegistry::default(),
+        );
+        write_test_json(
+            &archive_dir.join(ARCHIVE_TARGET_INGEST_FILE_NAME),
+            &TargetIngestDiagnostics::default(),
+        );
+        write_test_event_log(
+            &archive_dir.join(ARCHIVE_EVENTS_FILE_NAME),
+            &target_lane_events(321),
+        );
+
+        let archive = read_saved_archive(&archive_dir).expect("read event-backed archive");
+
+        assert_eq!(archive.saved_at_unix_ns, 321);
+        assert_eq!(archive.aggregator.thread_names.len(), 1);
+        assert_eq!(archive.aggregator.threads.len(), 1);
+        assert_eq!(archive.aggregator.threads[0].intervals.len(), 1);
+        assert_eq!(archive.target_ingest.spans_recorded, 1);
+
+        let _ = std::fs::remove_dir_all(&archive_dir);
+    }
+
+    #[test]
     fn read_saved_archive_accepts_single_file_package() {
         let package_path =
             temp_archive_dir("cli-package").with_extension(ARCHIVE_SINGLE_FILE_EXTENSION);
@@ -2563,6 +2656,32 @@ mod tests {
         let from_package = read_saved_archive(&package_path).expect("read package archive");
         assert_eq!(from_package.format_version, ARCHIVE_FORMAT_VERSION);
         assert_eq!(from_package.saved_at_unix_ns, 789);
+
+        let _ = std::fs::remove_file(&package_path);
+    }
+
+    #[test]
+    fn read_saved_archive_prefers_package_events_over_aggregate_members() {
+        let package_path =
+            temp_archive_dir("cli-package-events").with_extension(ARCHIVE_SINGLE_FILE_EXTENSION);
+        let _ = std::fs::remove_file(&package_path);
+
+        let bundle = SavedRunArchiveBundle {
+            format_version: ARCHIVE_FORMAT_VERSION,
+            saved_at_unix_ns: 987,
+            provenance: test_provenance(),
+            runs: Vec::new(),
+            aggregator: SavedAggregator::default(),
+            binaries: SavedBinaryRegistry::default(),
+            target_ingest: TargetIngestDiagnostics::default(),
+            events: target_lane_events(987),
+        };
+        write_test_json(&package_path, &bundle);
+
+        let from_package = read_saved_archive(&package_path).expect("read package archive");
+        assert_eq!(from_package.saved_at_unix_ns, 987);
+        assert_eq!(from_package.aggregator.threads.len(), 1);
+        assert_eq!(from_package.target_ingest.spans_recorded, 1);
 
         let _ = std::fs::remove_file(&package_path);
     }
@@ -2647,6 +2766,43 @@ mod tests {
     fn write_test_json<T: facet::Facet<'static>>(path: &std::path::Path, value: &T) {
         let bytes = facet_json::to_vec_pretty(value).expect("serialize test json");
         std::fs::write(path, bytes).expect("write test json");
+    }
+
+    fn write_test_event_log(path: &std::path::Path, entries: &[SavedEventLogEntry]) {
+        let mut bytes = Vec::new();
+        for entry in entries {
+            bytes.extend(facet_json::to_vec(entry).expect("serialize test event"));
+            bytes.push(b'\n');
+        }
+        std::fs::write(path, bytes).expect("write test event log");
+    }
+
+    fn target_lane_events(saved_at_unix_ns: u64) -> Vec<SavedEventLogEntry> {
+        vec![
+            SavedEventLogEntry::ArchiveSaved { saved_at_unix_ns },
+            SavedEventLogEntry::ThreadName {
+                tid: SYNTH_TID_BASE,
+                name: "GPU lane".to_owned(),
+            },
+            SavedEventLogEntry::Interval {
+                tid: SYNTH_TID_BASE,
+                interval: SavedInterval {
+                    start_ns: 10,
+                    end_ns: 20,
+                    kind: SavedIntervalKind::SyntheticSpan {
+                        stack: vec![1, 2],
+                        origin_tid: None,
+                    },
+                },
+            },
+            SavedEventLogEntry::TargetIngestDiagnostics {
+                diagnostics: TargetIngestDiagnostics {
+                    spans_recorded: 1,
+                    total_duration_ns: 10,
+                    ..TargetIngestDiagnostics::default()
+                },
+            },
+        ]
     }
 
     fn test_provenance() -> SavedRunArchiveProvenance {

@@ -161,9 +161,11 @@ create the v2 directory layout: `manifest.json` plus typed facet-json chunks
 append-friendly `events.jsonl` sidecar. The manifest/package records archive
 version, save time, producer/version, OS/arch, and run summaries. The chunks
 or package store raw aggregator streams, binary/symbol metadata, target-ingest
-diagnostics, and typed `SavedEventLogEntry` records for future replay/import
-tooling. The archive preserves target spans and origin-linked stacks for later
-`threads`, `top`, `flame`, and `diagnose` queries.
+diagnostics, and typed `SavedEventLogEntry` records. New readers replay those
+records when present and keep the aggregate chunks/package members as a
+compatibility and inspection path. The archive preserves target spans and
+origin-linked stacks for later `threads`, `top`, `flame`, and `diagnose`
+queries.
 
 `stax save` works while a run is active, and after `stax stop`, until the
 next `stax record` resets the live aggregator.
@@ -187,8 +189,9 @@ stax flame --threshold-pct 0
 
 `stax open` accepts an archive directory, a `.stax` package, the v2
 `manifest.json` inside a directory archive, or a legacy v1 `archive.json`. It
-refuses to replace state while a recording is active; stop the active run
-first.
+replays v2 `events.jsonl` or embedded package events when present; legacy and
+minimal archives fall back to aggregate chunks. It refuses to replace state
+while a recording is active; stop the active run first.
 
 ## stax select-run
 
@@ -228,9 +231,10 @@ stax compare \
 The command reads each archive directly (directory, `.stax` package, v2
 manifest path, or legacy v1 `archive.json`) and prints deltas for PET samples,
 on/off-CPU interval time, target time, target span counts, origin-link counts,
-ingest drops, and the top target lanes by duration. The default is a human
-table; `--json` prints a facet-json report with named baseline/candidate/delta
-fields for scripts and benchmark notes.
+ingest drops, and the top target lanes by duration. V2 inputs use the same
+event-replay preference as `stax open`. The default is a human table; `--json`
+prints a facet-json report with named baseline/candidate/delta fields for
+scripts and benchmark notes.
 Threshold flags make the command fail directly when a candidate regresses
 past your limit, and JSON output includes the same decision in
 `threshold_failures`.

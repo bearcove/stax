@@ -42,8 +42,8 @@ nothing depends on it.
   and `stax save`, `stax open`, `stax compare`,
   and `stax compare --json` when you need durable artifacts, before/after
   notes, or CI-readable deltas. Saved archives can be a directory or one
-  `.stax` package; both carry aggregate data plus typed event records for
-  future replay/import tooling. `compare` threshold flags such as
+  `.stax` package; both carry aggregate data plus typed event records that
+  `open` and `compare` replay when present. `compare` threshold flags such as
   `--fail-target-delta-ms` and
   `--fail-unlinked-origins-delta` turn saved runs into direct regression gates.
 - **Built for agents as much as humans.** Every query is a subcommand with

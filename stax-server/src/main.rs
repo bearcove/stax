@@ -1402,6 +1402,17 @@ fn read_archive_bundle(bundle_path: &Path) -> Result<SavedRunArchive, String> {
         fs::read(bundle_path).map_err(|e| format!("read {}: {e}", bundle_path.display()))?;
     let bundle: SavedRunArchiveBundle = facet_json::from_slice(&bytes)
         .map_err(|e| format!("parse {}: {e}", bundle_path.display()))?;
+    if !bundle.events.is_empty() {
+        let mut archive = SavedRunArchive::from_event_log_entries(
+            bundle.format_version,
+            bundle.saved_at_unix_ns,
+            bundle.events,
+        );
+        if archive.runs.is_empty() {
+            archive.runs = bundle.runs;
+        }
+        return Ok(archive);
+    }
     Ok(SavedRunArchive {
         format_version: bundle.format_version,
         saved_at_unix_ns: bundle.saved_at_unix_ns,
@@ -1432,6 +1443,21 @@ fn read_archive_manifest(manifest_path: &Path) -> Result<SavedRunArchive, String
             manifest_path.display()
         )
     })?;
+    let event_log_path = base.join(ARCHIVE_EVENTS_FILE_NAME);
+    if event_log_path.exists() {
+        let entries = read_event_log(&event_log_path)?;
+        if !entries.is_empty() {
+            let mut archive = SavedRunArchive::from_event_log_entries(
+                manifest.format_version,
+                manifest.saved_at_unix_ns,
+                entries,
+            );
+            if archive.runs.is_empty() {
+                archive.runs = manifest.runs;
+            }
+            return Ok(archive);
+        }
+    }
     let aggregator = read_aggregator(archive_member_path(base, &manifest.files.aggregator)?)?;
     let binaries = read_binaries(archive_member_path(base, &manifest.files.binaries)?)?;
     let target_ingest =
@@ -1459,6 +1485,25 @@ fn read_binaries(path: PathBuf) -> Result<SavedBinaryRegistry, String> {
 fn read_target_ingest(path: PathBuf) -> Result<TargetIngestDiagnostics, String> {
     let bytes = fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     facet_json::from_slice(&bytes).map_err(|e| format!("parse {}: {e}", path.display()))
+}
+
+fn read_event_log(path: &Path) -> Result<Vec<SavedEventLogEntry>, String> {
+    let text = fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let mut entries = Vec::new();
+    for (line_index, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let entry = facet_json::from_slice(line.as_bytes()).map_err(|e| {
+            format!(
+                "parse {} line {}: {e}",
+                path.display(),
+                line_index.saturating_add(1)
+            )
+        })?;
+        entries.push(entry);
+    }
+    Ok(entries)
 }
 
 fn archive_member_path(base: &Path, member: &str) -> Result<PathBuf, String> {
@@ -1534,8 +1579,9 @@ fn now_unix_ns() -> u64 {
 #[cfg(test)]
 mod tests {
     use stax_live_proto::{
-        LiveFilter, Profiler as _, RunControl as _, RunViewParams, SavedEventLogEntry,
-        TargetIngest as _, TargetReporterStats, TargetSpan, TargetSpanBatch, TopSort, ViewParams,
+        LiveFilter, Profiler as _, RunControl as _, RunViewParams, SavedAggregator,
+        SavedBinaryRegistry, SavedEventLogEntry, TargetIngest as _, TargetReporterStats,
+        TargetSpan, TargetSpanBatch, TopSort, ViewParams,
     };
 
     use super::*;
@@ -1633,7 +1679,7 @@ mod tests {
             .expect("save single-file archive");
         assert!(package_path.is_file());
         let bundle_bytes = std::fs::read(&package_path).expect("read bundle");
-        let bundle: SavedRunArchiveBundle =
+        let mut bundle: SavedRunArchiveBundle =
             facet_json::from_slice(&bundle_bytes).expect("parse bundle");
         assert_eq!(bundle.format_version, ARCHIVE_FORMAT_VERSION);
         assert_eq!(bundle.provenance.producer, env!("CARGO_PKG_NAME"));
@@ -1646,12 +1692,22 @@ mod tests {
                         && interval.end_ns == 16_000_000
             )
         }));
+        bundle.aggregator = SavedAggregator::default();
+        bundle.binaries = SavedBinaryRegistry::default();
+        bundle.target_ingest = TargetIngestDiagnostics::default();
+        std::fs::write(
+            &package_path,
+            facet_json::to_vec_pretty(&bundle).expect("serialize aggregate-blanked bundle"),
+        )
+        .expect("write aggregate-blanked bundle");
         let bundle_archive = read_archive(&package_path).expect("read single-file archive");
         assert_eq!(bundle_archive.format_version, ARCHIVE_FORMAT_VERSION);
         assert_eq!(
             bundle_archive.runs.last().map(|run| run.label.as_str()),
             Some("archive-source")
         );
+        assert_eq!(bundle_archive.target_ingest.spans_recorded, 1);
+        assert_eq!(bundle_archive.aggregator.threads.len(), 1);
         let manifest_bytes =
             std::fs::read(archive_dir.join(ARCHIVE_MANIFEST_FILE_NAME)).expect("read manifest");
         let manifest: SavedRunArchiveManifest =
@@ -1670,6 +1726,21 @@ mod tests {
             manifest.files.target_ingest,
             ARCHIVE_TARGET_INGEST_FILE_NAME
         );
+        write_aggregator(
+            archive_dir.join(ARCHIVE_AGGREGATOR_FILE_NAME),
+            &SavedAggregator::default(),
+        )
+        .expect("blank aggregate chunk");
+        write_binaries(
+            archive_dir.join(ARCHIVE_BINARIES_FILE_NAME),
+            &SavedBinaryRegistry::default(),
+        )
+        .expect("blank binary chunk");
+        write_target_ingest(
+            archive_dir.join(ARCHIVE_TARGET_INGEST_FILE_NAME),
+            &TargetIngestDiagnostics::default(),
+        )
+        .expect("blank target-ingest chunk");
         let manifest_archive = read_archive(&archive_dir.join(ARCHIVE_MANIFEST_FILE_NAME))
             .expect("read archive through manifest path");
         assert_eq!(manifest_archive.format_version, ARCHIVE_FORMAT_VERSION);
@@ -1677,6 +1748,8 @@ mod tests {
             manifest_archive.runs.last().map(|run| run.label.as_str()),
             Some("archive-source")
         );
+        assert_eq!(manifest_archive.target_ingest.spans_recorded, 1);
+        assert_eq!(manifest_archive.aggregator.threads.len(), 1);
 
         let busy = ServerState::new_for_tests();
         busy.set_active_run_for_tests(9000);

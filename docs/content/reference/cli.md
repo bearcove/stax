@@ -123,8 +123,9 @@ directory layout: `manifest.json` plus typed facet-json chunks
 append-friendly `events.jsonl` sidecar. The manifest/package records archive
 version, save time, producer/version, OS/arch, and run summaries. The chunks
 or package store raw aggregator streams, binary/symbol metadata, target-ingest
-diagnostics, and typed `SavedEventLogEntry` records for future replay/import
-tooling.
+diagnostics, and typed `SavedEventLogEntry` records. New readers replay those
+records when present and keep the aggregate chunks/package members as a
+compatibility and inspection path.
 
 ```text
 stax save <PATH>
@@ -154,7 +155,9 @@ stax open <PATH>
 | `<PATH>` | positional `String` | archive directory, `.stax` package, v2 `manifest.json`, or legacy v1 `archive.json` |
 
 After `stax open`, `threads`, `top`, `flame`, and `diagnose` operate on the
-restored run. `open` refuses to replace state while a recording is active.
+restored run. V2 archives replay `events.jsonl` or embedded package events
+when present; legacy and minimal archives fall back to aggregate chunks.
+`open` refuses to replace state while a recording is active.
 
 ## `stax select-run`
 
@@ -201,11 +204,11 @@ stax compare [OPTIONS] <BASELINE> <CANDIDATE>
 
 The comparison reads each archive directly and prints deltas for PET samples,
 on/off-CPU interval time, target time, target span counts, origin-link counts,
-ingest drops, and the top target lanes by duration. `--json` emits the same
-comparison as named baseline/candidate/delta fields for CI and benchmark
-notes. Threshold flags fail the command when a positive candidate delta
-exceeds the limit; those failures are also reported as `threshold_failures` in
-JSON.
+ingest drops, and the top target lanes by duration. V2 inputs use the same
+event-replay preference as `stax open`. `--json` emits the same comparison as
+named baseline/candidate/delta fields for CI and benchmark notes. Threshold
+flags fail the command when a positive candidate delta exceeds the limit;
+those failures are also reported as `threshold_failures` in JSON.
 
 ## `stax top`
 

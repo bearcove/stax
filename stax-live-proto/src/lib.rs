@@ -7,6 +7,8 @@
 //! crate lets `xtask` skip the heavy runtime deps (tokio, transports, etc.)
 //! that `stax-live` pulls in.
 
+use std::collections::BTreeMap;
+
 use facet::Facet;
 
 /// Off-CPU time at a stack node, broken down by why the thread was
@@ -1088,6 +1090,92 @@ pub struct SavedRunArchive {
     pub target_ingest: TargetIngestDiagnostics,
 }
 
+impl SavedRunArchive {
+    pub fn from_event_log_entries(
+        format_version: u32,
+        saved_at_unix_ns: u64,
+        entries: impl IntoIterator<Item = SavedEventLogEntry>,
+    ) -> Self {
+        let mut archive = Self {
+            format_version,
+            saved_at_unix_ns,
+            runs: Vec::new(),
+            aggregator: SavedAggregator::default(),
+            binaries: SavedBinaryRegistry::default(),
+            target_ingest: TargetIngestDiagnostics::default(),
+        };
+        let mut thread_names = BTreeMap::new();
+        let mut threads: BTreeMap<u32, SavedThread> = BTreeMap::new();
+
+        for entry in entries {
+            match entry {
+                SavedEventLogEntry::ArchiveSaved { saved_at_unix_ns } => {
+                    archive.saved_at_unix_ns = saved_at_unix_ns;
+                }
+                SavedEventLogEntry::RunSummary { run } => {
+                    archive.runs.push(run);
+                }
+                SavedEventLogEntry::AggregatorClock {
+                    session_start_ns,
+                    last_event_ns,
+                } => {
+                    archive.aggregator.session_start_ns = session_start_ns;
+                    archive.aggregator.last_event_ns = last_event_ns;
+                }
+                SavedEventLogEntry::ThreadName { tid, name } => {
+                    thread_names.insert(tid, name);
+                }
+                SavedEventLogEntry::BinaryLoaded { binary } => {
+                    archive.binaries.binaries.push(binary);
+                }
+                SavedEventLogEntry::PetSample { tid, sample } => {
+                    threads.entry(tid).or_insert_with(|| SavedThread {
+                        tid,
+                        pet_samples: Vec::new(),
+                        intervals: Vec::new(),
+                        wakeups: Vec::new(),
+                    });
+                    if let Some(thread) = threads.get_mut(&tid) {
+                        thread.pet_samples.push(sample);
+                    }
+                }
+                SavedEventLogEntry::Interval { tid, interval } => {
+                    threads.entry(tid).or_insert_with(|| SavedThread {
+                        tid,
+                        pet_samples: Vec::new(),
+                        intervals: Vec::new(),
+                        wakeups: Vec::new(),
+                    });
+                    if let Some(thread) = threads.get_mut(&tid) {
+                        thread.intervals.push(interval);
+                    }
+                }
+                SavedEventLogEntry::Wakeup { tid, wakeup } => {
+                    threads.entry(tid).or_insert_with(|| SavedThread {
+                        tid,
+                        pet_samples: Vec::new(),
+                        intervals: Vec::new(),
+                        wakeups: Vec::new(),
+                    });
+                    if let Some(thread) = threads.get_mut(&tid) {
+                        thread.wakeups.push(wakeup);
+                    }
+                }
+                SavedEventLogEntry::TargetIngestDiagnostics { diagnostics } => {
+                    archive.target_ingest = diagnostics;
+                }
+            }
+        }
+
+        archive.aggregator.thread_names = thread_names
+            .into_iter()
+            .map(|(tid, name)| SavedThreadName { tid, name })
+            .collect();
+        archive.aggregator.threads = threads.into_values().collect();
+        archive
+    }
+}
+
 #[derive(Clone, Debug, Facet)]
 pub struct SavedRunArchiveBundle {
     pub format_version: u32,
@@ -1124,10 +1212,10 @@ pub struct SavedRunArchiveFiles {
     pub target_ingest: String,
 }
 
-/// One append-friendly record in `events.jsonl`, the saved-run sidecar
-/// written next to the v2 aggregate chunks. The current `open` path still
-/// restores from aggregate chunks; this stream gives future tooling a
-/// chronological replay substrate without reverse-engineering those chunks.
+/// One append-friendly record in `events.jsonl`, the saved-run stream written
+/// next to the v2 aggregate chunks and embedded in `.stax` packages. New
+/// readers replay this stream when it is present; the aggregate chunks remain
+/// a fast inspection and compatibility path.
 #[derive(Clone, Debug, Facet)]
 #[repr(u8)]
 pub enum SavedEventLogEntry {
@@ -1380,13 +1468,15 @@ pub trait RunControl {
     /// Errors if no run is active.
     async fn stop_active(&self) -> Result<RunSummary, RunControlError>;
 
-    /// Save the current or most recent queryable run into a v2 directory
-    /// archive at `path`, including aggregate chunks plus `events.jsonl`.
+    /// Save the current or most recent queryable run into a v2 archive at
+    /// `path`. Paths ending in `.stax` create a single-file package; other
+    /// paths create a directory with aggregate chunks plus `events.jsonl`.
     async fn save_current(&self, path: String) -> Result<(), RunControlError>;
 
     /// Open a saved archive into the server's current query state. Accepts
     /// v2 archive directories/manifests, `.stax` packages, and legacy v1
-    /// archive.json files.
+    /// archive.json files. V2 archives replay saved event records when
+    /// present.
     /// Fails while a recording is active.
     async fn open_saved(&self, path: String) -> Result<(), RunControlError>;
 

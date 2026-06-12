@@ -418,8 +418,10 @@ directory layout: `manifest.json` plus typed facet-json chunks
 append-friendly `events.jsonl` sidecar. The manifest/package records archive
 version, save time, producer/version, OS/arch, and run summaries. The chunks
 or package store raw aggregator streams, binary/symbol metadata, target-ingest
-diagnostics, and typed event records (`SavedEventLogEntry`) for future
-replay/import tooling. It is meant for bug reports, handoff, and replaying
+diagnostics, and typed event records (`SavedEventLogEntry`). `open` and
+`compare` replay those records when present and keep the aggregate
+chunks/package members as a compatibility and inspection path.
+It is meant for bug reports, handoff, and replaying
 `threads`/`top`/`flame` after the live process is gone.
 
 ```
@@ -450,7 +452,9 @@ $ stax flame --threshold-pct 0
 
 `stax open` refuses to replace state while a recording is active. Stop the
 run first. It accepts an archive directory, a `.stax` package, the v2
-`manifest.json` file, or a legacy v1 `archive.json` file.
+`manifest.json` file, or a legacy v1 `archive.json` file. V2 archives replay
+`events.jsonl` or embedded package events when present; legacy and minimal
+archives fall back to aggregate chunks.
 
 ### `stax select-run <RUN_ID>`
 
@@ -495,7 +499,8 @@ $ stax compare /tmp/before.staxdir /tmp/after.staxdir
 It reads each archive directly (directory, `.stax` package, v2 manifest path,
 or legacy v1 `archive.json`) and prints deltas for PET samples, on/off-CPU
 interval time, target time, target span counts, origin-link counts, ingest
-drops, and the top target lanes by duration.
+drops, and the top target lanes by duration. V2 inputs use the same
+event-replay preference as `stax open`.
 Pass `--json` for a facet-json report with named baseline/candidate/delta
 fields for each metric and target-lane delta; use that in CI or benchmark
 notes instead of scraping the human table. CI can fail the command directly
