@@ -521,7 +521,8 @@ Remaining work:
   - origin-linked target spans naturally visible under CPU callers
 - Threads/lanes:
   - started: target mode sorts/bars by target duration, so lanes float up
-  - synthetic lanes not hidden in long thread lists
+  - done: CLI regression test proves synthetic target lanes remain visible
+    even when `stax threads -n` cuts off ordinary threads
   - clicking a lane focuses flame/top/timeline to that tid
 - Timeline:
   - done: selected metric drives the timeline area; target mode shows
@@ -689,7 +690,8 @@ Done when:
 1. Add the corpus binary. Done: `stax-target/examples/corpus.rs`.
 2. Add scripts or docs for recording it. Done: `just demo-corpus` and the
    target-span integration guide.
-3. Add CLI snapshot-like assertions where stable.
+3. Started: add CLI snapshot-like assertions where stable. Done so far:
+   `threads_output_keeps_target_lanes_past_limit`.
 4. Use it in docs. Started: integration guide uses the corpus as the default
    demo workload.
 

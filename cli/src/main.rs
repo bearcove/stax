@@ -1,6 +1,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::env;
 use std::error::Error;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::exit;
 
@@ -1147,6 +1148,12 @@ async fn run_threads(args: ThreadsArgs) -> Result<(), Box<dyn Error>> {
 }
 
 fn print_threads(update: &ThreadsUpdate, limit: u32) {
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    write_threads(&mut out, update, limit).expect("write threads output");
+}
+
+fn write_threads<W: Write>(out: &mut W, update: &ThreadsUpdate, limit: u32) -> io::Result<()> {
     let mut threads: Vec<&stax_live_proto::ThreadInfo> = update.threads.iter().collect();
     threads.sort_by(|a, b| {
         let a_total = a.on_cpu_ns.saturating_add(off_cpu_total_ns(&a.off_cpu));
@@ -1158,13 +1165,14 @@ fn print_threads(update: &ThreadsUpdate, limit: u32) {
             .then_with(|| a.tid.cmp(&b.tid))
     });
     if threads.is_empty() {
-        println!("(no thread samples yet — is a recording in progress?)");
-        return;
+        writeln!(out, "(no thread samples yet — is a recording in progress?)")?;
+        return Ok(());
     }
-    println!(
+    writeln!(
+        out,
         "{:>10} {:>10} {:>10} {:>8} {:>8} {:>7} {:>9}  tid    name",
         "cpu ms", "target ms", "off-CPU ms", "samples", "spans", "kind", "blocked",
-    );
+    )?;
     let take = if limit == 0 {
         threads.len()
     } else {
@@ -1185,7 +1193,8 @@ fn print_threads(update: &ThreadsUpdate, limit: u32) {
         let off_total = off_cpu_total_ns(&t.off_cpu);
         let dominant = dominant_off_cpu_reason(&t.off_cpu);
         let cpu_ns = t.on_cpu_ns.saturating_sub(t.target_ns);
-        println!(
+        writeln!(
+            out,
             "{:>10.2} {:>10.2} {:>10.2} {:>8} {:>8} {:>7} {:>9}  {:<6} {}",
             cpu_ns as f64 / 1e6,
             t.target_ns as f64 / 1e6,
@@ -1196,11 +1205,17 @@ fn print_threads(update: &ThreadsUpdate, limit: u32) {
             dominant,
             t.tid,
             t.name.as_deref().unwrap_or("(unnamed)"),
-        );
+        )?;
     }
     if threads.len() > visible.len() {
-        println!("…{} more non-target threads", threads.len() - visible.len());
+        let hidden = threads.len() - visible.len();
+        writeln!(
+            out,
+            "…{hidden} more non-target thread{}",
+            if hidden == 1 { "" } else { "s" }
+        )?;
     }
+    Ok(())
 }
 
 fn thread_kind(thread: &stax_live_proto::ThreadInfo) -> &'static str {
@@ -1538,7 +1553,7 @@ fn mentions_metal_cooperation(function_name: Option<&str>, binary: Option<&str>)
 mod tests {
     use super::{
         SYNTH_TID_BASE, empty_view_hint, mentions_metal_cooperation, summarize_archive,
-        target_ingest_hints, thread_kind,
+        target_ingest_hints, thread_kind, write_threads,
     };
     use stax_live_proto::{
         OffCpuBreakdown, SavedAggregator, SavedBinaryRegistry, SavedInterval, SavedIntervalKind,
@@ -1738,6 +1753,26 @@ mod tests {
 
         assert_eq!(thread_kind(&cpu), "thread");
         assert_eq!(thread_kind(&target), "target");
+    }
+
+    #[test]
+    fn threads_output_keeps_target_lanes_past_limit() {
+        let update = ThreadsUpdate {
+            threads: vec![
+                thread(10, Some("busy cpu"), 10_000_000, 0, 10, 0),
+                thread(11, Some("less busy cpu"), 5_000_000, 0, 5, 0),
+                thread(SYNTH_TID_BASE + 9, Some("GPU queue"), 1_000_000, 0, 0, 2),
+            ],
+        };
+        let mut out = Vec::new();
+        write_threads(&mut out, &update, 1).expect("write thread table");
+        let out = String::from_utf8(out).expect("utf8 thread table");
+
+        assert!(out.contains("busy cpu"));
+        assert!(out.contains("GPU queue"));
+        assert!(out.contains("target"));
+        assert!(out.contains("…1 more non-target thread"));
+        assert!(!out.contains("less busy cpu"));
     }
 
     #[test]
