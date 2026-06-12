@@ -13,8 +13,9 @@ state, so they work on a run that is still recording.
 > operate on `stax-server`'s current query state. While a recording is active,
 > that is the active run; after a run stops, its snapshot stays selected.
 > Use `stax select-run <ID>` to restore a stopped in-memory run from
-> `stax list`, or `stax open <DIR>` to restore a saved archive. See
-> [Run Lifecycle](@/guide/run-lifecycle.md).
+> `stax list`, or pass `--run <ID>` to a reporting command as shorthand for
+> selecting that stopped run before querying. Use `stax open <DIR>` to restore
+> a saved archive. See [Run Lifecycle](@/guide/run-lifecycle.md).
 
 ## stax top
 
@@ -42,6 +43,7 @@ and `spans` is span count.
 | `--sort self`       | leaf-only attribution: where the program *is* — default   |
 | `--sort total`      | any-frame attribution: functions that *contain* hot code  |
 | `--tid <TID>`       | restrict to one thread — default: all threads             |
+| `--run <RUN_ID>`    | select a stopped in-memory run before querying            |
 
 The output columns are active time, target-executor time, PET samples, target
 span count, and function/span name. `--sort self` answers "what instruction is
@@ -95,6 +97,7 @@ carry origins, filtering to the origin CPU tid can render
 | `-d, --max-depth <N>`      | stop printing below depth N — default **12**. Cut subtrees collapse to `…N more frames` |
 | `--threshold-pct <PCT>`    | hide subtrees below this share of total active time — default **1.0**; pass `0` for the whole tree |
 | `--tid <TID>`              | restrict to one thread — default: all threads                      |
+| `--run <RUN_ID>`           | select a stopped in-memory run before querying                     |
 
 The flamegraph the server holds is unbounded; `--max-depth` only controls
 how much the CLI prints. Like `top`, `flame` prints a Metal cooperation hint
@@ -136,6 +139,7 @@ one of `idle`, `lock`, `sem`, `ipc`, `ioR`, `ioW`, `ready`, `sleep`, `conn`,
 | flag              | meaning                                                |
 |-------------------|--------------------------------------------------------|
 | `-n, --limit <N>` | how many threads to print — default **20**; `0` for all|
+| `--run <RUN_ID>`  | select a stopped in-memory run before querying         |
 
 Off-CPU intervals are recorded on both macOS and Linux. The *waker*
 attribution shown elsewhere needs the `staxd` broker on Linux — see
@@ -174,6 +178,7 @@ when nothing's been sampled yet, or your symbol got merged into a parent.
 | flag          | meaning                                          |
 |---------------|--------------------------------------------------|
 | `--tid <TID>` | restrict to one thread — default: all threads    |
+| `--run <RUN_ID>` | select a stopped in-memory run before resolving the target |
 
 Disassembly works on both `aarch64` and `x86_64`. For JIT'd code, the code
 bytes come from the [jitdump](@/guide/profiling-jit-code.md) record, so

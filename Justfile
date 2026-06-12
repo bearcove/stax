@@ -23,6 +23,15 @@ check-live:
 check-server:
     cargo check -p stax-server --all-targets --message-format=short
 
+check-mac-kperf-parse:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        cargo check -p stax-mac-kperf-parse --all-targets --message-format=short
+    else
+        echo "skipping stax-mac-kperf-parse check on non-macOS host"
+    fi
+
 test-target:
     cargo nextest list -p stax-target --all-targets
     cargo nextest run -p stax-target --all-targets
@@ -38,6 +47,16 @@ test-server-target-ingest:
     cargo nextest list -p stax-server --all-targets -E 'test(ingest_links_spans_to_origin_cpu_stack)'
     cargo nextest run -p stax-server --all-targets -E 'test(ingest_links_spans_to_origin_cpu_stack)'
 
+test-mac-kperf-timebase:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        cargo nextest list -p stax-mac-kperf-parse --all-targets -E 'test(mach_timebase_masks_cpu_bits_before_ns_conversion)'
+        cargo nextest run -p stax-mac-kperf-parse --all-targets -E 'test(mach_timebase_masks_cpu_bits_before_ns_conversion)'
+    else
+        echo "skipping stax-mac-kperf-parse timebase test on non-macOS host"
+    fi
+
 docs:
     ddc build
 
@@ -48,7 +67,7 @@ frontend-check:
 web-target-smoke:
     bash frontend/scripts/web-target-smoke.sh
 
-target-span-check: fmt-check check-target check-live-proto check-live check-server test-target test-cli-target-lanes test-server-target-ingest check-cli docs frontend-check diff-check
+target-span-check: fmt-check check-target check-live-proto check-live check-server check-mac-kperf-parse test-target test-cli-target-lanes test-server-target-ingest test-mac-kperf-timebase check-cli docs frontend-check diff-check
 
 install:
     cargo xtask install
@@ -90,8 +109,8 @@ archive-smoke:
     STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- open "$archive"
     STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- list
     STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- select-run 1
-    STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- threads -n 20
-    STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- top -n 20 --sort self
-    STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- flame --threshold-pct 2 -d 4
-    STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- diagnose
+    STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- threads --run 1 -n 20
+    STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- top --run 1 -n 20 --sort self
+    STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- flame --run 1 --threshold-pct 2 -d 4
+    STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- diagnose --run 1
     STAX_SERVER_SOCKET="$socket" cargo run -q -p stax -- compare "$archive" "$archive"

@@ -49,6 +49,7 @@ use stax_mac_capture::{
 };
 use stax_mac_kperf_sys::kdebug::{
     self, kdbg_class, kdbg_code, kdbg_func, kdbg_subclass, KdBuf, DBG_MACH, DBG_PERF,
+    KDBG_TIMESTAMP_MASK,
 };
 
 use crate::image_scan::ImageScanner;
@@ -117,6 +118,43 @@ pub struct Pipeline {
     samples_emitted: u64,
     /// Wall-clock cadence for the periodic counters log.
     next_counters_log: Instant,
+    timebase: MachTimebase,
+}
+
+#[derive(Clone, Copy)]
+struct MachTimebase {
+    numer: u64,
+    denom: u64,
+}
+
+impl MachTimebase {
+    fn current() -> Self {
+        #[repr(C)]
+        struct MachTimebaseInfo {
+            numer: u32,
+            denom: u32,
+        }
+
+        unsafe extern "C" {
+            fn mach_timebase_info(info: *mut MachTimebaseInfo) -> libc::c_int;
+        }
+
+        let mut info = MachTimebaseInfo { numer: 0, denom: 0 };
+        let rc = unsafe { mach_timebase_info(&mut info) };
+        if rc != 0 || info.denom == 0 {
+            log::warn!("mach_timebase_info failed; leaving kdebug timestamps in raw ticks");
+            return Self { numer: 1, denom: 1 };
+        }
+        Self {
+            numer: u64::from(info.numer),
+            denom: u64::from(info.denom),
+        }
+    }
+
+    fn ticks_to_ns(self, ticks: u64) -> u64 {
+        (((ticks & KDBG_TIMESTAMP_MASK) as u128) * self.numer as u128 / self.denom as u128)
+            .min(u64::MAX as u128) as u64
+    }
 }
 
 impl Pipeline {
@@ -181,6 +219,7 @@ impl Pipeline {
             samples_empty_user: 0,
             samples_emitted: 0,
             next_counters_log: now + SAMPLE_COUNTERS_LOG_PERIOD,
+            timebase: MachTimebase::current(),
         }
     }
 
@@ -287,6 +326,7 @@ impl Pipeline {
         let pmc_idx_l1d = self.config.pmc_idx_l1d;
         let pmc_idx_brmiss = self.config.pmc_idx_brmiss;
         for rec in records {
+            let rec = self.normalize_record_timestamp(*rec);
             let class = kdbg_class(rec.debugid);
             if class == DBG_PERF {
                 let key = (
@@ -296,7 +336,7 @@ impl Pipeline {
                 );
                 *self.histogram.entry(key).or_insert(0) += 1;
             } else if class == DBG_MACH && kdbg_subclass(rec.debugid) == kdebug::DBG_MACH_SCHED {
-                self.offcpu.feed(rec);
+                self.offcpu.feed(&rec);
                 continue;
             }
             // Locals so the closure doesn't have to borrow from
@@ -310,7 +350,7 @@ impl Pipeline {
             let samples_seen = &mut self.samples_seen;
             let samples_empty_user = &mut self.samples_empty_user;
             let samples_emitted = &mut self.samples_emitted;
-            self.parser.feed(rec, |sample| {
+            self.parser.feed(&rec, |sample| {
                 *samples_seen += 1;
                 seen_tids.insert(sample.tid);
                 if let Some(est) = slide_est.as_mut() {
@@ -408,6 +448,11 @@ impl Pipeline {
         }
     }
 
+    fn normalize_record_timestamp(&self, mut rec: KdBuf) -> KdBuf {
+        rec.timestamp = self.timebase.ticks_to_ns(rec.timestamp);
+        rec
+    }
+
     /// End-of-session: finalize the slide estimator and emit kallsyms,
     /// then log diagnostic summary (record total + parser stats +
     /// DBG_PERF histogram + off-CPU summary + PMU totals).
@@ -436,6 +481,7 @@ impl Pipeline {
             samples_empty_user,
             samples_emitted,
             next_counters_log: _,
+            timebase: _,
         } = self;
         let _ = config;
 
@@ -560,5 +606,20 @@ fn host_arch_str() -> Option<&'static str> {
         Some("x86_64")
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MachTimebase;
+
+    #[test]
+    fn mach_timebase_masks_cpu_bits_before_ns_conversion() {
+        let timebase = MachTimebase {
+            numer: 125,
+            denom: 3,
+        };
+        let ticks_with_cpu_bits = 0xaa00_0000_0000_0000 | 240;
+        assert_eq!(timebase.ticks_to_ns(ticks_with_cpu_bits), 10_000);
     }
 }

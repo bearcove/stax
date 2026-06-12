@@ -7,8 +7,8 @@ use std::process::exit;
 
 use figue as args;
 use stax_core::args::{
-    AnnotateArgs, ArchiveArgs, Cli, Command, CompareArgs, FlameArgs, RecordArgs, ThreadsArgs,
-    TopArgs, WaitArgs,
+    AnnotateArgs, ArchiveArgs, Cli, Command, CompareArgs, DiagnoseArgs, FlameArgs, RecordArgs,
+    ThreadsArgs, TopArgs, WaitArgs,
 };
 #[cfg(target_os = "linux")]
 use stax_core::cmd_setup_linux;
@@ -16,9 +16,9 @@ use stax_core::cmd_setup_linux;
 use stax_core::cmd_setup_mac;
 use stax_live_proto::{
     DiagnosticsSnapshot, FlameNode, FlamegraphUpdate, LiveFilter, OffCpuBreakdown, ProfilerClient,
-    RunControlClient, RunSummary, SavedIntervalKind, SavedRunArchive, SavedRunArchiveManifest,
-    ServerStatus, StopReason, TargetIngestDiagnostics, ThreadsUpdate, TopEntry, TopSort, TopUpdate,
-    ViewParams, WaitCondition, WaitOutcome,
+    RunControlClient, RunId, RunSummary, SavedIntervalKind, SavedRunArchive,
+    SavedRunArchiveManifest, ServerStatus, StopReason, TargetIngestDiagnostics, ThreadsUpdate,
+    TopEntry, TopSort, TopUpdate, ViewParams, WaitCondition, WaitOutcome,
 };
 
 #[cfg(target_os = "macos")]
@@ -67,7 +67,7 @@ fn main_impl() -> Result<(), Box<dyn Error>> {
         }
         Command::Status => block_on_async(async { run_status().await })?,
         Command::List => block_on_async(async { run_list().await })?,
-        Command::Diagnose => block_on_async(async { run_diagnose().await })?,
+        Command::Diagnose(args) => block_on_async(async { run_diagnose(args).await })?,
         Command::Dump => run_dump()?,
         Command::Wait(args) => block_on_async(async { run_wait(args).await })?,
         Command::Stop => block_on_async(async { run_stop().await })?,
@@ -640,8 +640,9 @@ async fn run_list() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn run_diagnose() -> Result<(), Box<dyn Error>> {
+async fn run_diagnose(args: DiagnoseArgs) -> Result<(), Box<dyn Error>> {
     let url = require_server_socket()?;
+    select_query_run_if_requested(&url, "diagnose --run", args.run).await?;
     let client: RunControlClient = vox::connect(&url).await?;
     let _debug_registration = register_run_control_client("diagnose", &client);
     let snapshot = client.diagnostics().await.map_err(|e| format!("{e:?}"))?;
@@ -740,6 +741,23 @@ async fn run_select_run(args: stax_core::args::SelectRunArgs) -> Result<(), Box<
         .map_err(|e| format!("{e:?}"))?;
     println!("selected:");
     print_run_one_line(&summary);
+    Ok(())
+}
+
+async fn select_query_run_if_requested(
+    url: &str,
+    surface: &'static str,
+    run_id: Option<u64>,
+) -> Result<(), Box<dyn Error>> {
+    let Some(run_id) = run_id else {
+        return Ok(());
+    };
+    let client: RunControlClient = vox::connect(url).await?;
+    let _debug_registration = register_run_control_client(surface, &client);
+    client
+        .select_run(RunId(run_id))
+        .await
+        .map_err(|e| format!("{e:?}"))?;
     Ok(())
 }
 
@@ -1132,6 +1150,7 @@ fn truncate_label(label: &str, max_chars: usize) -> String {
 
 async fn run_top(args: TopArgs) -> Result<(), Box<dyn Error>> {
     let url = require_server_socket()?;
+    select_query_run_if_requested(&url, "top --run", args.run).await?;
     let sort = match args.sort.as_str() {
         "self" => TopSort::BySelf,
         "total" => TopSort::ByTotal,
@@ -1201,6 +1220,7 @@ async fn run_top(args: TopArgs) -> Result<(), Box<dyn Error>> {
 
 async fn run_annotate(args: AnnotateArgs) -> Result<(), Box<dyn Error>> {
     let url = require_server_socket()?;
+    select_query_run_if_requested(&url, "annotate --run", args.run).await?;
     let client: ProfilerClient = vox::connect(&url).await?;
     let _debug_registration = register_profiler_client("annotate", &client);
     let view_params = ViewParams {
@@ -1238,6 +1258,7 @@ async fn run_annotate(args: AnnotateArgs) -> Result<(), Box<dyn Error>> {
 
 async fn run_threads(args: ThreadsArgs) -> Result<(), Box<dyn Error>> {
     let url = require_server_socket()?;
+    select_query_run_if_requested(&url, "threads --run", args.run).await?;
     let client: ProfilerClient = vox::connect(&url).await?;
     let _debug_registration = register_profiler_client("threads", &client);
     let update = client.threads().await.map_err(|e| format!("{e:?}"))?;
@@ -1351,6 +1372,7 @@ fn dominant_off_cpu_reason(b: &OffCpuBreakdown) -> &'static str {
 
 async fn run_flame(args: FlameArgs) -> Result<(), Box<dyn Error>> {
     let url = require_server_socket()?;
+    select_query_run_if_requested(&url, "flame --run", args.run).await?;
     let client: ProfilerClient = vox::connect(&url).await?;
     let _debug_registration = register_profiler_client("flame", &client);
     let update = client

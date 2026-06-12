@@ -307,9 +307,11 @@ Status as of 2026-06-12:
   reject other versions loudly.
 - Stopped/opened runs now keep an in-memory query snapshot while
   `stax-server` stays alive. `stax select-run <ID>` restores one stopped run
-  from `stax list` into the current query state.
+  from `stax list` into the current query state. `top`, `flame`, `threads`,
+  `annotate`, and `diagnose` accept `--run <ID>` as a stateful shorthand for
+  selecting that stopped run before querying.
 - Current deliberate non-goals:
-  - no per-call `--run <ID>` query parameter yet
+  - no non-mutating per-RPC `RunId` query parameter yet
   - no structured compare output yet
   - no single-file `.stax` packaging yet
   - no append-friendly event log or `blobs/` layout yet
@@ -389,7 +391,10 @@ Add per-run querying:
 - Saved runs imply explicit run identity in CLI and RPC:
   - done: `stax select-run <ID>` restores stopped in-memory history into the
     current query state
-  - later: per-call `--run <ID>` for non-mutating live-history queries
+  - done: reporting commands accept `--run <ID>` as a stateful shorthand for
+    selecting stopped in-memory history before querying
+  - later: non-mutating per-RPC `RunId` selectors if web/API clients need
+    concurrent comparisons without changing server query state
   - `--archive <PATH>` or `stax open`
 - Web UI should be able to inspect a saved run without a live target.
 
@@ -675,7 +680,8 @@ Tasks:
     formatting
   - done: focused Rust checks (`just check-target`, `just test-target`,
     `just check-cli`, `just test-cli-target-lanes`, `just check-live-proto`,
-    `just check-live`, `just check-server`, `just test-server-target-ingest`)
+    `just check-live`, `just check-server`, `just test-server-target-ingest`,
+    `just check-mac-kperf-parse`, `just test-mac-kperf-timebase`)
   - done: docs build (`just docs`)
   - done: frontend build/typecheck (`just frontend-check`)
   - done: aggregate focused target-span verification (`just target-span-check`)
@@ -751,12 +757,22 @@ Done when:
    through a checkout-local server/CLI.
 8. Done: add stopped-run query snapshots plus `stax select-run <ID>` for
    restoring in-memory history into the current query state.
+9. Done: add reporting-command `--run <ID>` shorthands for `threads`, `top`,
+   `flame`, `annotate`, and `diagnose`, backed by the same stopped-run
+   selector.
+10. Done: normalize macOS kdebug mach tick timestamps to nanoseconds at the
+    parser pipeline boundary, so `stax-target` origin timestamps and PET
+    sample timestamps share one clock domain on Intel and Apple Silicon Macs.
 
 Done when:
 
 - Record -> stop -> save -> restart server -> open -> threads/top/flame works.
 - Record multiple runs -> `stax list` -> `stax select-run <ID>` ->
   threads/top/flame works while the daemon stays alive.
+- Record multiple runs -> `stax top --run <ID>` / `stax flame --run <ID>` /
+  `stax diagnose --run <ID>` works for stopped in-memory history.
+- A macOS corpus run reports linked origins with sane PET distances instead
+  of every good origin being `too_far`.
 
 Deferred:
 
@@ -866,15 +882,16 @@ Resolved for this phase:
   workflow dispatch until the runner contract for recording and browser access
   is settled.
 - Saved-run format v2 is implemented as a chunked directory layout for new
-  saves. Stopped-run history has an in-memory selector via `select-run`. The
-  next persistence question is whether append-friendly event logs and
-  non-mutating per-call `--run` selectors should share a single query model.
+  saves. Stopped-run history has an in-memory selector via `select-run` plus
+  stateful CLI `--run` shorthands. The next persistence question is whether
+  append-friendly event logs and non-mutating per-RPC `RunId` selectors should
+  share a single query model.
 
 Still open:
 
-- Should append-friendly saved-run event logs land before per-call
-  `--run <ID>` live querying, or should those land together so archives and
-  live history share one query selector model?
+- Should append-friendly saved-run event logs land before non-mutating
+  per-RPC `RunId` querying, or should those land together so archives and live
+  history share one query selector model?
 - Whether the manual live smokes should become required checks once the runner
   can provide browser dependencies and stax daemon/profiling access.
 

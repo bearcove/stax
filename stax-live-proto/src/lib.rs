@@ -1312,9 +1312,10 @@ pub trait RunControl {
     async fn open_saved(&self, path: String) -> Result<(), RunControlError>;
 
     /// Restore one stopped in-memory run into the server's current query
-    /// state. This is the explicit selector for run history until every
-    /// Profiler query grows a `RunId` parameter. Fails while a recording is
-    /// active, because the live aggregator belongs to that recording.
+    /// state. CLI reporting commands use this as their `--run <ID>` shorthand;
+    /// a future non-mutating Profiler `RunId` parameter would be a separate
+    /// query model. Fails while a recording is active, because the live
+    /// aggregator belongs to that recording.
     async fn select_run(&self, run_id: RunId) -> Result<RunSummary, RunControlError>;
 }
 

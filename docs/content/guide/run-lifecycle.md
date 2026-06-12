@@ -41,6 +41,7 @@ stax top                     # still works — same data
 stax record -- ./bench       # run 2 — current query state switches to run 2
 stax stop
 stax select-run 1            # restore run 1 into the current query state
+stax top --run 1             # shorthand: select run 1, then query it
 ```
 
 In-memory run history does not survive a daemon restart. To keep a run beyond
@@ -52,9 +53,11 @@ stax save /tmp/stax-demo.staxdir
 stax open /tmp/stax-demo.staxdir
 ```
 
-`stax open` loads the saved run back into the current query state. Per-call
-`--run <ID>` querying is still on the roadmap; today `select-run` changes the
-server's selected query state.
+`stax open` loads the saved run back into the current query state. For
+stopped in-memory history, `top`, `flame`, `threads`, `annotate`, and
+`diagnose` also accept `--run <ID>` as a shorthand for selecting that run
+before querying it. It has the same lifetime as `select-run`: save anything
+that must survive a daemon restart.
 
 ## stax status
 
@@ -193,11 +196,16 @@ stax list
 stax select-run 1
 stax top -n 20
 stax flame --threshold-pct 0
+stax diagnose --run 1
 ```
 
 `select-run` refuses to replace state while a recording is active. It is a
 server-memory selector, not persistence: after a daemon restart, use
 [`stax open`](#stax-open) on a saved archive instead.
+For one-off inspection, `stax threads --run 1`, `stax top --run 1`,
+`stax flame --run 1`, `stax annotate --run 1 …`, and
+`stax diagnose --run 1` are equivalent shorthands for selecting the stopped
+run before the query.
 
 ## stax compare
 
@@ -223,9 +231,9 @@ just archive-smoke
 
 That recipe starts a checkout-local `stax-server` on a temporary socket,
 records `stax-target/examples/corpus.rs` with the checkout CLI, saves the run
-to a temporary archive directory, reopens it, exercises `stax select-run`,
-queries the restored run through `threads`/`top`/`flame`/`diagnose`, and runs
-`stax compare` against itself.
+to a temporary archive directory, reopens it, exercises `stax select-run` and
+per-command `--run`, queries the restored run through
+`threads`/`top`/`flame`/`diagnose`, and runs `stax compare` against itself.
 
 The focused target-span workflow runs the static verifier on normal PRs. The
 archive and web smokes are available as manual `workflow_dispatch` checks in

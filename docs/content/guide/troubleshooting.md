@@ -165,12 +165,10 @@ outside `~/Library`.
   hardened runtime and no `get-task-allow` entitlement cannot be attached to.
 - **Run list history is in-memory.** `stax list` shows active/history rows,
   and `stax select-run <ID>` can restore a stopped row into the current query
-  state, but that list does not survive a `stax-server` restart. Use
-  `stax save <DIR>` before restart, then `stax open <DIR>` to restore the
-  saved run into the current query state.
-- **No per-call `--run` selector yet.** Queries hit the current query state:
-  the active run, the most recently stopped run, a `select-run` row, or an
-  opened archive. See [Run Lifecycle](@/guide/run-lifecycle.md).
+  state, but that list does not survive a `stax-server` restart. The reporting
+  commands also accept `--run <ID>` as a shorthand for selecting a stopped
+  in-memory run before querying it. Use `stax save <DIR>` before restart, then
+  `stax open <DIR>` to restore the saved run into the current query state.
 
 ## Still stuck?
 

@@ -237,9 +237,10 @@ stax select-run 1       # restore run 1 into the current query state
 
 `select-run` is still server-memory history: it does not survive a daemon
 restart. Save anything you need to hand off or keep with `stax save <DIR>`,
-then restore it later with `stax open <DIR>`. Per-call `--run <ID>` querying
-is still future work; today the selector changes the server's current query
-state.
+then restore it later with `stax open <DIR>`. For one-off inspection,
+`stax top --run <ID>`, `stax flame --run <ID>`, `stax threads --run <ID>`,
+`stax annotate --run <ID> …`, and `stax diagnose --run <ID>` select that
+stopped in-memory run before querying it.
 
 ## Lifecycle from an agent's POV
 
@@ -283,8 +284,10 @@ just check-cli               # cargo check -p stax --all-targets
 just check-live-proto        # cargo check -p stax-live-proto --all-targets
 just check-live              # cargo check -p stax-live --all-targets
 just check-server            # cargo check -p stax-server --all-targets
+just check-mac-kperf-parse   # macOS: check kperf parser/timestamp pipeline
 just test-cli-target-lanes   # stable CLI synthetic-lane regression
 just test-server-target-ingest # TargetIngest -> Profiler target-span regression
+just test-mac-kperf-timebase # macOS: mach tick -> ns clock-domain regression
 just docs                    # ddc build
 just frontend-check          # pnpm typecheck + vite build
 just target-span-check       # all focused target-span checks above
@@ -462,6 +465,19 @@ operate on that run. `select-run` refuses to replace state while a recording
 is active. It is not persistence; restart-safe handoff still needs
 `stax save` / `stax open`.
 
+The reporting commands also accept `--run <RUN_ID>` as shorthand for selecting
+a stopped in-memory run before the query:
+
+```
+stax threads --run 1 -n 0
+stax top --run 1 -n 20 --sort self
+stax flame --run 1 --threshold-pct 0
+stax diagnose --run 1
+```
+
+This shorthand has the same server-memory lifetime and the same active-run
+refusal as `select-run`.
+
 ### `stax compare <BASELINE> <CANDIDATE>`
 
 Compare two saved archives without touching `stax-server` state.
@@ -485,9 +501,9 @@ just archive-smoke
 
 That starts a checkout-local `stax-server` on a temporary socket, records
 `stax-target/examples/corpus.rs` with the checkout CLI, saves it to a
-temporary archive directory, reopens it, exercises `stax select-run`, queries
-`threads`/`top`/`flame`/`diagnose`, and runs `stax compare` against the
-archive itself.
+temporary archive directory, reopens it, exercises `stax select-run` plus the
+per-command `--run` shorthand, queries `threads`/`top`/`flame`/`diagnose`,
+and runs `stax compare` against the archive itself.
 
 For the browser surface, use the checkout-local web target smoke:
 
@@ -502,7 +518,7 @@ Codex Playwright wrapper when present, then `playwright-cli` from `PATH`, then
 `npx --package @playwright/cli playwright-cli`; set `PWCLI=/path/to/wrapper`
 to force a specific browser driver.
 
-### `stax top [-n N] [--sort self|total] [--tid TID]`
+### `stax top [--run RUN_ID] [-n N] [--sort self|total] [--tid TID]`
 
 Snapshot the top-N hottest functions in the active run.
 
@@ -510,6 +526,8 @@ Snapshot the top-N hottest functions in the active run.
   *now*).
 - `--sort total` — any-frame attribution (functions that *contain* hot
   code, including their callers).
+- `--run <RUN_ID>` — select a stopped in-memory run from `stax list` before
+  querying. Equivalent to `stax select-run <RUN_ID>` followed by `stax top`.
 
 Output is one line per entry with active time, target-executor time, PET
 sample count, target span count, and symbol name. For synthetic target lanes,
@@ -525,7 +543,7 @@ $ stax top -n 5
     …
 ```
 
-### `stax threads [-n N]`
+### `stax threads [--run RUN_ID] [-n N]`
 
 Per-thread and synthetic-lane active/off-CPU breakdown for the current run,
 sorted by total activity. Use it to figure out *which thread or lane* is
@@ -551,8 +569,10 @@ recorded on both macOS and Linux.
 
 `-n 0` prints every thread. Default 20. Synthetic target lanes with spans are
 included even when they would otherwise fall past the cutoff.
+`--run <RUN_ID>` selects a stopped in-memory run from `stax list` before
+querying.
 
-### `stax flame [-d MAX_DEPTH] [--threshold-pct PCT] [--tid TID]`
+### `stax flame [--run RUN_ID] [-d MAX_DEPTH] [--threshold-pct PCT] [--tid TID]`
 
 Print the active flamegraph as an indented Markdown tree, sorted by active
 time descending at each level. Same data the web UI renders; this is the
@@ -566,6 +586,8 @@ filtering to the origin CPU tid renders `(all) -> CPU caller -> lane -> span`.
   falls below `PCT` (default 1%; pass `0` for the whole tree).
 - `--tid` — filter to one thread. Origin-linked target spans are included
   for the CPU thread that queued them.
+- `--run <RUN_ID>` — select a stopped in-memory run from `stax list` before
+  querying.
 
 Operates on the current run's aggregator (same rules as `stax top`).
 
@@ -585,7 +607,7 @@ $ stax flame -d 4 --threshold-pct 2
 `​``
 ```
 
-### `stax annotate <TARGET> [--tid TID]`
+### `stax annotate <TARGET> [--run RUN_ID] [--tid TID]`
 
 Disassemble + annotate one function from the current run.
 
@@ -614,9 +636,10 @@ stax: matched "translate" → vox_jit::translate (3812 self samples)
 ```
 
 Disassembly works on `x86_64` and `aarch64`. `--tid` filters to one thread;
-omit for whole-process.
+omit for whole-process. `--run <RUN_ID>` selects a stopped in-memory run from
+`stax list` before resolving the target.
 
-### `stax diagnose`
+### `stax diagnose [--run RUN_ID]`
 
 Dump `stax-server` diagnostics: active run state plus target-span ingest
 counters (batches, recorded/dropped spans, lane totals, and origin
@@ -628,7 +651,8 @@ active run, batches from the wrong pid, and local stax-target queue overflow or
 worker-disconnect drops. For unlinked origins it distinguishes synthetic target
 tids, tids with no PET samples, sampled tids with no user stacks, and origins
 too far from the nearest sample. Use it when numbers look wrong and you want
-the pipeline's own accounting.
+the pipeline's own accounting. `--run <RUN_ID>` selects a stopped in-memory
+run before dumping diagnostics.
 
 ### `stax dump`
 

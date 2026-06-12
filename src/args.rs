@@ -37,7 +37,7 @@ pub enum Command {
 
     /// Dump stax-server diagnostics, including target-span ingest,
     /// origin-link reasons, and PET origin-distance counters.
-    Diagnose,
+    Diagnose(DiagnoseArgs),
 
     /// Ask running stax processes to dump SIGUSR1 telemetry/debug
     /// snapshots into unified logging.
@@ -62,19 +62,19 @@ pub enum Command {
     /// Compare two saved run archives without touching stax-server state.
     Compare(CompareArgs),
 
-    /// Snapshot top functions or target-span names from the active run.
+    /// Snapshot top functions or target-span names from the current query state.
     /// Output includes active time, target-executor time, PET samples,
     /// and target span counts.
     Top(TopArgs),
 
-    /// Disassemble + annotate a function from the active run.
+    /// Disassemble + annotate a function from the current query state.
     Annotate(AnnotateArgs),
 
-    /// Print the active flamegraph as an indented tree, with
+    /// Print the current flamegraph as an indented tree, with
     /// target-executor time/spans broken out per node.
     Flame(FlameArgs),
 
-    /// List real threads and synthetic target lanes with CPU/target/off-CPU breakdown.
+    /// List current real threads and synthetic target lanes with CPU/target/off-CPU breakdown.
     Threads(ThreadsArgs),
 }
 
@@ -104,6 +104,14 @@ pub struct SelectRunArgs {
 }
 
 #[derive(Facet, Debug)]
+pub struct DiagnoseArgs {
+    /// Select a stopped in-memory run from `stax list` before querying.
+    /// Equivalent to `stax select-run <ID>` followed by `stax diagnose`.
+    #[facet(args::named, default)]
+    pub run: Option<u64>,
+}
+
+#[derive(Facet, Debug)]
 pub struct WaitArgs {
     /// Stop waiting after at least this many PET samples have landed.
     /// Mutually exclusive with --for-seconds and --until-symbol.
@@ -129,6 +137,11 @@ pub struct WaitArgs {
 
 #[derive(Facet, Debug)]
 pub struct TopArgs {
+    /// Select a stopped in-memory run from `stax list` before querying.
+    /// Equivalent to `stax select-run <ID>` followed by `stax top`.
+    #[facet(args::named, default)]
+    pub run: Option<u64>,
+
     /// Maximum number of function/span-name entries to return.
     #[facet(args::named, args::short = 'n', default = 20)]
     pub limit: u32,
@@ -147,6 +160,11 @@ pub struct TopArgs {
 
 #[derive(Facet, Debug)]
 pub struct ThreadsArgs {
+    /// Select a stopped in-memory run from `stax list` before querying.
+    /// Equivalent to `stax select-run <ID>` followed by `stax threads`.
+    #[facet(args::named, default)]
+    pub run: Option<u64>,
+
     /// Maximum number of threads/lanes to print, sorted by total
     /// activity; target lanes with spans are always included. 0 to
     /// print all.
@@ -156,6 +174,11 @@ pub struct ThreadsArgs {
 
 #[derive(Facet, Debug)]
 pub struct FlameArgs {
+    /// Select a stopped in-memory run from `stax list` before querying.
+    /// Equivalent to `stax select-run <ID>` followed by `stax flame`.
+    #[facet(args::named, default)]
+    pub run: Option<u64>,
+
     /// Maximum tree depth to print. The flamegraph the server returns
     /// is unbounded; this just controls how deep the CLI prints
     /// (children below the cut-off are summarised as `…<N more
@@ -180,11 +203,15 @@ pub struct AnnotateArgs {
     /// Function to annotate. Either a hex address (`0x10004ad60`)
     /// or a substring of the demangled symbol name; the substring
     /// is matched against the current run's top-N leaf samples and
-    /// the hottest match wins. Operates on whichever run the
-    /// server has active (or last finished); historical runs by
-    /// id are not yet addressable.
+    /// the hottest match wins. Operates on the server's current query state,
+    /// or on a stopped in-memory run selected with `--run`.
     #[facet(args::positional)]
     pub target: String,
+
+    /// Select a stopped in-memory run from `stax list` before querying.
+    /// Equivalent to `stax select-run <ID>` followed by `stax annotate`.
+    #[facet(args::named, default)]
+    pub run: Option<u64>,
 
     /// Filter to one thread by tid. Default: all threads.
     #[facet(args::named, default)]
