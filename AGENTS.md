@@ -280,7 +280,11 @@ just test-target             # nextest list/run for stax-target
 just fmt-check               # cargo fmt --check
 just diff-check              # git diff --check
 just check-cli               # cargo check -p stax --all-targets
+just check-live-proto        # cargo check -p stax-live-proto --all-targets
+just check-live              # cargo check -p stax-live --all-targets
+just check-server            # cargo check -p stax-server --all-targets
 just test-cli-target-lanes   # stable CLI synthetic-lane regression
+just test-server-target-ingest # TargetIngest -> Profiler target-span regression
 just docs                    # ddc build
 just frontend-check          # pnpm typecheck + vite build
 just target-span-check       # all focused target-span checks above

@@ -2,12 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import { channel } from "@bearcove/vox-core";
 import type {
   ProfilerClient,
+  TargetLaneTimeline,
   TimelineBucket,
   TimeRange,
   TimelineUpdate,
 } from "./generated/profiler.generated.ts";
 import type { DisplayMode } from "./App.tsx";
-import { cpuOnlyNs } from "./wire.ts";
+import { cpuOnlyNs, formatDuration } from "./wire.ts";
 
 /// Compact timeline strip across the top of the page. Each bucket is
 /// drawn as a compact area; height is proportional to the selected
@@ -19,12 +20,14 @@ export function Timeline({
   range,
   onRangeChange,
   displayMode,
+  onSelectTid,
 }: {
   client: ProfilerClient;
   tid: number | null;
   range: TimeRange | null;
   onRangeChange: (r: TimeRange | null) => void;
   displayMode: DisplayMode;
+  onSelectTid: (tid: number) => void;
 }) {
   const [update, setUpdate] = useState<TimelineUpdate | null>(null);
   const barsRef = useRef<SVGSVGElement | null>(null);
@@ -155,6 +158,13 @@ export function Timeline({
           />
         )}
       </svg>
+      {update.target_lanes.length > 0 && (
+        <TargetLaneTracks
+          lanes={update.target_lanes}
+          strings={update.strings}
+          onSelectTid={onSelectTid}
+        />
+      )}
       <div className="timeline-footer">
         {displayModeLabel(displayMode)} ·{" "}
         {(
@@ -182,6 +192,67 @@ export function Timeline({
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+function TargetLaneTracks({
+  lanes,
+  strings,
+  onSelectTid,
+}: {
+  lanes: TargetLaneTimeline[];
+  strings: string[];
+  onSelectTid: (tid: number) => void;
+}) {
+  const max = lanes.reduce(
+    (m, lane) =>
+      lane.buckets.reduce((lm, value) => (value > lm ? value : lm), m),
+    0n,
+  );
+  const maxF = max === 0n ? 1 : Number(max);
+
+  return (
+    <div className="timeline-target-lanes">
+      {lanes.map((lane) => {
+        const label =
+          lane.lane_name != null ? strings[lane.lane_name] : `tid ${lane.tid}`;
+        const n = lane.buckets.length || 1;
+        return (
+          <button
+            key={lane.tid}
+            type="button"
+            className="timeline-target-lane"
+            onClick={() => onSelectTid(lane.tid)}
+            title={`tid ${lane.tid} · ${formatDuration(lane.total_target_ns)} target · ${lane.target_spans.toString()} spans`}
+          >
+            <span className="timeline-target-lane-label">{label}</span>
+            <svg
+              className="timeline-target-lane-bars"
+              viewBox="0 0 100 12"
+              preserveAspectRatio="none"
+              aria-hidden="true"
+            >
+              {lane.buckets.map((value, i) => {
+                if (value === 0n) return null;
+                const h = Math.max(1, (Number(value) / maxF) * 12);
+                return (
+                  <rect
+                    key={i}
+                    x={(i / n) * 100}
+                    y={12 - h}
+                    width={100 / n}
+                    height={h}
+                  />
+                );
+              })}
+            </svg>
+            <span className="timeline-target-lane-meta">
+              {formatDuration(lane.total_target_ns)}
+            </span>
+          </button>
+        );
+      })}
     </div>
   );
 }

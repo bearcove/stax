@@ -12,8 +12,8 @@ use parking_lot::RwLock;
 use stax_live_proto::{
     AnnotatedLine, AnnotatedView, CfgUpdate, FlameNode, FlamegraphUpdate, IntervalEntry,
     IntervalListUpdate, LiveFilter, NeighborsUpdate, PetSampleEntry, PetSampleListUpdate, Profiler,
-    TargetSpanEntry, TargetSpanGroup, TargetSpanListUpdate, ThreadInfo, ThreadsUpdate,
-    TimelineBucket, TimelineUpdate, TopEntry, TopSort, TopUpdate, ViewParams,
+    TargetLaneTimeline, TargetSpanEntry, TargetSpanGroup, TargetSpanListUpdate, ThreadInfo,
+    ThreadsUpdate, TimelineBucket, TimelineUpdate, TopEntry, TopSort, TopUpdate, ViewParams,
 };
 
 use crate::aggregator::{Aggregation, EventCtx, OffCpuBreakdown, PmcAccum, StackNode};
@@ -332,12 +332,13 @@ impl Profiler for LiveServer {
     }
 
     async fn timeline(&self, tid: Option<u32>) -> TimelineUpdate {
-        build_timeline_update(&self.aggregator, tid)
+        build_timeline_update(&self.aggregator, &self.binaries, tid)
     }
 
     async fn subscribe_timeline(&self, tid: Option<u32>, output: vox::Tx<TimelineUpdate>) {
         tracing::info!(?tid, "subscribe_timeline: starting stream");
         let aggregator = self.aggregator.clone();
+        let binaries = self.binaries.clone();
         let revision = self.revision.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
@@ -347,7 +348,7 @@ impl Profiler for LiveServer {
                 if !should_publish_revision(&revision, &mut last_seen) {
                     continue;
                 }
-                let update = build_timeline_update(&aggregator, tid);
+                let update = build_timeline_update(&aggregator, &binaries, tid);
                 if let Err(e) = output.send(update).await {
                     tracing::info!(?tid, "subscribe_timeline: stream ended: {e:?}");
                     break;
@@ -1215,11 +1216,17 @@ fn group_top_entries(
 /// Bucket size is chosen so we stay around `TARGET_BUCKETS`
 /// regardless of recording duration, with a sensible minimum so we
 /// don't over-quantize a 1-second recording.
-fn build_timeline_update(aggregator: &Arc<RwLock<Aggregator>>, tid: Option<u32>) -> TimelineUpdate {
+fn build_timeline_update(
+    aggregator: &Arc<RwLock<Aggregator>>,
+    binaries: &Arc<RwLock<BinaryRegistry>>,
+    tid: Option<u32>,
+) -> TimelineUpdate {
     const TARGET_BUCKETS: u64 = 200;
     const MIN_BUCKET_NS: u64 = 50_000_000; // 50 ms
+    const TARGET_LANE_CAP: usize = 8;
 
     let agg = aggregator.read();
+    let binaries = binaries.read();
     let start = agg.session_start_ns().unwrap_or(0);
     let last = agg.last_event_ns().unwrap_or(start);
     let recording_duration_ns = last.saturating_sub(start);
@@ -1233,12 +1240,26 @@ fn build_timeline_update(aggregator: &Arc<RwLock<Aggregator>>, tid: Option<u32>)
     let mut on_cpu_per_bucket: Vec<u64> = vec![0; n_buckets.max(1)];
     let mut target_per_bucket: Vec<u64> = vec![0; n_buckets.max(1)];
     let mut off_cpu_per_bucket: Vec<u64> = vec![0; n_buckets.max(1)];
+    let mut target_lanes: HashMap<u32, TargetLaneTimelineAccum> = HashMap::new();
+    let mut interner = StringInterner::new();
 
     let mut total_on_cpu_ns: u64 = 0;
     let mut total_target_ns: u64 = 0;
     let mut total_off_cpu_ns: u64 = 0;
 
-    for (_tid, interval) in agg.iter_intervals(tid) {
+    for (event_tid, interval) in agg.iter_intervals(None) {
+        let target_info = match &interval.kind {
+            IntervalKind::SyntheticSpan { stack, origin_tid } => {
+                Some((stack.as_ref(), *origin_tid))
+            }
+            IntervalKind::OnCpu | IntervalKind::OffCpu { .. } => None,
+        };
+        if let Some(filter_tid) = tid
+            && event_tid != filter_tid
+            && target_info.and_then(|(_, origin_tid)| origin_tid) != Some(filter_tid)
+        {
+            continue;
+        }
         let int_start = interval.start_ns;
         let int_end = if interval.end_ns == 0 {
             last
@@ -1248,8 +1269,14 @@ fn build_timeline_update(aggregator: &Arc<RwLock<Aggregator>>, tid: Option<u32>)
         if int_end <= int_start {
             continue;
         }
-        let target = matches!(interval.kind, IntervalKind::SyntheticSpan { .. });
+        let target = target_info.is_some();
         let on_cpu = matches!(interval.kind, IntervalKind::OnCpu) || target;
+        let lane_name = target_info.and_then(|(stack, _)| {
+            stack
+                .get(1)
+                .copied()
+                .and_then(|addr| resolve_target_symbol_name(&binaries, &mut interner, addr))
+        });
         // Distribute the interval's duration across the buckets it
         // overlaps. For each overlapping bucket [b_start, b_end), the
         // share is min(int_end, b_end) - max(int_start, b_start).
@@ -1270,11 +1297,35 @@ fn build_timeline_update(aggregator: &Arc<RwLock<Aggregator>>, tid: Option<u32>)
                 if target {
                     target_per_bucket[b] = target_per_bucket[b].saturating_add(share);
                     total_target_ns = total_target_ns.saturating_add(share);
+                    let lane =
+                        target_lanes
+                            .entry(event_tid)
+                            .or_insert_with(|| TargetLaneTimelineAccum {
+                                tid: event_tid,
+                                lane_name,
+                                total_target_ns: 0,
+                                target_spans: 0,
+                                buckets: vec![0; n_buckets.max(1)],
+                            });
+                    lane.total_target_ns = lane.total_target_ns.saturating_add(share);
+                    lane.buckets[b] = lane.buckets[b].saturating_add(share);
                 }
             } else {
                 off_cpu_per_bucket[b] = off_cpu_per_bucket[b].saturating_add(share);
                 total_off_cpu_ns = total_off_cpu_ns.saturating_add(share);
             }
+        }
+        if target {
+            let lane = target_lanes
+                .entry(event_tid)
+                .or_insert_with(|| TargetLaneTimelineAccum {
+                    tid: event_tid,
+                    lane_name,
+                    total_target_ns: 0,
+                    target_spans: 0,
+                    buckets: vec![0; n_buckets.max(1)],
+                });
+            lane.target_spans = lane.target_spans.saturating_add(1);
         }
     }
 
@@ -1290,14 +1341,47 @@ fn build_timeline_update(aggregator: &Arc<RwLock<Aggregator>>, tid: Option<u32>)
             off_cpu_ns,
         })
         .collect();
+    let mut target_lanes: Vec<TargetLaneTimeline> = target_lanes
+        .into_values()
+        .map(TargetLaneTimelineAccum::into_proto)
+        .collect();
+    target_lanes.sort_by(|a, b| {
+        b.total_target_ns
+            .cmp(&a.total_target_ns)
+            .then_with(|| b.target_spans.cmp(&a.target_spans))
+            .then_with(|| a.tid.cmp(&b.tid))
+    });
+    target_lanes.truncate(TARGET_LANE_CAP);
 
     TimelineUpdate {
+        strings: interner.into_strings(),
         bucket_size_ns,
         recording_duration_ns,
         total_on_cpu_ns,
         total_target_ns,
         total_off_cpu_ns,
         buckets,
+        target_lanes,
+    }
+}
+
+struct TargetLaneTimelineAccum {
+    tid: u32,
+    lane_name: Option<u32>,
+    total_target_ns: u64,
+    target_spans: u64,
+    buckets: Vec<u64>,
+}
+
+impl TargetLaneTimelineAccum {
+    fn into_proto(self) -> TargetLaneTimeline {
+        TargetLaneTimeline {
+            tid: self.tid,
+            lane_name: self.lane_name,
+            total_target_ns: self.total_target_ns,
+            target_spans: self.target_spans,
+            buckets: self.buckets,
+        }
     }
 }
 

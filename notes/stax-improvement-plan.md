@@ -549,7 +549,8 @@ Implemented and deferred work:
 - Timeline:
   - done: selected metric drives the timeline area; target mode shows
     target duration over time
-  - lane track for target spans
+  - done: lane tracks show top target lanes as per-bucket target-time rows
+    and click through to the synthetic lane tid
   - span hover/detail:
     - name
     - duration
@@ -673,7 +674,8 @@ Tasks:
   - done: `just fmt-check` and `just diff-check` separate verification from
     formatting
   - done: focused Rust checks (`just check-target`, `just test-target`,
-    `just check-cli`, `just test-cli-target-lanes`)
+    `just check-cli`, `just test-cli-target-lanes`, `just check-live-proto`,
+    `just check-live`, `just check-server`, `just test-server-target-ingest`)
   - done: docs build (`just docs`)
   - done: frontend build/typecheck (`just frontend-check`)
   - done: aggregate focused target-span verification (`just target-span-check`)

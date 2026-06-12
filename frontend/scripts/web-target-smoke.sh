@@ -125,7 +125,7 @@ require_eval_true() {
 }
 
 dump_browser_state() {
-    pw_eval "(() => { const raw = document.body.innerText; const text = raw.toLowerCase(); return JSON.stringify({ width: window.innerWidth, scrollWidth: document.documentElement.scrollWidth, overflow: document.documentElement.scrollWidth - window.innerWidth, selectedTab: document.querySelector('[role=tab][aria-selected=true]')?.textContent?.trim() ?? null, hasTopTargetWork: text.includes('top target work'), hasRecentTargetSpans: text.includes('recent target spans'), hasTopOrigin: text.includes('top origin'), hasOriginCoverage: text.includes('origin coverage'), hasLaneLinks: document.querySelectorAll('.target-lane-link').length, hasCollectCompletion: text.includes('corpus collect completion'), hasCopyKernel: text.includes('corpus copy kernel'), buttons: [...document.querySelectorAll('button')].map((b) => b.textContent.trim()).filter(Boolean).slice(0, 80), textStart: raw.slice(0, 3000) }); })()" >&2 || true
+    pw_eval "(() => { const raw = document.body.innerText; const text = raw.toLowerCase(); return JSON.stringify({ width: window.innerWidth, scrollWidth: document.documentElement.scrollWidth, overflow: document.documentElement.scrollWidth - window.innerWidth, selectedTab: document.querySelector('[role=tab][aria-selected=true]')?.textContent?.trim() ?? null, hasTopTargetWork: text.includes('top target work'), hasRecentTargetSpans: text.includes('recent target spans'), hasTopOrigin: text.includes('top origin'), hasOriginCoverage: text.includes('origin coverage'), hasLaneLinks: document.querySelectorAll('.target-lane-link').length, hasTimelineLaneTracks: document.querySelectorAll('.timeline-target-lane').length, hasCollectCompletion: text.includes('corpus collect completion'), hasCopyKernel: text.includes('corpus copy kernel'), buttons: [...document.querySelectorAll('button')].map((b) => b.textContent.trim()).filter(Boolean).slice(0, 80), textStart: raw.slice(0, 3000) }); })()" >&2 || true
 }
 
 echo "archive: $archive"
@@ -151,13 +151,13 @@ pw resize 1280 900 >/dev/null
 pw snapshot >/dev/null
 wait_for_eval_true "(() => { const text = document.body.innerText; return text.includes('corpus executor') && text.includes('corpus gpu') && text.includes('target'); })()" "target lanes visible"
 require_eval_true "(() => { const button = (name) => [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === name); const target = button('target'); const spans = button('target spans'); if (!target || !spans) return false; target.click(); spans.click(); return true; })()" "target mode and target-spans tab controls exist"
-if ! wait_for_eval_true "(() => { const text = document.body.innerText.toLowerCase(); const overflow = document.documentElement.scrollWidth - window.innerWidth; return text.includes('top target work') && text.includes('recent target spans') && text.includes('top lane') && text.includes('top origin') && text.includes('origin coverage') && document.querySelectorAll('.target-lane-link').length > 0 && text.includes('corpus collect completion') && text.includes('corpus copy kernel') && overflow <= 2; })()" "desktop target-span detail visible without overflow"; then
+if ! wait_for_eval_true "(() => { const text = document.body.innerText.toLowerCase(); const overflow = document.documentElement.scrollWidth - window.innerWidth; return text.includes('top target work') && text.includes('recent target spans') && text.includes('top lane') && text.includes('top origin') && text.includes('origin coverage') && document.querySelectorAll('.target-lane-link').length > 0 && document.querySelectorAll('.timeline-target-lane').length > 0 && text.includes('corpus collect completion') && text.includes('corpus copy kernel') && overflow <= 2; })()" "desktop target-span detail visible without overflow"; then
     dump_browser_state
     exit 1
 fi
 pw snapshot >/dev/null
 pw resize 390 844 >/dev/null
-if ! wait_for_eval_true "(() => { const text = document.body.innerText.toLowerCase(); const overflow = document.documentElement.scrollWidth - window.innerWidth; return text.includes('target spans') && text.includes('corpus executor') && text.includes('corpus gpu') && text.includes('origin coverage') && overflow <= 4; })()" "mobile target UI visible without overflow"; then
+if ! wait_for_eval_true "(() => { const text = document.body.innerText.toLowerCase(); const overflow = document.documentElement.scrollWidth - window.innerWidth; return text.includes('target spans') && text.includes('corpus executor') && text.includes('corpus gpu') && text.includes('origin coverage') && document.querySelectorAll('.timeline-target-lane').length > 0 && overflow <= 4; })()" "mobile target UI visible without overflow"; then
     dump_browser_state
     exit 1
 fi

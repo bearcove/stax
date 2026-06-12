@@ -62,7 +62,8 @@ there is nothing to reload. The layout, top to bottom:
   sampled CPU time plus cooperating target spans; CPU mode peels target spans
   back out; target mode shows target-span duration over time; wall mode is
   active plus off-CPU. Drag-to-brush time-range selection scopes every other
-  panel.
+  panel. When target spans exist, compact lane tracks under the area chart show
+  per-lane target time; clicking a lane track selects that synthetic tid.
 - **Off-CPU reason legend** and a **wakers panel** — what threads were
   blocked on, and who woke them.
 - **Flamegraph** — the active tree (CPU time plus cooperating target spans),

@@ -268,6 +268,18 @@ pub struct TimelineBucket {
     pub off_cpu_ns: u64,
 }
 
+/// Per-lane target time for a timeline row. The `buckets` vector has
+/// the same length and bucket size as `TimelineUpdate.buckets`; each
+/// entry is target-span nanoseconds for this lane in that bucket.
+#[derive(Clone, Debug, Facet)]
+pub struct TargetLaneTimeline {
+    pub tid: u32,
+    pub lane_name: Option<u32>,
+    pub total_target_ns: u64,
+    pub target_spans: u64,
+    pub buckets: Vec<u64>,
+}
+
 /// A pair of (start, end) timestamps in ns, both relative to the
 /// recording start (the timestamp of the first sample). End-exclusive.
 #[derive(Clone, Debug, Facet)]
@@ -357,6 +369,8 @@ pub struct ViewParams {
 
 #[derive(Clone, Debug, Facet)]
 pub struct TimelineUpdate {
+    /// Shared string table for timeline lane names.
+    pub strings: Vec<String>,
     /// Width of each bucket in nanoseconds.
     pub bucket_size_ns: u64,
     /// Recording duration so the UI can show "Xs elapsed" without
@@ -373,6 +387,9 @@ pub struct TimelineUpdate {
     /// middle are emitted so the UI can map x-position → time
     /// directly).
     pub buckets: Vec<TimelineBucket>,
+    /// Top target lanes by target duration, each with a dense
+    /// per-bucket target-time series.
+    pub target_lanes: Vec<TargetLaneTimeline>,
 }
 
 /// kcachegrind-style "family tree" of a symbol's neighbors.

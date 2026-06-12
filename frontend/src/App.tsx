@@ -570,6 +570,7 @@ export function App() {
             range={filter.time_range}
             onRangeChange={setTimeRange}
             displayMode={displayMode}
+            onSelectTid={setSelectedTid}
           />
         </section>
       )}

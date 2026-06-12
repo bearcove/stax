@@ -14,6 +14,15 @@ diff-check:
 check-target:
     cargo check -p stax-target --all-targets --message-format=short
 
+check-live-proto:
+    cargo check -p stax-live-proto --all-targets --message-format=short
+
+check-live:
+    cargo check -p stax-live --all-targets --message-format=short
+
+check-server:
+    cargo check -p stax-server --all-targets --message-format=short
+
 test-target:
     cargo nextest list -p stax-target --all-targets
     cargo nextest run -p stax-target --all-targets
@@ -25,6 +34,10 @@ test-cli-target-lanes:
     cargo nextest list -p stax --all-targets -E 'test(threads_output_keeps_target_lanes_past_limit)'
     cargo nextest run -p stax --all-targets -E 'test(threads_output_keeps_target_lanes_past_limit)'
 
+test-server-target-ingest:
+    cargo nextest list -p stax-server --all-targets -E 'test(ingest_links_spans_to_origin_cpu_stack)'
+    cargo nextest run -p stax-server --all-targets -E 'test(ingest_links_spans_to_origin_cpu_stack)'
+
 docs:
     ddc build
 
@@ -35,7 +48,7 @@ frontend-check:
 web-target-smoke:
     bash frontend/scripts/web-target-smoke.sh
 
-target-span-check: fmt-check check-target test-target check-cli test-cli-target-lanes docs frontend-check diff-check
+target-span-check: fmt-check check-target check-live-proto check-live check-server test-target test-cli-target-lanes test-server-target-ingest check-cli docs frontend-check diff-check
 
 install:
     cargo xtask install

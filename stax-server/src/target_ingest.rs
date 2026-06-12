@@ -900,6 +900,27 @@ mod tests {
         assert_eq!(lane_thread.pet_samples, 1);
         assert_eq!(lane_thread.target_spans, 1);
 
+        let cpu_timeline = profiler.timeline(Some(CPU_TID)).await;
+        assert_eq!(cpu_timeline.total_on_cpu_ns, 3_000_000);
+        assert_eq!(cpu_timeline.total_target_ns, 3_000_000);
+        assert_eq!(cpu_timeline.target_lanes.len(), 1);
+        let lane_track = &cpu_timeline.target_lanes[0];
+        assert_eq!(lane_track.tid, SYNTH_TID_BASE);
+        assert_eq!(lane_track.total_target_ns, 3_000_000);
+        assert_eq!(lane_track.target_spans, 1);
+        assert_eq!(lane_track.buckets.iter().sum::<u64>(), 3_000_000);
+        assert_eq!(
+            lane_track
+                .lane_name
+                .and_then(|index| cpu_timeline.strings.get(index as usize).map(String::as_str)),
+            Some("GPU test")
+        );
+
+        let synthetic_timeline = profiler.timeline(Some(SYNTH_TID_BASE)).await;
+        assert_eq!(synthetic_timeline.total_target_ns, 3_000_000);
+        assert_eq!(synthetic_timeline.target_lanes.len(), 1);
+        assert_eq!(synthetic_timeline.target_lanes[0].tid, SYNTH_TID_BASE);
+
         let diagnostics = server.target_lanes().lock().diagnostics();
         assert_eq!(diagnostics.spans_with_origin, 1);
         assert_eq!(diagnostics.spans_linked_origin, 1);

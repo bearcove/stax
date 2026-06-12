@@ -750,6 +750,63 @@ table.top-table tr.match {
   pointer-events: none;
 }
 
+.timeline-target-lanes {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 8px 0;
+  border-top: 1px solid var(--border-soft);
+}
+
+button.timeline-target-lane {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: grid;
+  font: inherit;
+  grid-template-columns: minmax(7em, 14em) minmax(70px, 1fr) minmax(4.5em, auto);
+  gap: 8px;
+  min-width: 0;
+  padding: 1px 0;
+  text-align: left;
+}
+
+button.timeline-target-lane:hover {
+  color: var(--text-primary);
+}
+
+.timeline-target-lane-label,
+.timeline-target-lane-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.timeline-target-lane-label {
+  color: var(--target-color);
+}
+
+.timeline-target-lane-meta {
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-align: right;
+}
+
+.timeline-target-lane-bars {
+  display: block;
+  height: 12px;
+  min-width: 0;
+  width: 100%;
+}
+
+.timeline-target-lane-bars rect {
+  fill: var(--target-color);
+  opacity: 0.68;
+}
+
 .timeline-footer {
   padding: 2px 12px 4px;
   color: var(--text-muted);
