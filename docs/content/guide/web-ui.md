@@ -5,8 +5,8 @@ insert_anchor_links = "heading"
 +++
 
 The CLI is one face of stax. The other is a browser UI that renders the same
-live run — flamegraph, top-N functions, timeline, annotated disassembly — and
-updates continuously as samples land.
+live run — flamegraph, top-N functions/spans, timeline, annotated
+disassembly — and updates continuously as samples and target spans land.
 
 ## The WebSocket endpoint
 
@@ -62,11 +62,11 @@ there is nothing to reload. The layout, top to bottom:
   selection that scopes every other panel.
 - **Off-CPU reason legend** and a **wakers panel** — what threads were
   blocked on, and who woke them.
-- **Flamegraph** — the on-CPU call tree, the same data as
+- **Flamegraph** — the CPU/lane-active tree, the same data as
   [`stax flame`](@/guide/inspecting-a-run.md#stax-flame), rendered as a
   zoomable graph with focus / drop-symbol / Esc keyboard shortcuts and
   off-CPU reason stripes.
-- **Top-N table** — the hot-leaf leaderboard, the same data as
+- **Top-N table** — the hot-leaf or target-span leaderboard, the same data as
   [`stax top`](@/guide/inspecting-a-run.md#stax-top), sortable by self or
   total.
 - **A tabbed detail pane** — *disassembly* (cost-annotated, source-headed,

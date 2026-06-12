@@ -366,43 +366,46 @@ $ stax top -n 5
 
 ### `stax threads [-n N]`
 
-Per-thread on/off-CPU breakdown for the current run, sorted by
-on-CPU time descending. Use it to figure out *which thread* is
+Per-thread and synthetic-lane active/off-CPU breakdown for the current run,
+sorted by total activity. Use it to figure out *which thread or lane* is
 worth flaming.
 
 ```
 $ stax threads -n 5
- on-CPU ms off-CPU ms    samples   blocked  tid    name
+ active ms off-CPU ms    samples   blocked  tid    name
    1240.20      31.40       1102      lock  501    main
     860.00      99.00        710     sleep  592    tokio-runtime-worker
     220.10      14.50        198      idle  600    grpc-pool
     …
 ```
 
-The `blocked` column names the largest off-CPU bucket for that
-thread (`idle`, `lock`, `sem`, `ipc`, `ioR`, `ioW`, `ready`,
-`sleep`, `conn`, `other`). Off-CPU intervals are recorded on both macOS
-and Linux.
+The `active ms` column is on-CPU time for CPU threads and reported span
+duration for synthetic target lanes. The `samples` column is PET sample
+count for CPU threads and span count for synthetic lanes. The `blocked`
+column names the largest off-CPU bucket for that thread (`idle`, `lock`,
+`sem`, `ipc`, `ioR`, `ioW`, `ready`, `sleep`, `conn`, `other`). Off-CPU
+intervals are recorded on both macOS and Linux.
 
 `-n 0` prints every thread. Default 20.
 
 ### `stax flame [-d MAX_DEPTH] [--threshold-pct PCT] [--tid TID]`
 
-Print the on-CPU flamegraph as an indented Markdown tree, sorted by
-`on_cpu_ns` descending at each level. Same data the web UI renders;
-this is the agent-friendly view of "where is the time going."
+Print the CPU/lane-active flamegraph as an indented Markdown tree, sorted by
+active time descending at each level. Same data the web UI renders; this is
+the agent-friendly view of "where is the time going." Cooperating target
+lanes render as `(all) -> lane -> span name`.
 
 - `-d / --max-depth N` — cut off the tree at depth N (default 12).
   Children below the cut-off are summarised as `…N more frames`.
-- `--threshold-pct PCT` — hide subtrees whose share of total
-  on-CPU falls below `PCT` (default 1%; pass `0` for the whole tree).
+- `--threshold-pct PCT` — hide subtrees whose share of total active time
+  falls below `PCT` (default 1%; pass `0` for the whole tree).
 - `--tid` — filter to one thread.
 
 Operates on the current run's aggregator (same rules as `stax top`).
 
 ```
 $ stax flame -d 4 --threshold-pct 2
-# stax flame · total on-CPU 2.503s · off-CPU 4.122s
+# stax flame · total active 2.503s · off-CPU 4.122s
 
 `​``
    2503ms 100.0%  (root)

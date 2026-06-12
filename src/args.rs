@@ -6,8 +6,8 @@ pub enum TargetProcess {
     Launch { program: String, args: Vec<String> },
 }
 
-/// stax — live profiler frontend that drives the staxd daemon backend
-/// over a local socket and streams aggregated samples over WebSocket.
+/// stax — live profiler frontend for CPU stacks, off-CPU waits, and
+/// cooperating target spans, streamed through stax-server.
 #[derive(Facet, Debug)]
 pub struct Cli {
     #[facet(args::subcommand)]
@@ -50,16 +50,16 @@ pub enum Command {
     /// Ask stax-server to stop the active run cleanly.
     Stop,
 
-    /// Snapshot the top-N functions from the active run.
+    /// Snapshot top functions or target-span names from the active run.
     Top(TopArgs),
 
     /// Disassemble + annotate a function from the active run.
     Annotate(AnnotateArgs),
 
-    /// Print the on-CPU flamegraph as an indented tree.
+    /// Print the CPU/lane-active flamegraph as an indented tree.
     Flame(FlameArgs),
 
-    /// Per-thread on/off-CPU breakdown for the active run.
+    /// Per-thread and synthetic-lane active/off-CPU breakdown.
     Threads(ThreadsArgs),
 }
 
@@ -104,22 +104,22 @@ pub struct TopArgs {
 
 #[derive(Facet, Debug)]
 pub struct ThreadsArgs {
-    /// Maximum number of threads to print (sorted by on-CPU
-    /// descending). 0 to print all.
+    /// Maximum number of threads/lanes to print, sorted by total
+    /// activity. 0 to print all.
     #[facet(args::named, args::short = 'n', default = 20)]
     pub limit: u32,
 }
 
 #[derive(Facet, Debug)]
 pub struct FlameArgs {
-    /// Maximum tree depth to print. The flamegraph the server
-    /// returns is unbounded; this just controls how deep the CLI
-    /// prints (children below the cut-off are summarised as
-    /// `…<N more frames>`).
+    /// Maximum tree depth to print. The flamegraph the server returns
+    /// is unbounded; this just controls how deep the CLI prints
+    /// (children below the cut-off are summarised as `…<N more
+    /// frames>`). Cooperating target lanes render as `lane -> span`.
     #[facet(args::named, args::short = 'd', default = 12)]
     pub max_depth: usize,
 
-    /// Hide nodes whose share of the total on-CPU time falls
+    /// Hide nodes whose share of the total CPU/lane-active time falls
     /// below this percent. `0` to print everything.
     #[facet(args::named, default = 1.0)]
     pub threshold_pct: f64,

@@ -13,8 +13,8 @@ use stax_core::cmd_setup_linux;
 use stax_core::cmd_setup_mac;
 use stax_live_proto::{
     DiagnosticsSnapshot, FlameNode, FlamegraphUpdate, LiveFilter, OffCpuBreakdown, ProfilerClient,
-    RunControlClient, RunSummary, ServerStatus, StopReason, ThreadsUpdate, TopSort, ViewParams,
-    WaitCondition, WaitOutcome,
+    RunControlClient, RunSummary, ServerStatus, StopReason, ThreadsUpdate, TopEntry, TopSort,
+    ViewParams, WaitCondition, WaitOutcome,
 };
 
 #[cfg(target_os = "macos")]
@@ -727,7 +727,8 @@ async fn run_top(args: TopArgs) -> Result<(), Box<dyn Error>> {
         println!("(no samples yet — is a recording in progress?)");
         return Ok(());
     }
-    for e in entries {
+    let threads = client.threads().await.ok();
+    for e in &entries {
         let name = e.function_name.as_deref().unwrap_or("<unresolved>");
         let bin = e.binary.as_deref().unwrap_or("?");
         println!(
@@ -738,6 +739,10 @@ async fn run_top(args: TopArgs) -> Result<(), Box<dyn Error>> {
             bin,
         );
     }
+    maybe_print_metal_target_hint(
+        threads.as_ref(),
+        top_entries_mention_metal_cooperation(&entries),
+    );
     Ok(())
 }
 
@@ -803,7 +808,7 @@ fn print_threads(update: &ThreadsUpdate, limit: u32) {
     }
     println!(
         "{:>10} {:>10} {:>10} {:>9}  tid    name",
-        "on-CPU ms", "off-CPU ms", "samples", "blocked",
+        "active ms", "off-CPU ms", "samples", "blocked",
     );
     let take = if limit == 0 {
         threads.len()
@@ -867,14 +872,19 @@ async fn run_flame(args: FlameArgs) -> Result<(), Box<dyn Error>> {
         })
         .await
         .map_err(|e| format!("{e:?}"))?;
+    let threads = client.threads().await.ok();
     print_flame(&update, args.max_depth, args.threshold_pct);
+    maybe_print_metal_target_hint(
+        threads.as_ref(),
+        flame_mentions_metal_cooperation(&update.root, &update.strings),
+    );
     Ok(())
 }
 
 fn print_flame(update: &FlamegraphUpdate, max_depth: usize, threshold_pct: f64) {
     let total = update.total_on_cpu_ns.max(1) as f64;
     println!(
-        "# stax flame · total on-CPU {:.3}s · off-CPU {:.3}s",
+        "# stax flame · total active {:.3}s · off-CPU {:.3}s",
         update.total_on_cpu_ns as f64 / 1e9,
         off_cpu_total_ns(&update.total_off_cpu) as f64 / 1e9,
     );
@@ -970,6 +980,97 @@ fn print_flame_node(
             depth + 1,
             max_depth,
         );
+    }
+}
+
+const SYNTH_TID_BASE: u32 = 0xFFF0_0000;
+
+fn maybe_print_metal_target_hint(threads: Option<&ThreadsUpdate>, saw_metal_dispatch: bool) {
+    if !saw_metal_dispatch {
+        return;
+    }
+    if threads.map(has_synthetic_target_lane).unwrap_or(false) {
+        return;
+    }
+    eprintln!(
+        "hint: Metal command/dispatch frames are visible, but no stax-target lane is present. \
+         If the target can cooperate, report Metal 4 timestamp-counter spans with stax-target; \
+         then `stax threads` will show a synthetic GPU lane and `stax top --tid <tid>` will show per-kernel durations."
+    );
+}
+
+fn has_synthetic_target_lane(threads: &ThreadsUpdate) -> bool {
+    threads
+        .threads
+        .iter()
+        .any(|thread| thread.tid >= SYNTH_TID_BASE && thread.pet_samples > 0)
+}
+
+fn top_entries_mention_metal_cooperation(entries: &[TopEntry]) -> bool {
+    entries.iter().any(|entry| {
+        mentions_metal_cooperation(entry.function_name.as_deref(), entry.binary.as_deref())
+    })
+}
+
+fn flame_mentions_metal_cooperation(node: &FlameNode, strings: &[String]) -> bool {
+    let name = node
+        .function_name
+        .and_then(|index| strings.get(index as usize).map(String::as_str));
+    let binary = node
+        .binary
+        .and_then(|index| strings.get(index as usize).map(String::as_str));
+    mentions_metal_cooperation(name, binary)
+        || node
+            .children
+            .iter()
+            .any(|child| flame_mentions_metal_cooperation(child, strings))
+}
+
+fn mentions_metal_cooperation(function_name: Option<&str>, binary: Option<&str>) -> bool {
+    let name = function_name.unwrap_or_default().to_ascii_lowercase();
+    let binary = binary.unwrap_or_default().to_ascii_lowercase();
+    let metal_binary =
+        binary.contains("metal") || binary.contains("agx") || binary.contains("metalkit");
+    let metal_name = name.contains("metal4")
+        || name.contains("mtlcommandbuffer")
+        || name.contains("mtlcommandqueue")
+        || name.contains("mtlcomputecommandencoder")
+        || name.contains("mtlblitcommandencoder")
+        || name.contains("mtlrendercommandencoder")
+        || name.contains("dispatchthreadgroups")
+        || name.contains("dispatchthreads")
+        || name.contains("commandbuffer")
+        || name.contains("command_buffer");
+    metal_name
+        || (metal_binary
+            && (name.contains("dispatch")
+                || name.contains("commit")
+                || name.contains("command")
+                || name.contains("encode")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mentions_metal_cooperation;
+
+    #[test]
+    fn metal_hint_detects_dispatch_and_command_buffer_frames() {
+        assert!(mentions_metal_cooperation(
+            Some("-[MTLComputeCommandEncoder dispatchThreadgroups:threadsPerThreadgroup:]"),
+            Some("Metal")
+        ));
+        assert!(mentions_metal_cooperation(
+            Some("bee::helix_metal4::encoder::dispatch_kernel"),
+            Some("hx")
+        ));
+        assert!(mentions_metal_cooperation(
+            Some("-[AGXG17FamilyCommandBuffer commit]"),
+            Some("AGXMetalG17X")
+        ));
+        assert!(!mentions_metal_cooperation(
+            Some("std::thread::park"),
+            Some("libstd")
+        ));
     }
 }
 

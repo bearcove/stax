@@ -7,7 +7,7 @@ insert_anchor_links = "heading"
 
 # stax
 
-<p class="hero-tagline">A live sampling profiler for macOS and Linux — flamegraphs, hot functions, and annotated disassembly, streaming while your program runs.</p>
+<p class="hero-tagline">A live profiler for macOS and Linux — CPU stacks, off-CPU waits, cooperating target spans, and annotated disassembly while your program runs.</p>
 
 </div>
 
@@ -17,14 +17,15 @@ stax record -- ./target/release/mybench
 
 # from another shell — or to an AI agent — query the live run
 stax wait --for-samples 10000     # block until data lands
-stax top -n 10 --sort self        # hottest leaf functions
-stax flame -d 6                   # on-CPU flamegraph, as a tree
+stax top -n 10 --sort self        # hottest leaf functions or target spans
+stax flame -d 6                   # CPU/lane-active flamegraph, as a tree
 stax annotate 'mycrate::hot_fn'   # per-instruction sample counts
 ```
 
-stax records on-CPU and off-CPU stacks and turns them into flamegraphs,
-top-N functions, per-thread breakdowns, and annotated disassembly — all
-queryable *while the recording is still running*.
+stax records on-CPU stacks, off-CPU waits, and cooperating target spans, then
+turns them into flamegraphs, top-N functions/spans, per-thread and per-lane
+breakdowns, and annotated disassembly — all queryable *while the recording is
+still running*.
 
 Every view is a plain CLI subcommand: text output, meaningful exit codes, no
 GUI required. That puts stax exactly where a graphical profiler can't go —
@@ -66,6 +67,9 @@ nothing depends on it.
 - **On-CPU *and* off-CPU.** stax doesn't just show where the CPU time goes —
   it correlates scheduler events to show *why* a thread was blocked: lock,
   sleep, I/O, IPC.
+- **Cooperating target spans.** GPU and accelerator work reported through
+  `stax-target` lands on the same timeline as synthetic lanes, so Metal 4
+  kernels can show up in `threads`, `top`, `flame`, and the web UI.
 - **Down to the instruction.** `stax annotate` disassembles a hot function and
   attributes samples to individual instructions, interleaved with source.
 - **Symbolicates stripped binaries.** On Linux, stax pulls symbols from local

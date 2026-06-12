@@ -53,6 +53,12 @@ time**, not wall-clock time. The flamegraph from
 is burning CPU?"* — and a thread that spends its life blocked correctly
 contributes almost nothing to it.
 
+Cooperating target spans are the other exact-duration input to those same
+views. When a target reports GPU or accelerator spans through `stax-target`,
+stax records them as synthetic lane intervals rather than CPU samples. In
+`threads`, `top`, `flame`, and the web UI, that lane's "active" time is the
+reported span duration; it does not imply the CPU was executing that work.
+
 ## Off-CPU: why threads wait
 
 But "what is burning CPU" is only half of "why is this slow". A program can

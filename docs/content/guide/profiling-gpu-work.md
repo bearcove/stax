@@ -46,7 +46,7 @@ stax threads | grep -i gpu
 
 In the verified 2026-06-12 `hx` run, this lane had 6300 ingested kernel
 spans. For synthetic lanes, the `samples` column is the span count, and
-the `on-CPU ms` column is lane active time synthesized from the reported
+the `active ms` column is lane active time synthesized from the reported
 span durations.
 
 ## Reading the results

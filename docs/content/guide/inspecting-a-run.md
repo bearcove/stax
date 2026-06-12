@@ -4,10 +4,10 @@ weight = 2
 insert_anchor_links = "heading"
 +++
 
-Once a run has samples, four commands let you look at it from different
-angles — from a one-line leaderboard down to individual machine
-instructions. They all read the **current** aggregator state, so they work
-on a run that is still recording.
+Once a run has samples or cooperating target spans, four commands let you
+look at it from different angles — from a one-line leaderboard down to
+individual machine instructions. They all read the **current** aggregator
+state, so they work on a run that is still recording.
 
 > **Which run do they query?** There is no run selector yet. `top`, `flame`,
 > `threads`, and `annotate` operate on whichever run is active — or, if none
@@ -16,7 +16,7 @@ on a run that is still recording.
 
 ## stax top
 
-The hottest functions, as a flat leaderboard.
+The hottest functions or target-span names, as a flat leaderboard.
 
 ```bash
 stax top -n 10 --sort self
@@ -28,8 +28,9 @@ stax top -n 10 --sort self
     …
 ```
 
-One line per function: self time in milliseconds, self sample count,
-demangled name, and the binary it came from.
+One line per function/span: self time in milliseconds, self sample count,
+demangled name, and the binary it came from. For a cooperating synthetic
+lane, time is the sum of reported span durations and samples are span count.
 
 | flag                | meaning                                                   |
 |---------------------|-----------------------------------------------------------|
@@ -41,19 +42,25 @@ demangled name, and the binary it came from.
 `--sort self` answers "what instruction is the CPU running"; `--sort total`
 answers "what work is responsible", and will rank callers like `main` or a
 runtime's poll loop highly because hot code runs *underneath* them.
+For target lanes, `--sort self --tid <synthetic>` shows per-span names;
+`--sort total --tid <synthetic>` can surface the lane aggregate.
+
+When `stax top` sees Metal command/dispatch frames but no synthetic target
+lane, it prints a hint to stderr suggesting Metal 4 timestamp-counter
+cooperation through `stax-target`.
 
 ## stax flame
 
-The on-CPU flamegraph, printed as an indented tree — the same data the
-[web UI](@/guide/web-ui.md) renders, in a form you (or an agent) can read in
-a terminal.
+The CPU/lane-active flamegraph, printed as an indented tree — the same data
+the [web UI](@/guide/web-ui.md) renders, in a form you (or an agent) can read
+in a terminal.
 
 ```bash
 stax flame -d 4 --threshold-pct 2
 ```
 
 ```text
-# stax flame · total on-CPU 2.503s · off-CPU 4.122s
+# stax flame · total active 2.503s · off-CPU 4.122s
 
    2503ms 100.0%  (root)
    1201ms  48.0%    └─ vox_jit::translate  (libvox.dylib)
@@ -64,38 +71,46 @@ stax flame -d 4 --threshold-pct 2
         …18 more frames
 ```
 
-Children are sorted by on-CPU time, descending, at every level.
+Children are sorted by active time, descending, at every level. CPU threads
+contribute scheduler-derived on-CPU time; cooperating target lanes contribute
+reported span duration and render as `(all) -> lane -> span name`.
 
 | flag                       | meaning                                                            |
 |----------------------------|--------------------------------------------------------------------|
 | `-d, --max-depth <N>`      | stop printing below depth N — default **12**. Cut subtrees collapse to `…N more frames` |
-| `--threshold-pct <PCT>`    | hide subtrees below this share of total on-CPU — default **1.0**; pass `0` for the whole tree |
+| `--threshold-pct <PCT>`    | hide subtrees below this share of total active time — default **1.0**; pass `0` for the whole tree |
 | `--tid <TID>`              | restrict to one thread — default: all threads                      |
 
 The flamegraph the server holds is unbounded; `--max-depth` only controls
-how much the CLI prints.
+how much the CLI prints. Like `top`, `flame` prints a Metal cooperation hint
+to stderr when Metal command/dispatch frames are visible but no target lane
+has reported spans.
 
 ## stax threads
 
-Per-thread on/off-CPU breakdown, sorted by on-CPU time descending. Use it to
-decide *which thread* is worth flaming before you call `stax flame --tid`.
+Per-thread and synthetic-lane active/off-CPU breakdown, sorted by total
+activity. Use it to decide *which thread or lane* is worth flaming before you
+call `stax flame --tid`.
 
 ```bash
 stax threads -n 5
 ```
 
 ```text
- on-CPU ms off-CPU ms    samples   blocked  tid    name
+ active ms off-CPU ms    samples   blocked  tid    name
    1240.20      31.40       1102      lock  501    main
     860.00      99.00        710     sleep  592    tokio-runtime-worker
     220.10      14.50        198      idle  600    grpc-pool
     …
 ```
 
+The `active ms` column is on-CPU time for real CPU threads and lane-active
+span duration for synthetic target lanes. The `samples` column is PET sample
+count for CPU threads and span count for synthetic lanes.
+
 The `blocked` column names the **largest off-CPU bucket** for that thread —
 one of `idle`, `lock`, `sem`, `ipc`, `ioR`, `ioW`, `ready`, `sleep`, `conn`,
-`other`. It tells you *why* a thread spent time off-CPU, which `stax flame`
-(on-CPU only) cannot.
+`other`. It tells you *why* a thread spent time off-CPU.
 
 | flag              | meaning                                                |
 |-------------------|--------------------------------------------------------|
