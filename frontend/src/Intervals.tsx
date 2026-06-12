@@ -6,6 +6,7 @@ import type {
   LiveFilter,
   ProfilerClient,
   TargetSpanEntry,
+  TargetSpanGroup,
   TargetSpanListUpdate,
   ThreadInfo,
 } from "./generated/profiler.generated.ts";
@@ -188,11 +189,37 @@ export function TargetSpansPanel({
           {formatDuration(update.total_duration_ns)} total
         </span>
         <span className="intervals-header-meta">
-          showing {update.entries.length} most recent
+          {update.groups.length} groups · showing {update.entries.length} most
+          recent
         </span>
       </div>
       <div className="intervals-body">
+        <table className="intervals-table target-spans-table target-groups-table">
+          <caption>top target work</caption>
+          <thead>
+            <tr>
+              <th>count</th>
+              <th>total</th>
+              <th>max</th>
+              <th>lane</th>
+              <th>span</th>
+              <th>origin</th>
+            </tr>
+          </thead>
+          <tbody>
+            {update.groups.map((group, i) => (
+              <TargetSpanGroupRow
+                key={i}
+                group={group}
+                strings={update.strings}
+                threadName={threadName}
+                onSelectTid={onSelectTid}
+              />
+            ))}
+          </tbody>
+        </table>
         <table className="intervals-table target-spans-table">
+          <caption>recent target spans</caption>
           <thead>
             <tr>
               <th>start</th>
@@ -219,6 +246,41 @@ export function TargetSpansPanel({
   );
 }
 
+function TargetSpanGroupRow({
+  group,
+  strings,
+  threadName,
+  onSelectTid,
+}: {
+  group: TargetSpanGroup;
+  strings: string[];
+  threadName: (tid: number) => string | null;
+  onSelectTid: (tid: number) => void;
+}) {
+  const lane = group.lane_name != null ? strings[group.lane_name] : "(lane)";
+  const span = group.span_name != null ? strings[group.span_name] : "(span)";
+  return (
+    <tr>
+      <td className="col-count">{group.count.toString()}</td>
+      <td className="col-duration">
+        {formatDuration(group.total_duration_ns)}
+      </td>
+      <td className="col-duration">{formatDuration(group.max_duration_ns)}</td>
+      <td className="col-lane">{lane}</td>
+      <td className="col-span">{span}</td>
+      <OriginCell
+        originTid={group.origin_tid}
+        originLinked={group.origin_linked}
+        originFunctionName={group.origin_function_name}
+        originBinary={group.origin_binary}
+        strings={strings}
+        threadName={threadName}
+        onSelectTid={onSelectTid}
+      />
+    </tr>
+  );
+}
+
 function TargetSpanRow({
   entry,
   strings,
@@ -233,46 +295,70 @@ function TargetSpanRow({
   const startSec = (Number(entry.start_ns) / 1e9).toFixed(3);
   const lane = entry.lane_name != null ? strings[entry.lane_name] : "(lane)";
   const span = entry.span_name != null ? strings[entry.span_name] : "(span)";
-  const originFn =
-    entry.origin_function_name != null
-      ? strings[entry.origin_function_name]
-      : null;
-  const originBin =
-    entry.origin_binary != null ? strings[entry.origin_binary] : null;
-  const originThreadName =
-    entry.origin_tid != null ? threadName(entry.origin_tid) : null;
   return (
     <tr>
       <td className="col-start">{startSec}s</td>
       <td className="col-duration">{formatDuration(entry.duration_ns)}</td>
       <td className="col-lane">{lane}</td>
       <td className="col-span">{span}</td>
-      <td className={`col-origin${entry.origin_tid == null ? " empty" : ""}`}>
-        {entry.origin_tid != null ? (
-          <button
-            type="button"
-            className="waker-link"
-            onClick={() => onSelectTid(entry.origin_tid!)}
-            title={
-              originBin
-                ? `${originFn ?? "(unresolved)"} · ${originBin}`
-                : originFn ?? `tid ${entry.origin_tid}`
-            }
-          >
-            {originFn ??
-              (entry.origin_linked
-                ? "(linked origin)"
-                : "(unlinked origin)")}
-            <span className="waker-tid">
-              {" "}
-              · {originThreadName ?? `tid ${entry.origin_tid}`}
-            </span>
-          </button>
-        ) : (
-          "(none)"
-        )}
-      </td>
+      <OriginCell
+        originTid={entry.origin_tid}
+        originLinked={entry.origin_linked}
+        originFunctionName={entry.origin_function_name}
+        originBinary={entry.origin_binary}
+        strings={strings}
+        threadName={threadName}
+        onSelectTid={onSelectTid}
+      />
     </tr>
+  );
+}
+
+function OriginCell({
+  originTid,
+  originLinked,
+  originFunctionName,
+  originBinary,
+  strings,
+  threadName,
+  onSelectTid,
+}: {
+  originTid: number | null;
+  originLinked: boolean;
+  originFunctionName: number | null;
+  originBinary: number | null;
+  strings: string[];
+  threadName: (tid: number) => string | null;
+  onSelectTid: (tid: number) => void;
+}) {
+  const originFn =
+    originFunctionName != null ? strings[originFunctionName] : null;
+  const originBin = originBinary != null ? strings[originBinary] : null;
+  const originThreadName = originTid != null ? threadName(originTid) : null;
+  return (
+    <td className={`col-origin${originTid == null ? " empty" : ""}`}>
+      {originTid != null ? (
+        <button
+          type="button"
+          className="waker-link"
+          onClick={() => onSelectTid(originTid)}
+          title={
+            originBin
+              ? `${originFn ?? "(unresolved)"} · ${originBin}`
+              : originFn ?? `tid ${originTid}`
+          }
+        >
+          {originFn ??
+            (originLinked ? "(linked origin)" : "(unlinked origin)")}
+          <span className="waker-tid">
+            {" "}
+            · {originThreadName ?? `tid ${originTid}`}
+          </span>
+        </button>
+      ) : (
+        "(none)"
+      )}
+    </td>
   );
 }
 

@@ -58,6 +58,10 @@ The `subscribe_*` variants are how the web UI stays live without polling —
 each panel holds one subscription and re-renders when an update arrives.
 There is also `set_paused` / `is_paused` to freeze and resume ingestion.
 
+`target_spans` / `subscribe_target_spans` return both grouped target work
+(lane + span name + origin, with count and total/max duration) and capped
+recent individual spans for detail panes.
+
 Every query takes a `ViewParams` (thread filter, time range, exclude-symbol
 list), so any view can be scoped — the equivalent of the CLI's `--tid`.
 

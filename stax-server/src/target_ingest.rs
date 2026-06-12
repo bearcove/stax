@@ -699,6 +699,24 @@ mod tests {
             .await;
         assert_eq!(target_spans.total_spans, 2);
         assert_eq!(target_spans.total_duration_ns, 3_500_000);
+        assert_eq!(target_spans.groups.len(), 2);
+        assert_eq!(
+            target_spans.groups[0]
+                .span_name
+                .and_then(|index| target_spans.strings.get(index as usize).map(String::as_str)),
+            Some("kernel_a")
+        );
+        assert_eq!(target_spans.groups[0].count, 1);
+        assert_eq!(target_spans.groups[0].total_duration_ns, 3_000_000);
+        assert_eq!(target_spans.groups[0].max_duration_ns, 3_000_000);
+        assert_eq!(
+            target_spans.groups[1]
+                .span_name
+                .and_then(|index| target_spans.strings.get(index as usize).map(String::as_str)),
+            Some("kernel_b")
+        );
+        assert_eq!(target_spans.groups[1].count, 1);
+        assert_eq!(target_spans.groups[1].total_duration_ns, 500_000);
         assert_eq!(target_spans.entries.len(), 2);
         assert_eq!(
             target_spans.entries[0]

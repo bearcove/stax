@@ -548,6 +548,23 @@ pub struct PetSampleListUpdate {
     pub entries: Vec<PetSampleEntry>,
 }
 
+/// Aggregated target/executor work grouped by lane, span name, and origin.
+#[derive(Clone, Debug, Facet)]
+pub struct TargetSpanGroup {
+    pub tid: u32,
+    pub lane_name: Option<u32>,
+    pub span_name: Option<u32>,
+    pub origin_tid: Option<u32>,
+    pub origin_linked: bool,
+    pub origin_function_name: Option<u32>,
+    pub origin_binary: Option<u32>,
+    pub count: u64,
+    pub total_duration_ns: u64,
+    pub max_duration_ns: u64,
+    /// Recording-relative ns for the newest span in this group.
+    pub last_start_ns: u64,
+}
+
 /// One target/executor span surfaced by `subscribe_target_spans`.
 #[derive(Clone, Debug, Facet)]
 pub struct TargetSpanEntry {
@@ -568,6 +585,7 @@ pub struct TargetSpanListUpdate {
     pub strings: Vec<String>,
     pub total_spans: u64,
     pub total_duration_ns: u64,
+    pub groups: Vec<TargetSpanGroup>,
     pub entries: Vec<TargetSpanEntry>,
 }
 

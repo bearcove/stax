@@ -490,6 +490,9 @@ Current state:
 - Added a target-span detail RPC and web tab. It streams individual synthetic
   span intervals with lane/span names, duration, origin tid, and origin-link
   status from the existing aggregator event log.
+- The target-span detail RPC/web tab now also groups target work by
+  lane/span/origin, with count, total duration, max duration, and newest
+  occurrence.
 
 Remaining work:
 
@@ -519,11 +522,11 @@ Remaining work:
     - count/aggregate if grouped
     - origin tid and nearest CPU stack if linked
 - Details panels:
-  - started: target spans tab answers span count, total duration, lane/name,
-    and origin tid/link state
-  - answer "who queued this?"
-  - answer "how many times and total duration?"
-  - answer "which CPU thread dispatched it?"
+  - done: target spans tab answers span count, total duration, max duration,
+    lane/name, origin tid/link state, and most recent individual spans
+  - done: grouped origin cells show who queued linked work and switch to that
+    CPU thread
+  - next: focus the exact CPU stack/symbol after selecting the origin thread
 - Empty states:
   - same guidance as CLI:
     - no samples yet

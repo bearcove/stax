@@ -12,8 +12,8 @@ use parking_lot::RwLock;
 use stax_live_proto::{
     AnnotatedLine, AnnotatedView, CfgUpdate, FlameNode, FlamegraphUpdate, IntervalEntry,
     IntervalListUpdate, LiveFilter, NeighborsUpdate, PetSampleEntry, PetSampleListUpdate, Profiler,
-    TargetSpanEntry, TargetSpanListUpdate, ThreadInfo, ThreadsUpdate, TimelineBucket,
-    TimelineUpdate, TopEntry, TopSort, TopUpdate, ViewParams,
+    TargetSpanEntry, TargetSpanGroup, TargetSpanListUpdate, ThreadInfo, ThreadsUpdate,
+    TimelineBucket, TimelineUpdate, TopEntry, TopSort, TopUpdate, ViewParams,
 };
 
 use crate::aggregator::{Aggregation, EventCtx, OffCpuBreakdown, PmcAccum, StackNode};
@@ -657,6 +657,7 @@ fn build_wakers_update(
 /// representative samples / intervals to inspect, not an exhaustive
 /// dump. The total count fields tell the UI when there's more.
 const DRILLDOWN_ENTRY_CAP: usize = 10_000;
+const DRILLDOWN_GROUP_CAP: usize = 512;
 
 fn build_intervals_update(
     agg: &Aggregator,
@@ -783,6 +784,54 @@ fn build_pet_samples_update(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct TargetSpanGroupKey {
+    tid: u32,
+    lane_addr: Option<u64>,
+    span_addr: Option<u64>,
+    origin_tid: Option<u32>,
+    origin_addr: Option<u64>,
+}
+
+struct TargetSpanGroupAccum {
+    tid: u32,
+    lane_name: Option<u32>,
+    span_name: Option<u32>,
+    origin_tid: Option<u32>,
+    origin_linked: bool,
+    origin_function_name: Option<u32>,
+    origin_binary: Option<u32>,
+    count: u64,
+    total_duration_ns: u64,
+    max_duration_ns: u64,
+    last_start_ns: u64,
+}
+
+impl TargetSpanGroupAccum {
+    fn record(&mut self, start_ns: u64, duration_ns: u64) {
+        self.count = self.count.saturating_add(1);
+        self.total_duration_ns = self.total_duration_ns.saturating_add(duration_ns);
+        self.max_duration_ns = self.max_duration_ns.max(duration_ns);
+        self.last_start_ns = self.last_start_ns.max(start_ns);
+    }
+
+    fn into_group(self) -> TargetSpanGroup {
+        TargetSpanGroup {
+            tid: self.tid,
+            lane_name: self.lane_name,
+            span_name: self.span_name,
+            origin_tid: self.origin_tid,
+            origin_linked: self.origin_linked,
+            origin_function_name: self.origin_function_name,
+            origin_binary: self.origin_binary,
+            count: self.count,
+            total_duration_ns: self.total_duration_ns,
+            max_duration_ns: self.max_duration_ns,
+            last_start_ns: self.last_start_ns,
+        }
+    }
+}
+
 fn build_target_spans_update(
     agg: &Aggregator,
     binaries: &BinaryRegistry,
@@ -794,6 +843,7 @@ fn build_target_spans_update(
     let mut total_spans: u64 = 0;
     let mut total_duration_ns: u64 = 0;
     let mut entries: Vec<TargetSpanEntry> = Vec::new();
+    let mut groups: HashMap<TargetSpanGroupKey, TargetSpanGroupAccum> = HashMap::new();
     let mut predicate = make_predicate(filter, session_start);
 
     for (event_tid, raw) in agg.iter_intervals(tid) {
@@ -814,54 +864,105 @@ fn build_target_spans_update(
         }
         total_spans = total_spans.saturating_add(1);
         total_duration_ns = total_duration_ns.saturating_add(duration_ns);
+
+        let start_ns = raw.start_ns.saturating_sub(session_start);
+        let span_addr = stack.first().copied();
+        let lane_addr = stack.get(1).copied();
+        let origin_addr = stack.get(2).copied();
+        let lane_name =
+            lane_addr.and_then(|addr| resolve_target_symbol_name(binaries, &mut interner, addr));
+        let span_name =
+            span_addr.and_then(|addr| resolve_target_symbol_name(binaries, &mut interner, addr));
+        let (origin_function_name, origin_binary) =
+            resolve_target_origin(binaries, &mut interner, origin_addr);
+
+        let key = TargetSpanGroupKey {
+            tid: event_tid,
+            lane_addr,
+            span_addr,
+            origin_tid: *origin_tid,
+            origin_addr,
+        };
+        groups
+            .entry(key)
+            .or_insert_with(|| TargetSpanGroupAccum {
+                tid: event_tid,
+                lane_name,
+                span_name,
+                origin_tid: *origin_tid,
+                origin_linked: origin_addr.is_some(),
+                origin_function_name,
+                origin_binary,
+                count: 0,
+                total_duration_ns: 0,
+                max_duration_ns: 0,
+                last_start_ns: start_ns,
+            })
+            .record(start_ns, duration_ns);
+
         if entries.len() >= DRILLDOWN_ENTRY_CAP {
             continue;
         }
 
-        let resolve_name = |addr: u64, interner: &mut StringInterner| {
-            binaries
-                .lookup_symbol(addr)
-                .map(|resolved| interner.intern(resolved.function_name))
-        };
-        let lane_name = stack
-            .get(1)
-            .copied()
-            .and_then(|addr| resolve_name(addr, &mut interner));
-        let span_name = stack
-            .first()
-            .copied()
-            .and_then(|addr| resolve_name(addr, &mut interner));
-        let origin_resolved = stack.get(2).copied().and_then(|addr| {
-            binaries.lookup_symbol(addr).map(|resolved| {
-                (
-                    interner.intern(resolved.function_name),
-                    interner.intern(resolved.binary),
-                )
-            })
-        });
-        let (origin_function_name, origin_binary) =
-            origin_resolved.map_or((None, None), |(name, binary)| (Some(name), Some(binary)));
-
         entries.push(TargetSpanEntry {
             tid: event_tid,
-            start_ns: raw.start_ns.saturating_sub(session_start),
+            start_ns,
             duration_ns,
             lane_name,
             span_name,
             origin_tid: *origin_tid,
-            origin_linked: stack.len() > 2,
+            origin_linked: origin_addr.is_some(),
             origin_function_name,
             origin_binary,
         });
     }
 
     entries.sort_by(|a, b| b.start_ns.cmp(&a.start_ns));
+    let mut groups: Vec<TargetSpanGroup> = groups
+        .into_values()
+        .map(TargetSpanGroupAccum::into_group)
+        .collect();
+    groups.sort_by(|a, b| {
+        b.total_duration_ns
+            .cmp(&a.total_duration_ns)
+            .then_with(|| b.count.cmp(&a.count))
+            .then_with(|| b.last_start_ns.cmp(&a.last_start_ns))
+    });
+    groups.truncate(DRILLDOWN_GROUP_CAP);
+
     TargetSpanListUpdate {
         strings: interner.into_strings(),
         total_spans,
         total_duration_ns,
+        groups,
         entries,
     }
+}
+
+fn resolve_target_symbol_name(
+    binaries: &BinaryRegistry,
+    interner: &mut StringInterner,
+    addr: u64,
+) -> Option<u32> {
+    binaries
+        .lookup_symbol(addr)
+        .map(|resolved| interner.intern(resolved.function_name))
+}
+
+fn resolve_target_origin(
+    binaries: &BinaryRegistry,
+    interner: &mut StringInterner,
+    addr: Option<u64>,
+) -> (Option<u32>, Option<u32>) {
+    addr.and_then(|addr| {
+        binaries.lookup_symbol(addr).map(|resolved| {
+            (
+                interner.intern(resolved.function_name),
+                interner.intern(resolved.binary),
+            )
+        })
+    })
+    .map_or((None, None), |(name, binary)| (Some(name), Some(binary)))
 }
 
 fn is_filter_empty(filter: &LiveFilter) -> bool {

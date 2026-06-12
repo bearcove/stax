@@ -557,7 +557,8 @@ directly. Both live in `stax-live-proto` and are exposed on the local socket
   `annotated`, `timeline`, `neighbors`, `intervals`, `target_spans`,
   `wakers`, … most with a
   `subscribe_*` variant that pushes periodic updates over a `vox::Tx<…>`
-  (a one-shot call is the snapshot form).
+  (a one-shot call is the snapshot form). `target_spans` returns grouped
+  target work by lane/span/origin plus capped recent individual spans.
 
 There is no separate ingest service — recording runs in-process inside
 `stax-server`.
