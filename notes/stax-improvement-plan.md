@@ -665,7 +665,7 @@ Tasks:
   - done: aggregate focused target-span verification (`just target-span-check`)
   - done: blessed demo run (`just demo-corpus`)
   - done: `just archive-smoke` for save/reopen/compare using the blessed
-    target-span corpus
+    target-span corpus through a checkout-local server/CLI
 
 Acceptance criteria:
 
@@ -725,7 +725,8 @@ Done when:
 4. Done: query saved run through existing CLI surfaces.
 5. Done: preserve target spans, origin-linked stacks, and ingest diagnostics.
 6. Done: document archive compatibility.
-7. Done: add `just archive-smoke` for the blessed corpus persistence path.
+7. Done: add `just archive-smoke` for the blessed corpus persistence path
+   through a checkout-local server/CLI.
 
 Done when:
 

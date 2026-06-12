@@ -447,9 +447,11 @@ For a live save/reopen smoke with the blessed target-span corpus:
 just archive-smoke
 ```
 
-That records `stax-target/examples/corpus.rs`, saves it to a temporary
-archive directory, reopens it, queries `threads`/`top`/`flame`/`diagnose`,
-and runs `stax compare` against the archive itself.
+That starts a checkout-local `stax-server` on a temporary socket, records
+`stax-target/examples/corpus.rs` with the checkout CLI, saves it to a
+temporary archive directory, reopens it, queries
+`threads`/`top`/`flame`/`diagnose`, and runs `stax compare` against the
+archive itself.
 
 ### `stax top [-n N] [--sort self|total] [--tid TID]`
 

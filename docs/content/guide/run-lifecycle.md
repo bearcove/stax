@@ -199,8 +199,9 @@ For a live persistence smoke with the blessed target-span corpus:
 just archive-smoke
 ```
 
-That recipe records `stax-target/examples/corpus.rs`, saves the run to a
-temporary archive directory, reopens it, queries the restored run through
+That recipe starts a checkout-local `stax-server` on a temporary socket,
+records `stax-target/examples/corpus.rs` with the checkout CLI, saves the run
+to a temporary archive directory, reopens it, queries the restored run through
 `threads`/`top`/`flame`/`diagnose`, and runs `stax compare` against itself.
 
 ## Putting it together
