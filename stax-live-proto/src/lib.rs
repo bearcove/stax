@@ -1803,7 +1803,7 @@ pub trait RunControl {
 
 /// All service descriptors exposed by stax-live; the codegen iterates over
 /// this list.
-pub fn all_services() -> Vec<&'static vox::session::ServiceDescriptor> {
+pub fn all_services() -> Vec<&'static vox::ServiceDescriptor> {
     vec![
         profiler_service_descriptor(),
         run_control_service_descriptor(),

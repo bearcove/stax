@@ -62,8 +62,8 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::sync::mpsc::{Receiver, Sender, error::TrySendError};
 
 /// Per-call timeout: a half-dead connection (e.g. server dropped us for
 /// missing keepalive pongs) must never wedge the worker — time out,
@@ -287,7 +287,7 @@ pub fn try_report_batch_with_kind(
             tracing::debug!("stax-target queue full; dropping span batch");
             Err(ReportError::QueueFull)
         }
-        Err(TrySendError::Disconnected(_)) => {
+        Err(TrySendError::Closed(_)) => {
             record_worker_disconnected_drop(span_count);
             Err(ReportError::WorkerDisconnected)
         }
@@ -874,10 +874,10 @@ impl OpenSpan {
     }
 }
 
-fn worker_sender() -> &'static SyncSender<TargetSpanBatch> {
-    static SENDER: OnceLock<SyncSender<TargetSpanBatch>> = OnceLock::new();
+fn worker_sender() -> &'static Sender<TargetSpanBatch> {
+    static SENDER: OnceLock<Sender<TargetSpanBatch>> = OnceLock::new();
     SENDER.get_or_init(|| {
-        let (tx, rx) = std::sync::mpsc::sync_channel(QUEUE_DEPTH);
+        let (tx, rx) = tokio::sync::mpsc::channel(QUEUE_DEPTH);
         std::thread::Builder::new()
             .name("stax-target".to_owned())
             .spawn(move || worker(rx))
@@ -888,14 +888,7 @@ fn worker_sender() -> &'static SyncSender<TargetSpanBatch> {
 }
 
 fn worker(rx: Receiver<TargetSpanBatch>) {
-    // Multi-thread runtime (one background worker) so vox keepalive
-    // pongs are answered while this thread is parked in recv_timeout —
-    // stax-server pings every 5s and drops links that miss pongs for
-    // 30s, which a current-thread runtime (driven only inside block_on)
-    // cannot answer in time.
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .thread_name("stax-target-io")
+    let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
     {
@@ -904,108 +897,108 @@ fn worker(rx: Receiver<TargetSpanBatch>) {
             REPORTING_ACTIVE.store(false, Ordering::Relaxed);
             CONNECTED_TO_SERVER.store(false, Ordering::Relaxed);
             tracing::warn!("stax-target: no tokio runtime, span reporting disabled: {e}");
-            for _ in rx {}
             return;
         }
     };
+    runtime.block_on(worker_loop(rx));
+}
+
+async fn worker_loop(mut rx: Receiver<TargetSpanBatch>) {
     let pid = std::process::id();
     let mut client: Option<TargetIngestClient> = None;
-    let mut next_poll = Instant::now();
+    let mut next_poll = tokio::time::Instant::now();
     loop {
-        // Poll the capture gate when due.
-        let now = Instant::now();
-        if now >= next_poll {
-            next_poll = now + POLL_INTERVAL;
-            runtime.block_on(async {
-                if client.is_none() {
-                    client = connect().await;
-                }
-                let active = match client.as_ref() {
-                    Some(live) => {
-                        match tokio::time::timeout(CALL_TIMEOUT, live.should_report(pid)).await {
-                            Ok(Ok(active)) => active,
-                            Ok(Err(e)) => {
-                                tracing::debug!(
-                                    "stax-target: gate poll failed, dropping connection: {e}"
-                                );
-                                CONNECTED_TO_SERVER.store(false, Ordering::Relaxed);
-                                client = None;
-                                false
-                            }
-                            Err(_) => {
-                                tracing::debug!(
-                                    "stax-target: gate poll timed out, dropping connection"
-                                );
-                                CONNECTED_TO_SERVER.store(false, Ordering::Relaxed);
-                                client = None;
-                                false
-                            }
-                        }
-                    }
-                    None => false,
-                };
-                let was = REPORTING_ACTIVE.swap(active, Ordering::Relaxed);
-                if !was && active {
-                    reset_reporter_stats();
-                }
-                if was != active {
-                    tracing::debug!(active, "stax-target: capture gate flipped");
-                }
-                if active {
-                    let Some(live) = client.as_ref() else {
-                        return;
-                    };
-                    let stats = reporter_stats_for_pid(pid);
-                    match tokio::time::timeout(CALL_TIMEOUT, live.reporter_stats(stats)).await {
-                        Ok(Ok(())) => {}
-                        Ok(Err(e)) => {
-                            tracing::debug!(
-                                "stax-target: reporter stats failed, dropping connection: {e}"
-                            );
-                            CONNECTED_TO_SERVER.store(false, Ordering::Relaxed);
-                            client = None;
-                        }
-                        Err(_) => {
-                            tracing::debug!(
-                                "stax-target: reporter stats timed out, dropping connection"
-                            );
-                            CONNECTED_TO_SERVER.store(false, Ordering::Relaxed);
-                            client = None;
-                        }
-                    }
-                }
-            });
-        }
-        // Pump batches until the next poll is due.
-        let wait = next_poll.saturating_duration_since(Instant::now());
-        match rx.recv_timeout(wait) {
-            Ok(batch) => runtime.block_on(async {
-                if client.is_none() {
-                    client = connect().await;
-                }
-                let Some(live) = client.as_ref() else {
+        tokio::select! {
+            biased;
+
+            _ = tokio::time::sleep_until(next_poll) => {
+                next_poll = tokio::time::Instant::now() + POLL_INTERVAL;
+                poll_capture_gate(pid, &mut client).await;
+            }
+
+            batch = rx.recv() => {
+                let Some(batch) = batch else {
+                    REPORTING_ACTIVE.store(false, Ordering::Relaxed);
+                    CONNECTED_TO_SERVER.store(false, Ordering::Relaxed);
                     return;
                 };
-                match tokio::time::timeout(CALL_TIMEOUT, live.ingest(batch)).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => {
-                        tracing::debug!("stax-target: ingest failed, dropping connection: {e}");
-                        CONNECTED_TO_SERVER.store(false, Ordering::Relaxed);
-                        client = None;
-                    }
-                    Err(_) => {
-                        tracing::debug!("stax-target: ingest timed out, dropping connection");
-                        CONNECTED_TO_SERVER.store(false, Ordering::Relaxed);
-                        client = None;
-                    }
-                }
-            }),
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => {
+                ingest_batch(batch, &mut client).await;
+            }
+        }
+    }
+}
+
+async fn poll_capture_gate(pid: u32, client: &mut Option<TargetIngestClient>) {
+    if client.is_none() {
+        *client = connect().await;
+    }
+    let active = match client.as_ref() {
+        Some(live) => match tokio::time::timeout(CALL_TIMEOUT, live.should_report(pid)).await {
+            Ok(Ok(active)) => active,
+            Ok(Err(e)) => {
+                tracing::debug!("stax-target: gate poll failed, dropping connection: {e}");
                 REPORTING_ACTIVE.store(false, Ordering::Relaxed);
                 CONNECTED_TO_SERVER.store(false, Ordering::Relaxed);
-                return;
+                *client = None;
+                false
             }
+            Err(_) => {
+                tracing::debug!("stax-target: gate poll timed out, dropping connection");
+                REPORTING_ACTIVE.store(false, Ordering::Relaxed);
+                CONNECTED_TO_SERVER.store(false, Ordering::Relaxed);
+                *client = None;
+                false
+            }
+        },
+        None => false,
+    };
+    let was = REPORTING_ACTIVE.swap(active, Ordering::Relaxed);
+    if !was && active {
+        reset_reporter_stats();
+    }
+    if was != active {
+        tracing::debug!(active, "stax-target: capture gate flipped");
+    }
+    if !active {
+        return;
+    }
+    let Some(live) = client.as_ref() else {
+        return;
+    };
+    let stats = reporter_stats_for_pid(pid);
+    match tokio::time::timeout(CALL_TIMEOUT, live.reporter_stats(stats)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::debug!("stax-target: reporter stats failed, dropping connection: {e}");
+            CONNECTED_TO_SERVER.store(false, Ordering::Relaxed);
+            *client = None;
+        }
+        Err(_) => {
+            tracing::debug!("stax-target: reporter stats timed out, dropping connection");
+            CONNECTED_TO_SERVER.store(false, Ordering::Relaxed);
+            *client = None;
+        }
+    }
+}
+
+async fn ingest_batch(batch: TargetSpanBatch, client: &mut Option<TargetIngestClient>) {
+    if client.is_none() {
+        *client = connect().await;
+    }
+    let Some(live) = client.as_ref() else {
+        return;
+    };
+    match tokio::time::timeout(CALL_TIMEOUT, live.ingest(batch)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::debug!("stax-target: ingest failed, dropping connection: {e}");
+            CONNECTED_TO_SERVER.store(false, Ordering::Relaxed);
+            *client = None;
+        }
+        Err(_) => {
+            tracing::debug!("stax-target: ingest timed out, dropping connection");
+            CONNECTED_TO_SERVER.store(false, Ordering::Relaxed);
+            *client = None;
         }
     }
 }
@@ -1016,7 +1009,7 @@ async fn connect() -> Option<TargetIngestClient> {
         return None;
     };
     let url = format!("local://{}", socket.display());
-    match vox::connect(&url).await {
+    match vox::connect_lane(&url).await {
         Ok(client) => {
             CONNECTED_TO_SERVER.store(true, Ordering::Relaxed);
             tracing::debug!("stax-target: connected to {url}");

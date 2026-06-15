@@ -105,20 +105,24 @@ async fn main() -> eyre::Result<()> {
     Ok(())
 }
 
-fn build_factory(server: ServerState) -> impl vox::ConnectionRouter + 'static {
-    vox::router_fn(
-        move |request: &vox::ConnectionRequest| -> Result<vox::ConnectionRoute, vox::Metadata> {
+fn build_factory(server: ServerState) -> impl vox::LaneAcceptor + 'static {
+    vox::lane_acceptor_fn(
+        move |request: &vox::LaneRequest, lane: vox::PendingLane| -> Result<(), vox::Metadata> {
             match request.service() {
-                "Noop" => Ok(vox::ConnectionRoute::handle(())),
-                "RunControl" => Ok(vox::ConnectionRoute::handle(RunControlDispatcher::new(
-                    server.clone(),
-                ))),
-                "Profiler" => Ok(vox::ConnectionRoute::handle(ProfilerDispatcher::new(
-                    server.profiler(),
-                ))),
-                "TargetIngest" => Ok(vox::ConnectionRoute::handle(TargetIngestDispatcher::new(
-                    TargetIngestService::new(server.clone()),
-                ))),
+                "RunControl" => {
+                    lane.handle_with(RunControlDispatcher::new(server.clone()));
+                    Ok(())
+                }
+                "Profiler" => {
+                    lane.handle_with(ProfilerDispatcher::new(server.profiler()));
+                    Ok(())
+                }
+                "TargetIngest" => {
+                    lane.handle_with(TargetIngestDispatcher::new(TargetIngestService::new(
+                        server.clone(),
+                    )));
+                    Ok(())
+                }
                 other => {
                     tracing::warn!("stax-server: rejecting unknown service {other:?}");
                     Err(vox::Metadata::default())
@@ -155,22 +159,16 @@ fn spawn_session_local(server: ServerState, link: vox::transport::local::LocalLi
         let result = vox::acceptor_on(link)
             .channel_capacity(STAX_SERVER_CHANNEL_CAPACITY)
             .observer(observer)
-            .keepalive(vox::SessionKeepaliveConfig {
+            .keepalive(vox::ConnectionKeepaliveConfig {
                 ping_interval: std::time::Duration::from_secs(5),
                 pong_timeout: std::time::Duration::from_secs(30),
             })
             .on_connection(factory)
-            .establish::<vox::NoopClient>()
+            .establish_connection()
             .await;
         match result {
-            Ok(client) => {
-                let _debug_registration = stax_vox_observe::register_global_caller(
-                    "stax-server",
-                    "local",
-                    "root",
-                    &client.caller,
-                );
-                client.caller.closed().await;
+            Ok(connection) => {
+                connection.closed().await;
             }
             Err(e) => tracing::warn!("stax-server: local session establish failed: {e:?}"),
         }
@@ -185,17 +183,11 @@ fn spawn_session_ws(server: ServerState, link: <vox::WsListener as vox::VoxListe
             .channel_capacity(STAX_SERVER_CHANNEL_CAPACITY)
             .observer(observer)
             .on_connection(factory)
-            .establish::<vox::NoopClient>()
+            .establish_connection()
             .await;
         match result {
-            Ok(client) => {
-                let _debug_registration = stax_vox_observe::register_global_caller(
-                    "stax-server",
-                    "ws",
-                    "root",
-                    &client.caller,
-                );
-                client.caller.closed().await;
+            Ok(connection) => {
+                connection.closed().await;
             }
             Err(e) => tracing::warn!("stax-server: ws session establish failed: {e:?}"),
         }

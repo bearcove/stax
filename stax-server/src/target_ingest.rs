@@ -1273,7 +1273,7 @@ mod tests {
         crate::spawn_accept_loop_local(server.clone(), acceptor);
 
         let url = format!("local://{}", socket.display());
-        let client: TargetIngestClient = vox::connect(&url).await.expect("connect");
+        let client: TargetIngestClient = vox::connect_lane(&url).await.expect("connect");
         assert!(client.should_report(4242).await.expect("should_report"));
         client
             .ingest(TargetSpanBatch {

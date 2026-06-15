@@ -158,7 +158,7 @@ where
     let observer = stax_vox_observe::VoxObserverLogger::new("staxd-client", "staxd-records")
         .with_pid(opts.pid);
 
-    let client: StaxdClient = match vox::connect(&url)
+    let client: StaxdClient = match vox::connect_lane(&url)
         .channel_capacity(STAXD_RECORD_CHANNEL_CAPACITY)
         .observer(observer)
         .await

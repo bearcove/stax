@@ -240,7 +240,7 @@ fn resolve_dwarf_unwind(args: &RecordArgs) -> bool {
 
 async fn run_record_async(args: RecordArgs) -> Result<(), Box<dyn Error>> {
     let url = require_server_socket()?;
-    let client: RunControlClient = vox::connect(&url).await?;
+    let client: RunControlClient = vox::connect_lane(&url).await?;
     let _debug_registration = register_run_control_client("record", &client);
     let target = args.target()?;
     let label = args
@@ -622,7 +622,7 @@ fn register_profiler_client(
 
 async fn run_status() -> Result<(), Box<dyn Error>> {
     let url = require_server_socket()?;
-    let client: RunControlClient = vox::connect(&url).await?;
+    let client: RunControlClient = vox::connect_lane(&url).await?;
     let _debug_registration = register_run_control_client("status", &client);
     let status = client.status().await.map_err(|e| format!("{e:?}"))?;
     print_server_status(&status);
@@ -631,7 +631,7 @@ async fn run_status() -> Result<(), Box<dyn Error>> {
 
 async fn run_list() -> Result<(), Box<dyn Error>> {
     let url = require_server_socket()?;
-    let client: RunControlClient = vox::connect(&url).await?;
+    let client: RunControlClient = vox::connect_lane(&url).await?;
     let _debug_registration = register_run_control_client("list", &client);
     let runs = client.list_runs().await.map_err(|e| format!("{e:?}"))?;
     if runs.is_empty() {
@@ -647,7 +647,7 @@ async fn run_list() -> Result<(), Box<dyn Error>> {
 async fn run_diagnose(args: DiagnoseArgs) -> Result<(), Box<dyn Error>> {
     let url = require_server_socket()?;
     ensure_query_run_if_requested(&url, "diagnose --run", args.run).await?;
-    let client: RunControlClient = vox::connect(&url).await?;
+    let client: RunControlClient = vox::connect_lane(&url).await?;
     let _debug_registration = register_run_control_client("diagnose", &client);
     let snapshot = client
         .diagnostics(run_view_params(args.run))
@@ -671,7 +671,7 @@ async fn run_wait(args: WaitArgs) -> Result<(), Box<dyn Error>> {
     };
 
     let url = require_server_socket()?;
-    let client: RunControlClient = vox::connect(&url).await?;
+    let client: RunControlClient = vox::connect_lane(&url).await?;
     let _debug_registration = register_run_control_client("wait", &client);
     let outcome = client
         .wait_active(condition, args.timeout_ms)
@@ -700,7 +700,7 @@ async fn run_wait(args: WaitArgs) -> Result<(), Box<dyn Error>> {
 
 async fn run_stop() -> Result<(), Box<dyn Error>> {
     let url = require_server_socket()?;
-    let client: RunControlClient = vox::connect(&url).await?;
+    let client: RunControlClient = vox::connect_lane(&url).await?;
     let _debug_registration = register_run_control_client("stop", &client);
     let result = client.stop_active().await;
     match result {
@@ -716,7 +716,7 @@ async fn run_stop() -> Result<(), Box<dyn Error>> {
 
 async fn run_save(args: SaveArgs) -> Result<(), Box<dyn Error>> {
     let url = require_server_socket()?;
-    let client: RunControlClient = vox::connect(&url).await?;
+    let client: RunControlClient = vox::connect_lane(&url).await?;
     let _debug_registration = register_run_control_client("save", &client);
     client
         .save_current(args.path.clone())
@@ -728,7 +728,7 @@ async fn run_save(args: SaveArgs) -> Result<(), Box<dyn Error>> {
 
 async fn run_open(args: OpenArgs) -> Result<(), Box<dyn Error>> {
     let url = require_server_socket()?;
-    let client: RunControlClient = vox::connect(&url).await?;
+    let client: RunControlClient = vox::connect_lane(&url).await?;
     let _debug_registration = register_run_control_client("open", &client);
     client
         .open_saved(args.path.clone())
@@ -740,7 +740,7 @@ async fn run_open(args: OpenArgs) -> Result<(), Box<dyn Error>> {
 
 async fn run_select_run(args: stax_core::args::SelectRunArgs) -> Result<(), Box<dyn Error>> {
     let url = require_server_socket()?;
-    let client: RunControlClient = vox::connect(&url).await?;
+    let client: RunControlClient = vox::connect_lane(&url).await?;
     let _debug_registration = register_run_control_client("select-run", &client);
     let summary = client
         .select_run(stax_live_proto::RunId(args.run_id))
@@ -759,7 +759,7 @@ async fn ensure_query_run_if_requested(
     let Some(run_id) = run_id else {
         return Ok(());
     };
-    let client: RunControlClient = vox::connect(url).await?;
+    let client: RunControlClient = vox::connect_lane(url).await?;
     let _debug_registration = register_run_control_client(surface, &client);
     let runs = client.list_runs().await.map_err(|e| format!("{e:?}"))?;
     if !runs.iter().any(|run| run.id == RunId(run_id)) {
@@ -1665,7 +1665,7 @@ async fn run_top(args: TopArgs) -> Result<(), Box<dyn Error>> {
             return Err(format!("unknown --sort value {other:?} (use `self` or `total`)").into());
         }
     };
-    let client: ProfilerClient = vox::connect(&url).await?;
+    let client: ProfilerClient = vox::connect_lane(&url).await?;
     let _debug_registration = register_profiler_client("top", &client);
     let update = client
         .top_update(args.limit, sort, view_params(args.run, args.tid))
@@ -1718,7 +1718,7 @@ async fn run_top(args: TopArgs) -> Result<(), Box<dyn Error>> {
 async fn run_annotate(args: AnnotateArgs) -> Result<(), Box<dyn Error>> {
     let url = require_server_socket()?;
     ensure_query_run_if_requested(&url, "annotate --run", args.run).await?;
-    let client: ProfilerClient = vox::connect(&url).await?;
+    let client: ProfilerClient = vox::connect_lane(&url).await?;
     let _debug_registration = register_profiler_client("annotate", &client);
     let view_params = view_params(args.run, args.tid);
     let address = resolve_target(&client, &args.target, view_params.clone()).await?;
@@ -1750,7 +1750,7 @@ async fn run_annotate(args: AnnotateArgs) -> Result<(), Box<dyn Error>> {
 async fn run_threads(args: ThreadsArgs) -> Result<(), Box<dyn Error>> {
     let url = require_server_socket()?;
     ensure_query_run_if_requested(&url, "threads --run", args.run).await?;
-    let client: ProfilerClient = vox::connect(&url).await?;
+    let client: ProfilerClient = vox::connect_lane(&url).await?;
     let _debug_registration = register_profiler_client("threads", &client);
     let update = client
         .threads(run_view_params(args.run))
@@ -1770,7 +1770,7 @@ async fn run_target(args: TargetArgs) -> Result<(), Box<dyn Error>> {
 async fn run_target_lanes(args: TargetLanesArgs) -> Result<(), Box<dyn Error>> {
     let url = require_server_socket()?;
     ensure_query_run_if_requested(&url, "target lanes --run", args.run).await?;
-    let client: ProfilerClient = vox::connect(&url).await?;
+    let client: ProfilerClient = vox::connect_lane(&url).await?;
     let _debug_registration = register_profiler_client("target-lanes", &client);
     let update = client
         .threads(run_view_params(args.run))
@@ -1784,7 +1784,7 @@ async fn run_target_top(args: TargetTopArgs) -> Result<(), Box<dyn Error>> {
     let by = TargetTopBy::parse(&args.by)?;
     let url = require_server_socket()?;
     ensure_query_run_if_requested(&url, "target top --run", args.run).await?;
-    let client: ProfilerClient = vox::connect(&url).await?;
+    let client: ProfilerClient = vox::connect_lane(&url).await?;
     let _debug_registration = register_profiler_client("target-top", &client);
     let update = client
         .target_spans("cli-target-top".to_owned(), view_params(args.run, args.tid))
@@ -2121,7 +2121,7 @@ fn dominant_off_cpu_reason(b: &OffCpuBreakdown) -> &'static str {
 async fn run_flame(args: FlameArgs) -> Result<(), Box<dyn Error>> {
     let url = require_server_socket()?;
     ensure_query_run_if_requested(&url, "flame --run", args.run).await?;
-    let client: ProfilerClient = vox::connect(&url).await?;
+    let client: ProfilerClient = vox::connect_lane(&url).await?;
     let _debug_registration = register_profiler_client("flame", &client);
     let update = client
         .flamegraph(view_params(args.run, args.tid))

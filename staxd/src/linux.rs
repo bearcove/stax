@@ -111,15 +111,15 @@ pub async fn main() -> Result<()> {
                         "staxd",
                         "staxd-linux",
                     ))
-                    .keepalive(vox::SessionKeepaliveConfig {
+                    .keepalive(vox::ConnectionKeepaliveConfig {
                         ping_interval: Duration::from_secs(5),
                         pong_timeout: Duration::from_secs(30),
                     })
                     .on_connection(dispatcher)
-                    .establish::<vox::NoopClient>()
+                    .establish_connection()
                     .await;
                 match result {
-                    Ok(client) => client.caller.closed().await,
+                    Ok(connection) => connection.closed().await,
                     Err(e) => warn!("staxd: session establish failed: {e:?}"),
                 }
             });

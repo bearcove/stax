@@ -99,22 +99,16 @@ pub async fn main() -> Result<()> {
                     // outlast that burst. ping every 5s, pong within
                     // 30s — still guarantees the slot frees within
                     // ~30s of a hard-kill.
-                    .keepalive(vox::SessionKeepaliveConfig {
+                    .keepalive(vox::ConnectionKeepaliveConfig {
                         ping_interval: Duration::from_secs(5),
                         pong_timeout: Duration::from_secs(30),
                     })
                     .on_connection(dispatcher)
-                    .establish::<vox::NoopClient>()
+                    .establish_connection()
                     .await;
                 match result {
-                    Ok(client) => {
-                        let _debug_registration = stax_vox_observe::register_global_caller(
-                            "staxd",
-                            "local",
-                            "root",
-                            &client.caller,
-                        );
-                        client.caller.closed().await;
+                    Ok(connection) => {
+                        connection.closed().await;
                     }
                     Err(e) => warn!("staxd: session establish failed: {e:?}"),
                 }

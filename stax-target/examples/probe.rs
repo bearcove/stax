@@ -21,7 +21,7 @@ fn main() {
             format!("/tmp/stax-server-{uid}.sock")
         });
         let url = format!("local://{socket}");
-        let client: TargetIngestClient = match vox::connect(&url).await {
+        let client: TargetIngestClient = match vox::connect_lane(&url).await {
             Ok(client) => client,
             Err(e) => {
                 println!("connect failed: {e}");

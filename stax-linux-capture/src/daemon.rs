@@ -36,7 +36,7 @@ pub async fn record_via_daemon(
     let url = format!("local://{daemon_socket}");
     tracing::info!(%url, pid = opts.pid, "connecting to staxd fd broker");
 
-    let client: StaxdLinuxClient = vox::connect(&url)
+    let client: StaxdLinuxClient = vox::connect_lane(&url)
         .await
         .with_context(|| format!("connecting to staxd at {url}"))?;
 

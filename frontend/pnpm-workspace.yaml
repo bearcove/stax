@@ -5,6 +5,10 @@ allowBuilds:
 overrides:
   '@bearcove/phon-engine': link:/Users/amos/phon/typescript/packages/phon-engine
   '@bearcove/phon-schema': link:/Users/amos/phon/typescript/packages/phon-schema
+  '@bearcove/vox-core': link:/Users/amos/vox/typescript/packages/vox-core
+  '@bearcove/vox-tcp': link:/Users/amos/vox/typescript/packages/vox-tcp
+  '@bearcove/vox-wire': link:/Users/amos/vox/typescript/packages/vox-wire
+  '@bearcove/vox-ws': link:/Users/amos/vox/typescript/packages/vox-ws
 minimumReleaseAgeExclude:
   - '@bearcove/phon-engine@0.2.0-rc.0'
   - '@bearcove/phon-schema@0.2.0-rc.0'

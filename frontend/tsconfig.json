@@ -8,6 +8,15 @@
     "strict": true,
     "noFallthroughCasesInSwitch": true,
     "skipLibCheck": true,
+    "baseUrl": ".",
+    "paths": {
+      "@bearcove/phon-engine": ["../../phon/typescript/packages/phon-engine/src/index.ts"],
+      "@bearcove/phon-schema": ["../../phon/typescript/packages/phon-schema/src/index.ts"],
+      "@bearcove/vox-core": ["../../vox/typescript/packages/vox-core/src/index.ts"],
+      "@bearcove/vox-tcp": ["../../vox/typescript/packages/vox-tcp/src/index.ts"],
+      "@bearcove/vox-wire": ["../../vox/typescript/packages/vox-wire/src/index.ts"],
+      "@bearcove/vox-ws": ["../../vox/typescript/packages/vox-ws/src/index.ts"]
+    },
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,
     "resolveJsonModule": true,
