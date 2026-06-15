@@ -165,7 +165,7 @@ streams, binary/symbol metadata, target-ingest diagnostics, typed
 `SavedEventLogEntry` records, and any code-byte blobs needed by `annotate`.
 New readers replay those records when present and keep the aggregate
 chunks/package members as a compatibility and inspection path. The archive
-preserves target spans and origin-linked stacks for later `threads`, `top`,
+preserves target spans and origin links for later `threads`, `top`,
 `flame`, and `diagnose` queries.
 
 `stax save` works while a run is active, and after `stax stop`, until the

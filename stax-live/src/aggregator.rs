@@ -29,7 +29,7 @@ use std::collections::HashMap;
 
 use stax_live_proto::{
     OffCpuReason, SavedAggregator, SavedInterval, SavedIntervalKind, SavedPetSample,
-    SavedPmuSample, SavedThread, SavedThreadName, SavedWakeup,
+    SavedPmuSample, SavedThread, SavedThreadName, SavedWakeup, TargetLaneKind,
 };
 
 use crate::binaries::BinaryRegistry;
@@ -191,9 +191,13 @@ pub enum IntervalKind {
         /// knows the exact work item and duration.
         stack: Box<[u64]>,
         /// Optional CPU thread that queued/submitted this target work.
-        /// Querying that tid includes this synthetic span under the
-        /// sampled CPU stack embedded in `stack`.
+        /// Querying that tid includes this synthetic span as parallel
+        /// lane work linked to that CPU origin. The borrowed origin
+        /// stack remains in `stack` for target-span details and
+        /// diagnostics, not for flame-tree containment.
         origin_tid: Option<u32>,
+        /// Explicit lane/backend kind supplied by the cooperating target.
+        lane_kind: TargetLaneKind,
     },
     OffCpu {
         /// Stack at the moment the thread blocked, leaf-first. Empty
@@ -249,6 +253,7 @@ pub struct StackNode {
     pub target_spans: u64,
     pub off_cpu_intervals: u64,
     pub pmc: PmcAccum,
+    pub target_kind: Option<TargetLaneKind>,
     pub children: HashMap<u64, StackNode>,
 }
 
@@ -263,6 +268,7 @@ impl StackNode {
             .off_cpu_intervals
             .saturating_add(other.off_cpu_intervals);
         self.pmc.add_other(&other.pmc);
+        set_target_kind(&mut self.target_kind, other.target_kind);
         for (&addr, child) in &other.children {
             self.children.entry(addr).or_default().merge(child);
         }
@@ -287,6 +293,7 @@ pub struct AddressStats {
     pub total_off_cpu_intervals: u64,
     pub self_pmc: PmcAccum,
     pub total_pmc: PmcAccum,
+    pub target_kind: Option<TargetLaneKind>,
 }
 
 /// Result of a full aggregation pass. Carries the stack tree, the
@@ -361,12 +368,15 @@ impl Aggregator {
                         end_ns: interval.end_ns,
                         kind: match &interval.kind {
                             IntervalKind::OnCpu => SavedIntervalKind::OnCpu,
-                            IntervalKind::SyntheticSpan { stack, origin_tid } => {
-                                SavedIntervalKind::SyntheticSpan {
-                                    stack: stack.to_vec(),
-                                    origin_tid: *origin_tid,
-                                }
-                            }
+                            IntervalKind::SyntheticSpan {
+                                stack,
+                                origin_tid,
+                                lane_kind,
+                            } => SavedIntervalKind::SyntheticSpan {
+                                stack: stack.to_vec(),
+                                origin_tid: *origin_tid,
+                                lane_kind: *lane_kind,
+                            },
                             IntervalKind::OffCpu {
                                 stack,
                                 waker_tid,
@@ -439,12 +449,15 @@ impl Aggregator {
                             end_ns: interval.end_ns,
                             kind: match interval.kind {
                                 SavedIntervalKind::OnCpu => IntervalKind::OnCpu,
-                                SavedIntervalKind::SyntheticSpan { stack, origin_tid } => {
-                                    IntervalKind::SyntheticSpan {
-                                        stack: stack.into_boxed_slice(),
-                                        origin_tid,
-                                    }
-                                }
+                                SavedIntervalKind::SyntheticSpan {
+                                    stack,
+                                    origin_tid,
+                                    lane_kind,
+                                } => IntervalKind::SyntheticSpan {
+                                    stack: stack.into_boxed_slice(),
+                                    origin_tid,
+                                    lane_kind,
+                                },
                                 SavedIntervalKind::OffCpu {
                                     stack,
                                     waker_tid,
@@ -782,10 +795,15 @@ impl Aggregator {
                                 credit_ns,
                                 &s.pmc,
                                 false,
+                                None,
                             );
                         }
                     }
-                    IntervalKind::SyntheticSpan { stack, origin_tid } => {
+                    IntervalKind::SyntheticSpan {
+                        stack,
+                        origin_tid,
+                        lane_kind,
+                    } => {
                         if tid.is_some_and(|query_tid| {
                             query_tid != event_tid && Some(query_tid) != *origin_tid
                         }) {
@@ -801,13 +819,15 @@ impl Aggregator {
                         total_on_cpu_ns = total_on_cpu_ns.saturating_add(duration);
                         total_target_ns = total_target_ns.saturating_add(duration);
                         total_target_spans = total_target_spans.saturating_add(1);
+                        let target_stack = target_lane_stack(stack);
                         credit_on_cpu_to_tree(
                             &mut flame_root,
                             &mut by_address,
-                            stack,
+                            target_stack,
                             duration,
                             &PmuSample::default(),
                             true,
+                            Some(*lane_kind),
                         );
                     }
                     IntervalKind::OffCpu {
@@ -884,6 +904,7 @@ fn credit_on_cpu_to_tree(
     credit_ns: u64,
     pmc: &PmuSample,
     is_target: bool,
+    target_kind: Option<TargetLaneKind>,
 ) {
     if stack.is_empty() {
         return;
@@ -896,6 +917,7 @@ fn credit_on_cpu_to_tree(
         if is_target {
             s.self_target_ns = s.self_target_ns.saturating_add(credit_ns);
             s.self_target_spans = s.self_target_spans.saturating_add(1);
+            set_target_kind(&mut s.target_kind, target_kind);
         }
         s.self_pmc.add(pmc);
     }
@@ -908,6 +930,7 @@ fn credit_on_cpu_to_tree(
             if is_target {
                 s.total_target_ns = s.total_target_ns.saturating_add(credit_ns);
                 s.total_target_spans = s.total_target_spans.saturating_add(1);
+                set_target_kind(&mut s.target_kind, target_kind);
             }
             s.total_pmc.add(pmc);
         }
@@ -922,8 +945,21 @@ fn credit_on_cpu_to_tree(
         if is_target {
             node.target_ns = node.target_ns.saturating_add(credit_ns);
             node.target_spans = node.target_spans.saturating_add(1);
+            set_target_kind(&mut node.target_kind, target_kind);
         }
         node.pmc.add(pmc);
+    }
+}
+
+fn target_lane_stack(stack: &[u64]) -> &[u64] {
+    &stack[..stack.len().min(2)]
+}
+
+fn set_target_kind(slot: &mut Option<TargetLaneKind>, kind: Option<TargetLaneKind>) {
+    if let Some(kind) = kind
+        && slot.is_none()
+    {
+        *slot = Some(kind);
     }
 }
 

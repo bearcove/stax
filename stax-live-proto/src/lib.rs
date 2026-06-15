@@ -11,6 +11,40 @@ use std::collections::BTreeMap;
 
 use facet::Facet;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Facet)]
+#[repr(u8)]
+pub enum TargetLaneKind {
+    #[default]
+    Generic = 0,
+    Metal = 1,
+}
+
+macro_rules! target_id_type {
+    ($name:ident) => {
+        #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Facet)]
+        pub struct $name {
+            pub raw: u64,
+        }
+
+        impl $name {
+            pub const fn new(raw: u64) -> Self {
+                Self { raw }
+            }
+        }
+    };
+}
+
+target_id_type!(TargetRuntimeId);
+target_id_type!(TargetLaneId);
+target_id_type!(TargetQueueId);
+target_id_type!(TargetCommandBufferId);
+target_id_type!(TargetDispatchId);
+target_id_type!(TargetShaderId);
+target_id_type!(TargetSourceId);
+target_id_type!(TargetAttachmentId);
+target_id_type!(TargetCounterSetId);
+target_id_type!(TargetCounterSampleId);
+
 /// Off-CPU time at a stack node, broken down by why the thread was
 /// off-CPU. Sum across all fields = total off-CPU time.
 ///
@@ -61,6 +95,9 @@ pub struct TopEntry {
     /// Source language inferred from demangling — `"rust"`, `"cpp"`,
     /// `"swift"`, etc.
     pub language: String,
+    /// Present for target-span synthetic symbols. This is explicit
+    /// metadata from the cooperating target, not inferred from names.
+    pub target_kind: Option<TargetLaneKind>,
 
     /// Active time attributed to this symbol as a leaf frame, ns.
     /// For real threads this is CPU time; for cooperating target
@@ -152,6 +189,7 @@ pub struct FlameNode {
     pub binary: Option<u32>,
     pub is_main: bool,
     pub language: u32,
+    pub target_kind: Option<TargetLaneKind>,
 
     /// Active time at (or under) this stack, in nanoseconds. For real
     /// CPU work this comes from SCHED on-CPU intervals; for
@@ -233,9 +271,11 @@ pub struct WakersUpdate {
 pub struct ThreadInfo {
     pub tid: u32,
     pub name: Option<String>,
-    /// Active time for this thread, ns. For CPU threads this is
-    /// on-CPU time plus any origin-linked target spans. For synthetic
-    /// target lanes this is lane execution time.
+    /// Active time for this row, ns. For CPU thread rows this includes
+    /// real on-CPU time plus any origin-linked target duration for
+    /// compatibility with aggregate active-time views; subtract
+    /// `target_ns` for real CPU-busy time. For synthetic target lanes
+    /// this is lane execution time.
     pub on_cpu_ns: u64,
     /// Portion of `on_cpu_ns` that came from target-reported execution
     /// spans.
@@ -246,6 +286,9 @@ pub struct ThreadInfo {
     pub pet_samples: u64,
     /// Target-reported spans included in this thread/lane row.
     pub target_spans: u64,
+    /// Present for synthetic target lanes. This is explicit metadata
+    /// from the cooperating target, not inferred from the lane name.
+    pub target_kind: Option<TargetLaneKind>,
 }
 
 #[derive(Clone, Debug, Facet)]
@@ -277,6 +320,7 @@ pub struct TimelineBucket {
 pub struct TargetLaneTimeline {
     pub tid: u32,
     pub lane_name: Option<u32>,
+    pub target_kind: TargetLaneKind,
     pub total_target_ns: u64,
     pub target_spans: u64,
     pub buckets: Vec<u64>,
@@ -591,6 +635,7 @@ pub struct PetSampleListUpdate {
 pub struct TargetSpanGroup {
     pub tid: u32,
     pub lane_name: Option<u32>,
+    pub target_kind: TargetLaneKind,
     pub span_name: Option<u32>,
     pub origin_tid: Option<u32>,
     pub origin_linked: bool,
@@ -612,6 +657,7 @@ pub struct TargetSpanEntry {
     pub start_ns: u64,
     pub duration_ns: u64,
     pub lane_name: Option<u32>,
+    pub target_kind: TargetLaneKind,
     pub span_name: Option<u32>,
     pub origin_tid: Option<u32>,
     pub origin_linked: bool,
@@ -704,11 +750,10 @@ pub struct CfgUpdate {
 /// This is optional provenance for execution lanes the CPU sampler
 /// cannot directly observe. When a target can report the OS thread id
 /// and timestamp at the moment it queued the work, stax can borrow the
-/// nearest sampled CPU stack on that thread and render:
-///
-/// `CPU caller -> lane -> span name`
-///
-/// in the ordinary top/flame views. `tid` is the same OS thread-id
+/// nearest sampled CPU stack on that thread for provenance,
+/// diagnostics, CPU-tid filtering, and web target-span details. Target
+/// execution remains parallel lane work unless a richer integration
+/// also reports matching CPU wait/completion evidence. `tid` is the same OS thread-id
 /// namespace used by the recorder (Mach thread_id on macOS, gettid on
 /// Linux). `timestamp_ns` is in the same clock domain as span
 /// timestamps.
@@ -716,6 +761,200 @@ pub struct CfgUpdate {
 pub struct TargetSpanOrigin {
     pub tid: u32,
     pub timestamp_ns: u64,
+}
+
+#[derive(Clone, Debug, Default, Facet)]
+pub struct TargetRuntimeRecord {
+    pub runtime_id: TargetRuntimeId,
+    pub name: String,
+    pub kind: TargetLaneKind,
+}
+
+#[derive(Clone, Debug, Default, Facet)]
+pub struct TargetLaneRecord {
+    pub lane_id: TargetLaneId,
+    pub name: String,
+    pub kind: TargetLaneKind,
+}
+
+#[derive(Clone, Debug, Default, Facet)]
+pub struct TargetQueueRecord {
+    pub queue_id: TargetQueueId,
+    pub runtime_id: Option<TargetRuntimeId>,
+    pub lane_id: Option<TargetLaneId>,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, Default, Facet)]
+pub struct TargetCommandBufferRecord {
+    pub command_buffer_id: TargetCommandBufferId,
+    pub queue_id: Option<TargetQueueId>,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, Default, Facet)]
+pub struct TargetSourceRecord {
+    pub source_id: TargetSourceId,
+    /// Domain-neutral language label: "metal", "rust", "cpp", "shader-ir", ...
+    pub language: String,
+    pub path: Option<String>,
+    pub content_hash: String,
+    pub text: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Facet)]
+pub struct TargetShaderRecord {
+    pub shader_id: TargetShaderId,
+    pub name: String,
+    pub display_name: Option<String>,
+    pub source_id: Option<TargetSourceId>,
+    pub source_start_line: Option<u32>,
+    pub source_end_line: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Facet)]
+#[repr(u8)]
+pub enum TargetAttachmentKind {
+    #[default]
+    Other = 0,
+    Buffer = 1,
+    Tensor = 2,
+    Texture = 3,
+    File = 4,
+    Socket = 5,
+    Request = 6,
+    ModelLayer = 7,
+    Batch = 8,
+    RuntimeObject = 9,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct TargetAttachmentRecord {
+    pub attachment_id: TargetAttachmentId,
+    pub dispatch_id: Option<TargetDispatchId>,
+    pub kind: TargetAttachmentKind,
+    pub label: String,
+    pub slot: Option<String>,
+    pub size_bytes: Option<u64>,
+    pub offset_bytes: Option<u64>,
+    pub dtype: Option<String>,
+    pub shape: Vec<u64>,
+    pub role: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Facet)]
+#[repr(u8)]
+pub enum TargetCounterUnit {
+    #[default]
+    Count = 0,
+    Nanoseconds = 1,
+    Ticks = 2,
+    Cycles = 3,
+    Bytes = 4,
+    Percent = 5,
+    Rate = 6,
+    Other = 7,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct TargetCounterDefinition {
+    pub name: String,
+    pub unit: TargetCounterUnit,
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct TargetCounterSetRecord {
+    pub counter_set_id: TargetCounterSetId,
+    pub name: String,
+    pub counters: Vec<TargetCounterDefinition>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Facet)]
+#[repr(u8)]
+pub enum TargetCounterSamplePoint {
+    #[default]
+    RuntimeDefined = 0,
+    BeforeDispatch = 1,
+    AfterDispatch = 2,
+    CommandBufferBegin = 3,
+    CommandBufferEnd = 4,
+    WaitBegin = 5,
+    WaitEnd = 6,
+}
+
+#[derive(Clone, Debug, Facet)]
+#[repr(u8)]
+pub enum TargetCounterScalar {
+    U64 { value: u64 },
+    I64 { value: i64 },
+    F64 { value: f64 },
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct TargetCounterValue {
+    pub name: String,
+    pub unit: TargetCounterUnit,
+    pub value: TargetCounterScalar,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct TargetCounterSampleRecord {
+    pub counter_sample_id: TargetCounterSampleId,
+    pub counter_set_id: TargetCounterSetId,
+    pub dispatch_id: Option<TargetDispatchId>,
+    pub command_buffer_id: Option<TargetCommandBufferId>,
+    pub sample_point: TargetCounterSamplePoint,
+    pub values: Vec<TargetCounterValue>,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct TargetDispatchRecord {
+    pub dispatch_id: TargetDispatchId,
+    pub lane_id: Option<TargetLaneId>,
+    pub queue_id: Option<TargetQueueId>,
+    pub command_buffer_id: Option<TargetCommandBufferId>,
+    pub shader_id: Option<TargetShaderId>,
+    pub source_id: Option<TargetSourceId>,
+    pub name: String,
+    pub start_ns: Option<u64>,
+    pub end_ns: Option<u64>,
+    pub dispatch_origin: Option<TargetSpanOrigin>,
+    pub wait_origin: Option<TargetSpanOrigin>,
+    pub completion_origin: Option<TargetSpanOrigin>,
+    pub attachment_ids: Vec<TargetAttachmentId>,
+    pub counter_sample_ids: Vec<TargetCounterSampleId>,
+    pub tags: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Default, Facet)]
+pub struct TargetRecordBatch {
+    pub runtimes: Vec<TargetRuntimeRecord>,
+    pub lanes: Vec<TargetLaneRecord>,
+    pub queues: Vec<TargetQueueRecord>,
+    pub command_buffers: Vec<TargetCommandBufferRecord>,
+    pub dispatches: Vec<TargetDispatchRecord>,
+    pub shaders: Vec<TargetShaderRecord>,
+    pub sources: Vec<TargetSourceRecord>,
+    pub attachments: Vec<TargetAttachmentRecord>,
+    pub counter_sets: Vec<TargetCounterSetRecord>,
+    pub counter_samples: Vec<TargetCounterSampleRecord>,
+}
+
+impl TargetRecordBatch {
+    pub fn is_empty(&self) -> bool {
+        self.runtimes.is_empty()
+            && self.lanes.is_empty()
+            && self.queues.is_empty()
+            && self.command_buffers.is_empty()
+            && self.dispatches.is_empty()
+            && self.shaders.is_empty()
+            && self.sources.is_empty()
+            && self.attachments.is_empty()
+            && self.counter_sets.is_empty()
+            && self.counter_samples.is_empty()
+    }
 }
 
 /// One execution span reported by an instrumented TARGET process —
@@ -732,10 +971,17 @@ pub struct TargetSpan {
     pub start_ns: u64,
     pub end_ns: u64,
     /// Optional CPU-side queue/dispatch origin. When present and a
-    /// nearby PET sample exists on that thread, top/flame can place
-    /// the span under the sampled CPU stack as well as under its
-    /// synthetic lane.
+    /// nearby PET sample exists on that thread, stax can link the span
+    /// back to the sampled CPU dispatch stack while keeping execution
+    /// on its parallel synthetic lane.
     pub origin: Option<TargetSpanOrigin>,
+    pub dispatch_id: Option<TargetDispatchId>,
+    pub shader_id: Option<TargetShaderId>,
+    pub source_id: Option<TargetSourceId>,
+    pub wait_origin: Option<TargetSpanOrigin>,
+    pub completion_origin: Option<TargetSpanOrigin>,
+    pub attachment_ids: Vec<TargetAttachmentId>,
+    pub counter_sample_ids: Vec<TargetCounterSampleId>,
 }
 
 impl TargetSpan {
@@ -745,11 +991,53 @@ impl TargetSpan {
             start_ns,
             end_ns,
             origin: None,
+            dispatch_id: None,
+            shader_id: None,
+            source_id: None,
+            wait_origin: None,
+            completion_origin: None,
+            attachment_ids: Vec::new(),
+            counter_sample_ids: Vec::new(),
         }
     }
 
     pub fn with_origin(mut self, origin: TargetSpanOrigin) -> Self {
         self.origin = Some(origin);
+        self
+    }
+
+    pub fn with_dispatch_id(mut self, dispatch_id: TargetDispatchId) -> Self {
+        self.dispatch_id = Some(dispatch_id);
+        self
+    }
+
+    pub fn with_shader_id(mut self, shader_id: TargetShaderId) -> Self {
+        self.shader_id = Some(shader_id);
+        self
+    }
+
+    pub fn with_source_id(mut self, source_id: TargetSourceId) -> Self {
+        self.source_id = Some(source_id);
+        self
+    }
+
+    pub fn with_wait_origin(mut self, origin: TargetSpanOrigin) -> Self {
+        self.wait_origin = Some(origin);
+        self
+    }
+
+    pub fn with_completion_origin(mut self, origin: TargetSpanOrigin) -> Self {
+        self.completion_origin = Some(origin);
+        self
+    }
+
+    pub fn with_attachment_id(mut self, attachment_id: TargetAttachmentId) -> Self {
+        self.attachment_ids.push(attachment_id);
+        self
+    }
+
+    pub fn with_counter_sample_id(mut self, counter_sample_id: TargetCounterSampleId) -> Self {
+        self.counter_sample_ids.push(counter_sample_id);
         self
     }
 }
@@ -770,7 +1058,9 @@ pub struct TargetSpanBatch {
     pub pid: u32,
     /// Execution lane name, e.g. "GPU tq1s".
     pub lane: String,
+    pub lane_kind: TargetLaneKind,
     pub spans: Vec<TargetSpan>,
+    pub records: TargetRecordBatch,
 }
 
 #[derive(Clone, Copy, Debug, Default, Facet)]
@@ -1024,6 +1314,13 @@ pub struct ServerStatus {
 pub struct TargetLaneDiagnostics {
     pub tid: u32,
     pub name: String,
+    pub records_received: u64,
+    pub dispatch_records: u64,
+    pub source_records: u64,
+    pub shader_records: u64,
+    pub attachment_records: u64,
+    pub counter_set_records: u64,
+    pub counter_sample_records: u64,
     pub spans_recorded: u64,
     pub spans_with_origin: u64,
     pub spans_linked_origin: u64,
@@ -1053,6 +1350,13 @@ pub struct TargetIngestDiagnostics {
     pub batches_dropped_target_worker_disconnected: u64,
     pub spans_dropped_target_worker_disconnected: u64,
     pub spans_received: u64,
+    pub records_received: u64,
+    pub dispatch_records: u64,
+    pub source_records: u64,
+    pub shader_records: u64,
+    pub attachment_records: u64,
+    pub counter_set_records: u64,
+    pub counter_sample_records: u64,
     pub spans_recorded: u64,
     pub spans_dropped_bad_duration: u64,
     pub spans_with_origin: u64,
@@ -1312,6 +1616,7 @@ pub enum SavedIntervalKind {
     SyntheticSpan {
         stack: Vec<u64>,
         origin_tid: Option<u32>,
+        lane_kind: TargetLaneKind,
     },
     OffCpu {
         stack: Vec<u64>,

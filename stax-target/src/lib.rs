@@ -6,8 +6,11 @@
 //! `stax-server`'s `TargetIngest`: spans become a synthetic thread
 //! with named frames in the existing views).
 //! Targets can also attach a [`TargetSpanOrigin`] captured with
-//! [`current_span_origin`] so stax can place accelerator work under the
-//! CPU stack that queued it.
+//! [`current_span_origin`] so stax can link target work back to the
+//! CPU stack that queued it. That origin is provenance: target work
+//! still renders as a parallel synthetic lane unless a future richer
+//! integration also reports the CPU wait/completion side of the
+//! relationship.
 //!
 //! The contract has two halves:
 //!
@@ -36,6 +39,7 @@
 //!
 //! ```no_run
 //! let lane = stax_target::Lane::new("decoder worker");
+//! let _gpu_lane = stax_target::Lane::metal("GPU tq1s");
 //!
 //! // Queue side: capture provenance only while stax is recording us.
 //! let origin = lane.capture_origin();
@@ -66,8 +70,16 @@ use std::time::{Duration, Instant};
 /// drop the client, reconnect on a later poll.
 const CALL_TIMEOUT: Duration = Duration::from_secs(3);
 
+pub use stax_live_proto::{
+    TargetAttachmentId, TargetAttachmentKind, TargetAttachmentRecord, TargetCommandBufferId,
+    TargetCommandBufferRecord, TargetCounterDefinition, TargetCounterSampleId,
+    TargetCounterSamplePoint, TargetCounterSampleRecord, TargetCounterScalar, TargetCounterSetId,
+    TargetCounterSetRecord, TargetCounterUnit, TargetCounterValue, TargetDispatchId,
+    TargetDispatchRecord, TargetLaneId, TargetLaneKind, TargetLaneRecord, TargetQueueId,
+    TargetQueueRecord, TargetRecordBatch, TargetRuntimeId, TargetRuntimeRecord, TargetShaderId,
+    TargetShaderRecord, TargetSourceId, TargetSourceRecord, TargetSpan, TargetSpanOrigin,
+};
 use stax_live_proto::{TargetIngestClient, TargetReporterStats, TargetSpanBatch};
-pub use stax_live_proto::{TargetSpan, TargetSpanOrigin};
 
 /// Bounded queue between reporting threads and the worker. Each entry
 /// is one batch; overflow drops the newest batch (profiling telemetry,
@@ -220,10 +232,43 @@ pub fn report(lane: &str, spans: Vec<TargetSpan>) {
     let _ = try_report(lane, spans);
 }
 
+pub fn report_with_kind(lane: &str, lane_kind: TargetLaneKind, spans: Vec<TargetSpan>) {
+    let _ = try_report_with_kind(lane, lane_kind, spans);
+}
+
+pub fn report_records(lane: &str, records: TargetRecordBatch) {
+    let _ = try_report_records(lane, records);
+}
+
+pub fn report_records_with_kind(lane: &str, lane_kind: TargetLaneKind, records: TargetRecordBatch) {
+    let _ = try_report_batch_with_kind(lane, lane_kind, Vec::new(), records);
+}
+
 /// Fallible variant of [`report`] for integrations that want to count
 /// local queue drops.
 pub fn try_report(lane: &str, spans: Vec<TargetSpan>) -> Result<(), ReportError> {
-    if spans.is_empty() {
+    try_report_with_kind(lane, TargetLaneKind::Generic, spans)
+}
+
+pub fn try_report_records(lane: &str, records: TargetRecordBatch) -> Result<(), ReportError> {
+    try_report_batch_with_kind(lane, TargetLaneKind::Generic, Vec::new(), records)
+}
+
+pub fn try_report_with_kind(
+    lane: &str,
+    lane_kind: TargetLaneKind,
+    spans: Vec<TargetSpan>,
+) -> Result<(), ReportError> {
+    try_report_batch_with_kind(lane, lane_kind, spans, TargetRecordBatch::default())
+}
+
+pub fn try_report_batch_with_kind(
+    lane: &str,
+    lane_kind: TargetLaneKind,
+    spans: Vec<TargetSpan>,
+    records: TargetRecordBatch,
+) -> Result<(), ReportError> {
+    if spans.is_empty() && records.is_empty() {
         return Ok(());
     }
     let span_count = spans.len() as u64;
@@ -231,7 +276,9 @@ pub fn try_report(lane: &str, spans: Vec<TargetSpan>) -> Result<(), ReportError>
     let batch = TargetSpanBatch {
         pid: std::process::id(),
         lane: lane.to_owned(),
+        lane_kind,
         spans,
+        records,
     };
     match sender.try_send(batch) {
         Ok(()) => Ok(()),
@@ -305,6 +352,13 @@ pub struct SpanBuilder {
     end_ns: u64,
     active: bool,
     origin: Option<TargetSpanOrigin>,
+    dispatch_id: Option<TargetDispatchId>,
+    shader_id: Option<TargetShaderId>,
+    source_id: Option<TargetSourceId>,
+    wait_origin: Option<TargetSpanOrigin>,
+    completion_origin: Option<TargetSpanOrigin>,
+    attachment_ids: Vec<TargetAttachmentId>,
+    counter_sample_ids: Vec<TargetCounterSampleId>,
 }
 
 impl SpanBuilder {
@@ -318,6 +372,13 @@ impl SpanBuilder {
             end_ns,
             active: true,
             origin: None,
+            dispatch_id: None,
+            shader_id: None,
+            source_id: None,
+            wait_origin: None,
+            completion_origin: None,
+            attachment_ids: Vec::new(),
+            counter_sample_ids: Vec::new(),
         }
     }
 
@@ -344,6 +405,41 @@ impl SpanBuilder {
         }
     }
 
+    pub fn with_dispatch_id(mut self, dispatch_id: TargetDispatchId) -> Self {
+        self.dispatch_id = Some(dispatch_id);
+        self
+    }
+
+    pub fn with_shader_id(mut self, shader_id: TargetShaderId) -> Self {
+        self.shader_id = Some(shader_id);
+        self
+    }
+
+    pub fn with_source_id(mut self, source_id: TargetSourceId) -> Self {
+        self.source_id = Some(source_id);
+        self
+    }
+
+    pub fn with_wait_origin(mut self, origin: TargetSpanOrigin) -> Self {
+        self.wait_origin = Some(origin);
+        self
+    }
+
+    pub fn with_completion_origin(mut self, origin: TargetSpanOrigin) -> Self {
+        self.completion_origin = Some(origin);
+        self
+    }
+
+    pub fn with_attachment_id(mut self, attachment_id: TargetAttachmentId) -> Self {
+        self.attachment_ids.push(attachment_id);
+        self
+    }
+
+    pub fn with_counter_sample_id(mut self, counter_sample_id: TargetCounterSampleId) -> Self {
+        self.counter_sample_ids.push(counter_sample_id);
+        self
+    }
+
     /// Validate and construct the reportable span.
     pub fn build(self) -> Option<TargetSpan> {
         if !self.active {
@@ -352,11 +448,153 @@ impl SpanBuilder {
         if self.end_ns <= self.start_ns {
             return None;
         }
-        let span = TargetSpan::new(self.name, self.start_ns, self.end_ns);
+        let mut span = TargetSpan::new(self.name, self.start_ns, self.end_ns);
+        if let Some(dispatch_id) = self.dispatch_id {
+            span = span.with_dispatch_id(dispatch_id);
+        }
+        if let Some(shader_id) = self.shader_id {
+            span = span.with_shader_id(shader_id);
+        }
+        if let Some(source_id) = self.source_id {
+            span = span.with_source_id(source_id);
+        }
+        if let Some(origin) = self.wait_origin {
+            span = span.with_wait_origin(origin);
+        }
+        if let Some(origin) = self.completion_origin {
+            span = span.with_completion_origin(origin);
+        }
+        for attachment_id in self.attachment_ids {
+            span = span.with_attachment_id(attachment_id);
+        }
+        for counter_sample_id in self.counter_sample_ids {
+            span = span.with_counter_sample_id(counter_sample_id);
+        }
         Some(match self.origin {
             Some(origin) => span.with_origin(origin),
             None => span,
         })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DispatchBuilder {
+    name: String,
+    start_ns: Option<u64>,
+    end_ns: Option<u64>,
+    active: bool,
+    dispatch_origin: Option<TargetSpanOrigin>,
+    wait_origin: Option<TargetSpanOrigin>,
+    completion_origin: Option<TargetSpanOrigin>,
+    dispatch_id: Option<TargetDispatchId>,
+    shader_id: Option<TargetShaderId>,
+    source_id: Option<TargetSourceId>,
+    attachment_ids: Vec<TargetAttachmentId>,
+    counter_sample_ids: Vec<TargetCounterSampleId>,
+}
+
+impl DispatchBuilder {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            start_ns: None,
+            end_ns: None,
+            active: true,
+            dispatch_origin: None,
+            wait_origin: None,
+            completion_origin: None,
+            dispatch_id: None,
+            shader_id: None,
+            source_id: None,
+            attachment_ids: Vec::new(),
+            counter_sample_ids: Vec::new(),
+        }
+    }
+
+    pub fn timestamps(mut self, start_ns: u64, end_ns: u64) -> Self {
+        self.start_ns = Some(start_ns);
+        self.end_ns = Some(end_ns);
+        self
+    }
+
+    pub fn with_captured_origin(mut self, captured: CapturedOrigin) -> Self {
+        self.active = captured.active;
+        self.dispatch_origin = captured.origin;
+        self
+    }
+
+    pub fn with_dispatch_origin(mut self, origin: TargetSpanOrigin) -> Self {
+        self.dispatch_origin = Some(origin);
+        self
+    }
+
+    pub fn with_wait_origin(mut self, origin: TargetSpanOrigin) -> Self {
+        self.wait_origin = Some(origin);
+        self
+    }
+
+    pub fn with_completion_origin(mut self, origin: TargetSpanOrigin) -> Self {
+        self.completion_origin = Some(origin);
+        self
+    }
+
+    pub fn with_dispatch_id(mut self, dispatch_id: TargetDispatchId) -> Self {
+        self.dispatch_id = Some(dispatch_id);
+        self
+    }
+
+    pub fn with_shader_id(mut self, shader_id: TargetShaderId) -> Self {
+        self.shader_id = Some(shader_id);
+        self
+    }
+
+    pub fn with_source_id(mut self, source_id: TargetSourceId) -> Self {
+        self.source_id = Some(source_id);
+        self
+    }
+
+    pub fn with_attachment_id(mut self, attachment_id: TargetAttachmentId) -> Self {
+        self.attachment_ids.push(attachment_id);
+        self
+    }
+
+    pub fn with_counter_sample_id(mut self, counter_sample_id: TargetCounterSampleId) -> Self {
+        self.counter_sample_ids.push(counter_sample_id);
+        self
+    }
+
+    pub fn build(self) -> Option<TargetSpan> {
+        if !self.active {
+            return None;
+        }
+        let start_ns = self.start_ns?;
+        let end_ns = self.end_ns?;
+        let mut builder = SpanBuilder::new(self.name, start_ns, end_ns);
+        if let Some(origin) = self.dispatch_origin {
+            builder = builder.with_origin(origin);
+        }
+        if let Some(origin) = self.wait_origin {
+            builder = builder.with_wait_origin(origin);
+        }
+        if let Some(origin) = self.completion_origin {
+            builder = builder.with_completion_origin(origin);
+        }
+        if let Some(dispatch_id) = self.dispatch_id {
+            builder = builder.with_dispatch_id(dispatch_id);
+        }
+        if let Some(shader_id) = self.shader_id {
+            builder = builder.with_shader_id(shader_id);
+        }
+        if let Some(source_id) = self.source_id {
+            builder = builder.with_source_id(source_id);
+        }
+        for attachment_id in self.attachment_ids {
+            builder = builder.with_attachment_id(attachment_id);
+        }
+        for counter_sample_id in self.counter_sample_ids {
+            builder = builder.with_counter_sample_id(counter_sample_id);
+        }
+        builder.build()
     }
 }
 
@@ -368,17 +606,39 @@ impl SpanBuilder {
 #[derive(Clone, Debug)]
 pub struct Lane {
     name: String,
+    kind: TargetLaneKind,
 }
 
 impl Lane {
     /// Create a lane handle. The name is what `stax threads` prints.
     pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into() }
+        Self {
+            name: name.into(),
+            kind: TargetLaneKind::Generic,
+        }
+    }
+
+    /// Create a lane handle with an explicit target kind.
+    pub fn with_kind(name: impl Into<String>, kind: TargetLaneKind) -> Self {
+        Self {
+            name: name.into(),
+            kind,
+        }
+    }
+
+    /// Create a Metal execution lane.
+    pub fn metal(name: impl Into<String>) -> Self {
+        Self::with_kind(name, TargetLaneKind::Metal)
     }
 
     /// Lane name as it will appear in stax.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Explicit lane kind reported to stax.
+    pub fn kind(&self) -> TargetLaneKind {
+        self.kind
     }
 
     /// Same capture gate as [`reporting_active`], scoped for call sites
@@ -426,6 +686,13 @@ impl Lane {
     /// Construct a validating builder for a span on this lane.
     pub fn span_builder(&self, name: impl Into<String>, start_ns: u64, end_ns: u64) -> SpanBuilder {
         SpanBuilder::new(name, start_ns, end_ns)
+    }
+
+    /// Construct a richer target dispatch builder with optional ids,
+    /// shader/source metadata links, attachments, counters, and wait or
+    /// completion origins.
+    pub fn dispatch_builder(&self, name: impl Into<String>) -> DispatchBuilder {
+        DispatchBuilder::new(name)
     }
 
     /// Construct a span for this lane with an explicit queue/dispatch
@@ -498,13 +765,35 @@ impl Lane {
 
     /// Report a batch of spans on this lane.
     pub fn report(&self, spans: Vec<TargetSpan>) {
-        report(&self.name, spans);
+        report_with_kind(&self.name, self.kind, spans);
+    }
+
+    /// Report typed target metadata records on this lane without spans.
+    pub fn report_records(&self, records: TargetRecordBatch) {
+        report_records_with_kind(&self.name, self.kind, records);
+    }
+
+    /// Report spans and typed target metadata records in one batch.
+    pub fn report_batch(&self, spans: Vec<TargetSpan>, records: TargetRecordBatch) {
+        let _ = self.try_report_batch(spans, records);
     }
 
     /// Fallible variant of [`Lane::report`] for integrations that want
     /// to count local queue drops.
     pub fn try_report(&self, spans: Vec<TargetSpan>) -> Result<(), ReportError> {
-        try_report(&self.name, spans)
+        try_report_with_kind(&self.name, self.kind, spans)
+    }
+
+    pub fn try_report_records(&self, records: TargetRecordBatch) -> Result<(), ReportError> {
+        try_report_batch_with_kind(&self.name, self.kind, Vec::new(), records)
+    }
+
+    pub fn try_report_batch(
+        &self,
+        spans: Vec<TargetSpan>,
+        records: TargetRecordBatch,
+    ) -> Result<(), ReportError> {
+        try_report_batch_with_kind(&self.name, self.kind, spans, records)
     }
 
     /// Report a batch only while the capture gate is active.
@@ -513,6 +802,17 @@ impl Lane {
             return Ok(());
         }
         self.try_report(spans)
+    }
+
+    pub fn report_batch_if_active(
+        &self,
+        spans: Vec<TargetSpan>,
+        records: TargetRecordBatch,
+    ) -> Result<(), ReportError> {
+        if !self.reporting_active() {
+            return Ok(());
+        }
+        self.try_report_batch(spans, records)
     }
 
     /// Report one span on this lane.

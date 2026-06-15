@@ -31,7 +31,7 @@ struct GpuCompletion {
 }
 
 fn main() {
-    let lane = stax_target::Lane::new("gpu timestamp skeleton");
+    let lane = stax_target::Lane::metal("gpu timestamp skeleton");
     let mut clock = FakeGpuClock::new();
 
     println!("pid {}", std::process::id());

@@ -1,7 +1,9 @@
 //! Probe the live stax-server's TargetIngest surface: should_report for
 //! a pid, plus optional fake-batch injection ("ingest" as 2nd arg) to
 //! discriminate server-side vs target-side failures.
-use stax_live_proto::{TargetIngestClient, TargetSpan, TargetSpanBatch};
+use stax_live_proto::{
+    TargetIngestClient, TargetLaneKind, TargetRecordBatch, TargetSpan, TargetSpanBatch,
+};
 
 fn main() {
     let pid: u32 = std::env::args()
@@ -40,11 +42,13 @@ fn main() {
             let batch = TargetSpanBatch {
                 pid,
                 lane: "GPU probe".to_owned(),
+                lane_kind: TargetLaneKind::Generic,
                 spans: vec![TargetSpan::new(
                     "probe_fake_kernel",
                     now_ns - 50_000_000,
                     now_ns,
                 )],
+                records: TargetRecordBatch::default(),
             };
             match client.ingest(batch).await {
                 Ok(()) => println!("ingest ok (50ms fake span sent)"),

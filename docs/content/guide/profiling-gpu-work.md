@@ -27,11 +27,12 @@ The app links the **`stax-target`** crate and does two things:
    pays its span-capture cost (e.g. GPU timestamp heaps) only while
    recorded.
 
-2. **Report spans** with `stax_target::report(lane, spans)` — fire and
-   forget, bounded queue, drop-newest; each `TargetSpan` is a name plus
-   absolute `mach_absolute_time`-derived nanoseconds (Apple Silicon GPU
-   timestamps share that timebase, which is why no correlation step exists
-   anywhere). A target can also attach a `TargetSpanOrigin` captured with
+2. **Report spans** through a lane such as
+   `stax_target::Lane::metal("GPU tq1s")` — fire and forget, bounded queue,
+   drop-newest; each `TargetSpan` is a name plus absolute
+   `mach_absolute_time`-derived nanoseconds (Apple Silicon GPU timestamps
+   share that timebase, which is why no correlation step exists anywhere).
+   A target can also attach a `TargetSpanOrigin` captured with
    `stax_target::current_span_origin()` at dispatch/queue time; that gives
    stax the CPU tid and timestamp needed to borrow the nearest sampled CPU
    stack.
@@ -43,14 +44,16 @@ marker plus one attributed synthetic execution interval, so kernel/job names
 render like function names in `top`, `flame`, and the web UI timeline. The
 legacy active-time fields include these durations for compatibility, and the
 newer reporting surfaces break them out explicitly as `target` time and
-target span counts. With origins, `top`/`flame` for the dispatching CPU tid
-include the span under the sampled CPU stack that queued it:
-`CPU caller -> lane -> span name`.
+target span counts. Target lanes are parallel execution lanes. With origins,
+`top`/`flame` for the dispatching CPU tid include the matching lane work and
+the web target-span details link each span back to the sampled CPU stack that
+queued it; the lane still renders as `lane -> span` unless a future
+integration also reports the CPU wait/completion side for a wall-time view.
 
 ## A worked example: bee's `hx`
 
 bee's Metal 4 runtime captures per-dispatch GPU timestamps and reports
-them as the `"GPU tq1s"` lane (`bee/rust/helix-metal4/src/stax.rs`):
+them as the `"GPU tq1s"` Metal lane (`bee/rust/helix-metal4/src/stax.rs`):
 
 ```bash
 stax record -- ./target/release/hx run --cfg configs/production.jsonc …
@@ -77,8 +80,8 @@ but it does not mean a CPU thread was busy.
   with target time/span columns.
 - **`stax top --tid <cpu tid>` / `stax flame --tid <cpu tid>`** — when the
   target reports span origins, these thread-scoped views include the GPU work
-  queued from that CPU thread. `--sort total` is useful for charging GPU time
-  to dispatch callers; `--sort self` still shows the kernel/span names.
+  queued from that CPU thread as parallel lane work. Use the web target-span
+  details to jump from a kernel/span back to the CPU dispatch stack.
 - **`stax diagnose`** — target ingest counters: batches, recorded/dropped
   spans, no-active-run / wrong-pid drops, total target duration, lanes, and
   origin link/unlink counts. It also reports target-side stax-target queue

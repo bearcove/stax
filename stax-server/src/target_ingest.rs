@@ -17,8 +17,10 @@
 //!   execution interval over `[start, end)`. The sample count is the
 //!   span count; the credited time is the exact sum of span durations.
 //!   If the span carries a CPU-side origin, the server also borrows the
-//!   nearest sampled stack on that origin tid, so per-thread top/flame
-//!   can render `CPU caller -> lane -> span name`.
+//!   nearest sampled stack on that origin tid for provenance, diagnostics,
+//!   and CPU-tid filtering. Target work still renders as a parallel
+//!   `lane -> span name` tree unless a future integration reports matching
+//!   CPU wait/completion evidence for a wall-time view.
 //!
 //! Timestamps arrive as absolute mach-derived nanoseconds (Apple
 //! Silicon GPU timestamps share mach_absolute_time's epoch and rate),
@@ -91,6 +93,13 @@ struct TargetIngestCounters {
     batches_dropped_wrong_pid: u64,
     spans_dropped_wrong_pid: u64,
     spans_received: u64,
+    records_received: u64,
+    dispatch_records: u64,
+    source_records: u64,
+    shader_records: u64,
+    attachment_records: u64,
+    counter_set_records: u64,
+    counter_sample_records: u64,
     spans_recorded: u64,
     spans_dropped_bad_duration: u64,
     spans_with_origin: u64,
@@ -102,6 +111,13 @@ struct TargetIngestCounters {
 #[derive(Clone, Copy, Default)]
 struct TargetBatchCounters {
     received: u64,
+    records_received: u64,
+    dispatch_records: u64,
+    source_records: u64,
+    shader_records: u64,
+    attachment_records: u64,
+    counter_set_records: u64,
+    counter_sample_records: u64,
     recorded: u64,
     dropped_bad_duration: u64,
     spans_with_origin: u64,
@@ -179,6 +195,19 @@ impl TargetIngestCounters {
     fn record_batch(&mut self, batch: TargetBatchCounters) {
         self.batches = self.batches.saturating_add(1);
         self.spans_received = self.spans_received.saturating_add(batch.received);
+        self.records_received = self.records_received.saturating_add(batch.records_received);
+        self.dispatch_records = self.dispatch_records.saturating_add(batch.dispatch_records);
+        self.source_records = self.source_records.saturating_add(batch.source_records);
+        self.shader_records = self.shader_records.saturating_add(batch.shader_records);
+        self.attachment_records = self
+            .attachment_records
+            .saturating_add(batch.attachment_records);
+        self.counter_set_records = self
+            .counter_set_records
+            .saturating_add(batch.counter_set_records);
+        self.counter_sample_records = self
+            .counter_sample_records
+            .saturating_add(batch.counter_sample_records);
         self.spans_recorded = self.spans_recorded.saturating_add(batch.recorded);
         self.spans_dropped_bad_duration = self
             .spans_dropped_bad_duration
@@ -253,6 +282,13 @@ impl TargetLaneRegistry {
                     .copied()
                     .unwrap_or(0),
                 name: lane.clone(),
+                records_received: counters.records_received,
+                dispatch_records: counters.dispatch_records,
+                source_records: counters.source_records,
+                shader_records: counters.shader_records,
+                attachment_records: counters.attachment_records,
+                counter_set_records: counters.counter_set_records,
+                counter_sample_records: counters.counter_sample_records,
                 spans_recorded: counters.spans_recorded,
                 spans_with_origin: counters.spans_with_origin,
                 spans_linked_origin: counters.spans_linked_origin,
@@ -304,6 +340,13 @@ impl TargetLaneRegistry {
                 .map(|stats| stats.spans_dropped_worker_disconnected)
                 .sum(),
             spans_received: self.totals.spans_received,
+            records_received: self.totals.records_received,
+            dispatch_records: self.totals.dispatch_records,
+            source_records: self.totals.source_records,
+            shader_records: self.totals.shader_records,
+            attachment_records: self.totals.attachment_records,
+            counter_set_records: self.totals.counter_set_records,
+            counter_sample_records: self.totals.counter_sample_records,
             spans_recorded: self.totals.spans_recorded,
             spans_dropped_bad_duration: self.totals.spans_dropped_bad_duration,
             spans_with_origin: self.totals.spans_with_origin,
@@ -403,10 +446,26 @@ impl TargetIngestService {
 
 impl TargetIngest for TargetIngestService {
     async fn ingest(&self, batch: TargetSpanBatch) {
-        if batch.spans.is_empty() {
+        if batch.spans.is_empty() && batch.records.is_empty() {
             return;
         }
         let spans_received = batch.spans.len() as u64;
+        let dispatch_records = batch.records.dispatches.len() as u64;
+        let source_records = batch.records.sources.len() as u64;
+        let shader_records = batch.records.shaders.len() as u64;
+        let attachment_records = batch.records.attachments.len() as u64;
+        let counter_set_records = batch.records.counter_sets.len() as u64;
+        let counter_sample_records = batch.records.counter_samples.len() as u64;
+        let records_received = batch.records.runtimes.len() as u64
+            + batch.records.lanes.len() as u64
+            + batch.records.queues.len() as u64
+            + batch.records.command_buffers.len() as u64
+            + dispatch_records
+            + source_records
+            + shader_records
+            + attachment_records
+            + counter_set_records
+            + counter_sample_records;
         // Only the active run's target may land spans on the timeline.
         let Some(active_pid) = self.server.active_target_pid() else {
             self.server
@@ -509,7 +568,11 @@ impl TargetIngest for TargetIngestService {
                     tid,
                     event.start_ns,
                     event.end_ns,
-                    IntervalKind::SyntheticSpan { stack, origin_tid },
+                    IntervalKind::SyntheticSpan {
+                        stack,
+                        origin_tid,
+                        lane_kind: batch.lane_kind,
+                    },
                 );
             }
         }
@@ -518,6 +581,13 @@ impl TargetIngest for TargetIngestService {
             &batch.lane,
             TargetBatchCounters {
                 received: spans_received,
+                records_received,
+                dispatch_records,
+                source_records,
+                shader_records,
+                attachment_records,
+                counter_set_records,
+                counter_sample_records,
                 recorded: recorded_spans,
                 dropped_bad_duration,
                 spans_with_origin,
@@ -533,6 +603,13 @@ impl TargetIngest for TargetIngestService {
             pid = batch.pid,
             lane = %batch.lane,
             spans = batch.spans.len(),
+            records_received,
+            dispatch_records,
+            source_records,
+            shader_records,
+            attachment_records,
+            counter_set_records,
+            counter_sample_records,
             recorded_spans = events.len(),
             spans_with_origin,
             linked_origins,
@@ -560,7 +637,8 @@ impl TargetIngest for TargetIngestService {
 mod tests {
     use stax_live_proto::{
         FlameNode, LiveFilter, Profiler as _, RunConfig, RunId, RunViewParams, StopReason,
-        TargetIngest as _, TargetSpan, TargetSpanBatch, TimelineParams, TopSort, ViewParams,
+        TargetIngest as _, TargetLaneKind, TargetRecordBatch, TargetSourceId, TargetSourceRecord,
+        TargetSpan, TargetSpanBatch, TimelineParams, TopSort, ViewParams,
     };
 
     use super::*;
@@ -580,7 +658,9 @@ mod tests {
             .ingest(TargetSpanBatch {
                 pid: 42,
                 lane: "GPU test".to_owned(),
+                lane_kind: TargetLaneKind::Generic,
                 spans: vec![span("kernel_a", 1_000_000, 4_000_000)],
+                records: TargetRecordBatch::default(),
             })
             .await;
         assert!(server.aggregator().read().session_start_ns().is_none());
@@ -593,10 +673,12 @@ mod tests {
             .ingest(TargetSpanBatch {
                 pid: 42,
                 lane: "GPU test".to_owned(),
+                lane_kind: TargetLaneKind::Metal,
                 spans: vec![
                     span("kernel_a", 1_000_000, 4_000_000), // 3ms -> 1 span
                     span("kernel_b", 4_000_000, 4_500_000), // 0.5ms -> 1 span
                 ],
+                records: TargetRecordBatch::default(),
             })
             .await;
         // Wrong pid still drops.
@@ -604,7 +686,9 @@ mod tests {
             .ingest(TargetSpanBatch {
                 pid: 43,
                 lane: "GPU other".to_owned(),
+                lane_kind: TargetLaneKind::Generic,
                 spans: vec![span("kernel_c", 1_000_000, 9_000_000)],
+                records: TargetRecordBatch::default(),
             })
             .await;
 
@@ -647,11 +731,13 @@ mod tests {
         assert_eq!(top[0].self_target_ns, 3_000_000);
         assert_eq!(top[0].self_pet_samples, 1);
         assert_eq!(top[0].self_target_spans, 1);
+        assert_eq!(top[0].target_kind, Some(TargetLaneKind::Metal));
         assert_eq!(top[1].function_name.as_deref(), Some("kernel_b"));
         assert_eq!(top[1].self_on_cpu_ns, 500_000);
         assert_eq!(top[1].self_target_ns, 500_000);
         assert_eq!(top[1].self_pet_samples, 1);
         assert_eq!(top[1].self_target_spans, 1);
+        assert_eq!(top[1].target_kind, Some(TargetLaneKind::Metal));
 
         let flame = profiler.flamegraph(view_params(Some(tid))).await;
         assert_eq!(flame.total_on_cpu_ns, 3_500_000);
@@ -666,6 +752,7 @@ mod tests {
         assert_eq!(lane.target_ns, 3_500_000);
         assert_eq!(lane.pet_samples, 2);
         assert_eq!(lane.target_spans, 2);
+        assert_eq!(lane.target_kind, Some(TargetLaneKind::Metal));
         assert_eq!(lane.children.len(), 2);
         assert_eq!(
             flame_node_name(&lane.children[0], &flame.strings),
@@ -674,6 +761,7 @@ mod tests {
         assert_eq!(lane.children[0].on_cpu_ns, 3_000_000);
         assert_eq!(lane.children[0].target_ns, 3_000_000);
         assert_eq!(lane.children[0].target_spans, 1);
+        assert_eq!(lane.children[0].target_kind, Some(TargetLaneKind::Metal));
         assert_eq!(
             flame_node_name(&lane.children[1], &flame.strings),
             Some("kernel_b")
@@ -681,6 +769,7 @@ mod tests {
         assert_eq!(lane.children[1].on_cpu_ns, 500_000);
         assert_eq!(lane.children[1].target_ns, 500_000);
         assert_eq!(lane.children[1].target_spans, 1);
+        assert_eq!(lane.children[1].target_kind, Some(TargetLaneKind::Metal));
 
         let threads = profiler.threads(run_view_params(None)).await;
         let thread = threads
@@ -693,6 +782,7 @@ mod tests {
         assert_eq!(thread.target_ns, 3_500_000);
         assert_eq!(thread.pet_samples, 2);
         assert_eq!(thread.target_spans, 2);
+        assert_eq!(thread.target_kind, Some(TargetLaneKind::Metal));
 
         let target_spans = profiler
             .target_spans("r".to_owned(), view_params(Some(tid)))
@@ -707,6 +797,7 @@ mod tests {
             Some("kernel_a")
         );
         assert_eq!(target_spans.groups[0].count, 1);
+        assert_eq!(target_spans.groups[0].target_kind, TargetLaneKind::Metal);
         assert_eq!(target_spans.groups[0].total_duration_ns, 3_000_000);
         assert_eq!(target_spans.groups[0].max_duration_ns, 3_000_000);
         assert_eq!(
@@ -716,6 +807,7 @@ mod tests {
             Some("kernel_b")
         );
         assert_eq!(target_spans.groups[1].count, 1);
+        assert_eq!(target_spans.groups[1].target_kind, TargetLaneKind::Metal);
         assert_eq!(target_spans.groups[1].total_duration_ns, 500_000);
         assert_eq!(target_spans.entries.len(), 2);
         assert_eq!(
@@ -725,6 +817,7 @@ mod tests {
             Some("kernel_b")
         );
         assert_eq!(target_spans.entries[0].duration_ns, 500_000);
+        assert_eq!(target_spans.entries[0].target_kind, TargetLaneKind::Metal);
         assert_eq!(target_spans.entries[0].origin_tid, None);
         assert_eq!(
             target_spans.entries[1]
@@ -733,6 +826,7 @@ mod tests {
             Some("GPU test")
         );
         assert_eq!(target_spans.entries[1].duration_ns, 3_000_000);
+        assert_eq!(target_spans.entries[1].target_kind, TargetLaneKind::Metal);
 
         let diagnostics = server.target_lanes().lock().diagnostics();
         assert_eq!(diagnostics.batches, 1);
@@ -782,6 +876,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ingest_records_metadata_only_batches() {
+        let server = ServerState::new_for_tests();
+        let service = TargetIngestService::new(server.clone());
+        server.set_active_run_for_tests(42);
+
+        service
+            .ingest(TargetSpanBatch {
+                pid: 42,
+                lane: "GPU metadata".to_owned(),
+                lane_kind: TargetLaneKind::Metal,
+                spans: Vec::new(),
+                records: TargetRecordBatch {
+                    sources: vec![TargetSourceRecord {
+                        source_id: TargetSourceId::new(1),
+                        language: "metal".to_owned(),
+                        path: Some("kernels.metal".to_owned()),
+                        content_hash: "sha256:test".to_owned(),
+                        text: Some("kernel void demo() {}".to_owned()),
+                    }],
+                    ..TargetRecordBatch::default()
+                },
+            })
+            .await;
+
+        let diagnostics = server.target_lanes().lock().diagnostics();
+        assert_eq!(diagnostics.batches, 1);
+        assert_eq!(diagnostics.spans_recorded, 0);
+        assert_eq!(diagnostics.records_received, 1);
+        assert_eq!(diagnostics.source_records, 1);
+        assert_eq!(diagnostics.lanes.len(), 1);
+        assert_eq!(diagnostics.lanes[0].name, "GPU metadata");
+        assert_eq!(diagnostics.lanes[0].records_received, 1);
+        assert_eq!(diagnostics.lanes[0].source_records, 1);
+    }
+
+    #[tokio::test]
     async fn ingest_links_spans_to_origin_cpu_stack() {
         let server = ServerState::new_for_tests();
         let service = TargetIngestService::new(server.clone());
@@ -825,6 +955,7 @@ mod tests {
             .ingest(TargetSpanBatch {
                 pid: 42,
                 lane: "GPU test".to_owned(),
+                lane_kind: TargetLaneKind::Generic,
                 spans: vec![span_with_origin(
                     "kernel_a",
                     1_000_000,
@@ -834,6 +965,7 @@ mod tests {
                         timestamp_ns: 951_000,
                     },
                 )],
+                records: TargetRecordBatch::default(),
             })
             .await;
 
@@ -852,21 +984,14 @@ mod tests {
         assert_eq!(flame.total_target_ns, 3_000_000);
         assert_eq!(flame.total_target_spans, 1);
         assert_eq!(flame.root.children.len(), 1);
-        let cpu_parent = &flame.root.children[0];
-        assert_eq!(
-            flame_node_name(cpu_parent, &flame.strings),
-            Some("cpu_parent")
-        );
-        assert_eq!(cpu_parent.target_ns, 3_000_000);
-        assert_eq!(cpu_parent.target_spans, 1);
-        let cpu_leaf = &cpu_parent.children[0];
-        assert_eq!(flame_node_name(cpu_leaf, &flame.strings), Some("cpu_leaf"));
-        assert_eq!(cpu_leaf.target_ns, 3_000_000);
-        let lane = &cpu_leaf.children[0];
+        let lane = &flame.root.children[0];
         assert_eq!(flame_node_name(lane, &flame.strings), Some("GPU test"));
+        assert_eq!(lane.target_kind, Some(TargetLaneKind::Generic));
+        assert_eq!(lane.target_ns, 3_000_000);
         assert_eq!(lane.target_spans, 1);
         let span = &lane.children[0];
         assert_eq!(flame_node_name(span, &flame.strings), Some("kernel_a"));
+        assert_eq!(span.target_kind, Some(TargetLaneKind::Generic));
         assert_eq!(span.on_cpu_ns, 3_000_000);
         assert_eq!(span.target_ns, 3_000_000);
 
@@ -961,6 +1086,7 @@ mod tests {
             .ingest(TargetSpanBatch {
                 pid: 42,
                 lane: "GPU bad origins".to_owned(),
+                lane_kind: TargetLaneKind::Generic,
                 spans: vec![
                     span_with_origin(
                         "synthetic_origin_tid",
@@ -999,6 +1125,7 @@ mod tests {
                         },
                     ),
                 ],
+                records: TargetRecordBatch::default(),
             })
             .await;
 
@@ -1036,7 +1163,9 @@ mod tests {
             .ingest(TargetSpanBatch {
                 pid: 42,
                 lane: "GPU test".to_owned(),
+                lane_kind: TargetLaneKind::Generic,
                 spans: vec![span("kernel_a", 1_000_000, 2_000_000)],
+                records: TargetRecordBatch::default(),
             })
             .await;
         assert!(
@@ -1057,7 +1186,9 @@ mod tests {
             .ingest(TargetSpanBatch {
                 pid: 42,
                 lane: "GPU test".to_owned(),
+                lane_kind: TargetLaneKind::Generic,
                 spans: vec![span("kernel_a", 3_000_000, 5_000_000)],
+                records: TargetRecordBatch::default(),
             })
             .await;
 
@@ -1148,7 +1279,9 @@ mod tests {
             .ingest(TargetSpanBatch {
                 pid: 4242,
                 lane: "GPU wire".to_owned(),
+                lane_kind: TargetLaneKind::Generic,
                 spans: vec![span("wire_kernel", 10_000_000, 16_000_000)],
+                records: TargetRecordBatch::default(),
             })
             .await
             .expect("ingest");

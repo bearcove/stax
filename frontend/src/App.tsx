@@ -19,6 +19,7 @@ import {
   LuMoon,
   LuChevronDown,
   LuCheck,
+  LuCircuitBoard,
 } from "react-icons/lu";
 import { SiRust, SiC, SiCplusplus, SiSwift } from "react-icons/si";
 import {
@@ -56,6 +57,13 @@ import {
   type FlamegraphView,
   type FlameView,
 } from "./wire.ts";
+import {
+  TARGET_SPANS_BINARY,
+  TargetMark,
+  hasTargetSignpost,
+  targetClass,
+  targetVisualKind,
+} from "./targetVisuals.tsx";
 
 type Status = "pending" | "ok" | "err";
 const SYNTH_TID_BASE = 0xfff00000;
@@ -990,7 +998,7 @@ function escapeRegex(s: string): string {
 }
 
 export type LangKind = "rust" | "c" | "cpp" | "swift" | "asm" | "unknown";
-export type ObjKind = "main" | "system" | "dylib" | "unknown";
+export type ObjKind = "main" | "target" | "system" | "dylib" | "unknown";
 type PaneTab = "asm" | "neighbors" | "intervals" | "target-spans";
 
 /// What visual widths/ordering represent: active time, sampled CPU
@@ -1116,6 +1124,7 @@ export function objKindOf(o: {
   is_main: boolean;
   binary: string | null;
 }): ObjKind {
+  if (o.binary === TARGET_SPANS_BINARY) return "target";
   if (o.is_main) return "main";
   const b = o.binary ?? "";
   if (!b) return "unknown";
@@ -1133,12 +1142,13 @@ export function objKindOf(o: {
 
 const KIND_LABEL: Record<ObjKind, string> = {
   main: "main",
+  target: "target",
   dylib: "dylib",
   system: "system",
   unknown: "other",
 };
 
-const KIND_ORDER: ObjKind[] = ["main", "dylib", "system", "unknown"];
+const KIND_ORDER: ObjKind[] = ["main", "target", "dylib", "system", "unknown"];
 
 function WakersPanel({
   wakers,
@@ -1477,6 +1487,8 @@ function objIcon(obj: ObjKind) {
   switch (obj) {
     case "main":
       return <LuStar title="main executable" />;
+    case "target":
+      return <LuCircuitBoard title="target spans" />;
     case "system":
       return <LuSettings title="system library" />;
     case "dylib":
@@ -1578,6 +1590,11 @@ function TopTable({
           visible.map((e) => {
           const lang = langOf(e);
           const obj = objKindOf(e);
+          const targetKind = targetVisualKind(e);
+          const targetSignpost = hasTargetSignpost({
+            binary: e.binary,
+            target_spans: e.total_target_spans,
+          });
           const fnLabel = e.function_name ?? `0x${e.address.toString(16)}`;
           const binLabel = e.binary ?? "(no binary)";
           const selfTarget = e.self_target_ns;
@@ -1602,6 +1619,8 @@ function TopTable({
                 className={
                   (selected === e.address ? "selected " : "") +
                   (e.is_main ? "main " : "") +
+                  (targetKind ? `target-row ${targetClass(targetKind)} ` : "") +
+                  (targetSignpost ? "has-target-signpost " : "") +
                   (entryMatches(e, matchText) ? "match" : "")
                 }
                 onClick={() => onSelect(e.address)}
@@ -1619,9 +1638,17 @@ function TopTable({
               >
                 <td className="entry">
                   <div className="entry-line fn-line">
-                    <span className={`glyph lang-${lang}`}>
-                      {langIcon(lang)}
-                    </span>
+                    {targetKind ? (
+                      <span
+                        className={`glyph target-glyph ${targetClass(targetKind)}`}
+                      >
+                        <TargetMark kind={targetKind} />
+                      </span>
+                    ) : (
+                      <span className={`glyph lang-${lang}`}>
+                        {langIcon(lang)}
+                      </span>
+                    )}
                     <span className="fn-name">{fnLabel}</span>
                   </div>
                   <div className="entry-line bin-line">
@@ -1983,6 +2010,14 @@ function ThreadSwitcher({
               filtered.map((t) => {
                 const sel = selectedTid === t.tid;
                 const metricValue = threadMetricNs(t, displayMode);
+                const targetKind =
+                  t.tid >= SYNTH_TID_BASE && t.target_spans > 0n
+                    ? targetVisualKind({
+                        lane: t.name,
+                        target_spans: t.target_spans,
+                        target_kind: t.target_kind,
+                      })
+                    : null;
                 const wPct =
                   max === 0n ? 0 : (Number(metricValue) / maxF) * 100;
                 const rPct =
@@ -1995,7 +2030,7 @@ function ThreadSwitcher({
                   <button
                     type="button"
                     key={t.tid}
-                    className={`thread-row${sel ? " selected" : ""}`}
+                    className={`thread-row${sel ? " selected" : ""}${targetKind ? ` target-thread ${targetClass(targetKind)}` : ""}`}
                     onClick={() => pick(t.tid)}
                     title={
                       `${formatDuration(metricValue)} ${displayModeLabel(displayMode)} (${rPct}%) · ` +
@@ -2007,10 +2042,15 @@ function ThreadSwitcher({
                   >
                     <span className="thread-check">{sel && <LuCheck />}</span>
                     <span className="thread-name">
-                      {t.name ?? <em className="thread-name-anon">[{t.tid}]</em>}
-                      {t.name && (
-                        <span className="thread-tid"> [{t.tid}]</span>
-                      )}
+                      {targetKind ? <TargetMark kind={targetKind} /> : null}
+                      <span className="thread-name-text">
+                        {t.name ?? (
+                          <em className="thread-name-anon">[{t.tid}]</em>
+                        )}
+                        {t.name && (
+                          <span className="thread-tid"> [{t.tid}]</span>
+                        )}
+                      </span>
                     </span>
                     <span className="thread-bar">
                       <span

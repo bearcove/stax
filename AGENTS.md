@@ -27,11 +27,13 @@ still the right tool — that is the whole point. One recording holds:
   `(pid, lane)`. Span names are synthetic symbols, so
   `stax top --tid <synthetic>` and `stax flame --tid <synthetic>` render
   span names like function frames. CLI and web views now break out explicit
-  `target` time/span counts alongside active time/PET samples. If the target
-  also reports a span origin, `top` and `flame` for the origin CPU tid include
-  that target work under the sampled CPU stack that queued it:
-  `CPU caller -> lane -> span`. No correlation step, no chrome-trace export,
-  no second tool. See `stax-target/src/lib.rs` and
+  `target` time/span counts alongside active time/PET samples. Target lanes
+  are parallel execution lanes: if the target also reports a span origin,
+  `top`, `flame`, and the web target-span details can filter/link that lane
+  work back to the CPU stack that queued it, but the target work still renders
+  as `lane -> span` unless a future integration also reports the corresponding
+  CPU wait/completion evidence for a wall-time/critical-path view. No
+  chrome-trace export, no second tool. See `stax-target/src/lib.rs` and
   `stax-server/src/target_ingest.rs`; the GPU worked example is
   `docs/content/guide/profiling-gpu-work.md`.
 
@@ -47,6 +49,12 @@ as the `"GPU tq1s"` lane (and TTS lanes) — see
 `bee/rust/helix-metal4/src/stax.rs`, whose module doc says it plainly:
 "stax is THE profiler for this work".
 
+The longer execution plan for target lanes, dispatch origins, wait links,
+Metal sources, buffer/tensor attachments, hardware counters, and critical-path
+views lives in
+`docs/content/concepts/target-observability-roadmap.md`. Use that document as
+the source of truth before extending the target-span model.
+
 Gotchas that have actually misled agents (verified 2026-06-12):
 
 - Synthetic target lanes use the **target** columns for exact span duration
@@ -60,10 +68,11 @@ Gotchas that have actually misled agents (verified 2026-06-12):
   shows spans for that tid, treat it as a regression in the target-ingest
   aggregation path.
 - When the target reports span origins, `stax flame --tid <real CPU tid>`
-  can show the causal path as `(all) -> CPU caller -> lane -> span name`.
-  `stax top --tid <real CPU tid> --sort total` will then attribute the span
-  duration to the CPU dispatch stack; `--sort self` still surfaces the
-  per-kernel span names.
+  includes the matching target lane work as `(all) -> lane -> span name`
+  filtered by that CPU origin. The origin stack is provenance, not execution
+  containment. If future target data proves the same stack also awaited the
+  work, a separate wall-time/critical-path view can nest target time under
+  that stack without lying about CPU execution.
 - A GPU-bound target looks nearly empty in CPU-only rows — a handful of
   samples, allocator noise at the top. That is not "stax doesn't work";
   that is the answer (the CPU is idle). The story is in `threads`, the
@@ -265,6 +274,8 @@ CPU sampling, use the blessed corpus:
 ```
 just demo-corpus
 stax top --tid <corpus-executor-tid> --sort self
+stax target top --by time
+stax target top --by count
 stax flame --tid <cpu-tid> --threshold-pct 0
 ```
 
@@ -556,8 +567,8 @@ Snapshot the top-N hottest functions in the active run.
 Output is one line per entry with active time, target-executor time, PET
 sample count, target span count, and symbol name. For synthetic target lanes,
 `target ms` is span duration and `spans` is span count. When spans carry
-origins, `--tid <real CPU tid>` includes those spans under the CPU stack that
-queued them.
+origins, `--tid <real CPU tid>` includes target lane work linked to that CPU
+origin; it does not make the CPU stack own the GPU/accelerator execution.
 
 ```
 $ stax top -n 5
@@ -596,20 +607,60 @@ included even when they would otherwise fall past the cutoff.
 `--run <RUN_ID>` queries a run from `stax list` without changing the selected
 query state.
 
+### `stax target lanes [--run RUN_ID] [-n N]`
+
+List only synthetic target lanes, sorted by exact target time. Use this when the
+question is "which GPU/executor/runtime lanes exist?" without the CPU-thread
+noise from `stax threads`.
+
+```
+$ stax target lanes
+ target ms    spans    kind  tid    name
+    220.10      198   metal  4293918720 GPU tq1s
+```
+
+- `-n / --limit N` — maximum target lanes to print (default 20, `0` for all).
+- `--run <RUN_ID>` — query a run from `stax list` without changing the selected
+  query state.
+
+### `stax target top [--run RUN_ID] [-n N] [--by time|count|avg|max] [--tid TID]`
+
+Rank target span/shader names directly. This is the quickest CLI answer for
+"most target time" and "most invoked" without first finding a synthetic tid and
+using generic `stax top`.
+
+```
+$ stax target top --by count
+ target ms    count     avg ms     max ms    kind  lane                     span
+    220.10      198      1.112      4.300   metal  GPU tq1s                 tq6_1s_rows
+```
+
+Rows aggregate by lane + span/shader name across origin groups, so a kernel
+dispatched from multiple CPU stacks still appears as one row.
+
+- `--by time` (default) — rank by total target duration.
+- `--by count` — rank by invocation/span count.
+- `--by avg` — rank by average duration.
+- `--by max` — rank by max observed duration.
+- `--tid` — filter to a target lane tid or to target spans linked to a CPU tid.
+- `--run <RUN_ID>` — query a run from `stax list` without changing the selected
+  query state.
+
 ### `stax flame [--run RUN_ID] [-d MAX_DEPTH] [--threshold-pct PCT] [--tid TID]`
 
 Print the active flamegraph as an indented Markdown tree, sorted by active
 time descending at each level. Same data the web UI renders; this is the
 agent-friendly view of "where is the time going." Cooperating target
 lanes render as `(all) -> lane -> span name`; when spans carry origins,
-filtering to the origin CPU tid renders `(all) -> CPU caller -> lane -> span`.
+filtering to the origin CPU tid keeps the lane tree but limits it to work
+linked to that CPU origin.
 
 - `-d / --max-depth N` — cut off the tree at depth N (default 12).
   Children below the cut-off are summarised as `…N more frames`.
 - `--threshold-pct PCT` — hide subtrees whose share of total active time
   falls below `PCT` (default 1%; pass `0` for the whole tree).
-- `--tid` — filter to one thread. Origin-linked target spans are included
-  for the CPU thread that queued them.
+- `--tid` — filter to one thread. For CPU tids, origin-linked target spans
+  are included as parallel lane work queued by that thread.
 - `--run <RUN_ID>` — query a run from `stax list` without changing the
   selected query state.
 
@@ -666,17 +717,19 @@ without changing the selected query state.
 ### `stax diagnose [--run RUN_ID]`
 
 Dump `stax-server` diagnostics: active run state plus target-span ingest
-counters (batches, recorded/dropped spans, lane totals, and origin
-link/unlink counts, unlinked-origin reasons, and PET origin-distance
-min/avg/max, plus target-side stax-target queue drops). It also prints
-target-ingest hints for missing batches, bad span durations, missing origins,
-origins that do not link to a sampled CPU stack, batches that arrived with no
-active run, batches from the wrong pid, and local stax-target queue overflow or
-worker-disconnect drops. For unlinked origins it distinguishes synthetic target
-tids, tids with no PET samples, sampled tids with no user stacks, and origins
-too far from the nearest sample. Use it when numbers look wrong and you want
-the pipeline's own accounting. `--run <RUN_ID>` queries a run from
-`stax list` without changing the selected query state.
+counters (batches, recorded/dropped spans, lane totals, typed target metadata
+record counts, and origin link/unlink counts, unlinked-origin reasons, and PET
+origin-distance min/avg/max, plus target-side stax-target queue drops). It also
+prints target-ingest hints for missing batches, bad span durations, missing
+origins, origins that do not link to a sampled CPU stack, metadata records that
+arrive without executable spans, missing source/shader pairing, counter
+definitions without samples, batches that arrived with no active run, batches
+from the wrong pid, and local stax-target queue overflow or worker-disconnect
+drops. For unlinked origins it distinguishes synthetic target tids, tids with no
+PET samples, sampled tids with no user stacks, and origins too far from the
+nearest sample. Use it when numbers look wrong and you want the pipeline's own
+accounting. `--run <RUN_ID>` queries a run from `stax list` without changing
+the selected query state.
 
 ### `stax dump`
 

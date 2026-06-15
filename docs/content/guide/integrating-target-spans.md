@@ -8,15 +8,18 @@ Use `stax-target` when the interesting work is not directly visible to the
 CPU sampler: GPU kernels, accelerator queues, async executors, worker pools,
 media engines, or any runtime that can name and timestamp work.
 
-The integration goal is:
+The integration goal is a linked graph, not a fake single-thread stack:
 
 ```text
-CPU queue/dispatch stack -> target lane -> named span
+CPU queue/dispatch stack --origin--> target lane -> named span
 ```
 
 No trace export, no second profiler, no timestamp correlation pass. The spans
 land in the same `threads`, `top`, `flame`, timeline, and web UI views as CPU
-samples and off-CPU intervals.
+samples and off-CPU intervals. Target lanes remain parallel execution lanes;
+if a future integration also reports the CPU wait/completion side, stax can
+offer a separate wall-time/critical-path view that nests target work under a
+stack only when the same stack both dispatched and awaited that work.
 
 ## The pattern
 
@@ -31,6 +34,7 @@ Create one lane per logical executor:
 
 ```rust
 let lane = stax_target::Lane::new("decoder worker");
+let _gpu_lane = stax_target::Lane::metal("GPU tq1s");
 ```
 
 Gate capture before paying instrumentation costs. When no matching stax
@@ -89,6 +93,33 @@ if let Some(span) = lane.span_with_captured_origin("kernel_name", start_ns, end_
 Use `stax_target::now_ns()` when your target-side timestamps should come from
 the same host clock stax expects. Use `SpanBuilder` when an integration wants
 to validate or attach origins before deciding where to report a span.
+
+For richer integrations, use `Lane::dispatch_builder(name)` and
+`TargetRecordBatch`. The simple span API keeps working, but the richer path can
+attach stable dispatch/shader/source ids, wait/completion origins, attachment
+ids, and counter sample ids:
+
+```rust
+let dispatch_id = stax_target::TargetDispatchId::new(42);
+let shader_id = stax_target::TargetShaderId::new(7);
+let origin = lane.capture_origin();
+
+let span = lane
+    .dispatch_builder("tq6_1s_rows")
+    .with_captured_origin(origin)
+    .with_dispatch_id(dispatch_id)
+    .with_shader_id(shader_id)
+    .timestamps(start_ns, end_ns)
+    .build();
+
+if let Some(span) = span {
+    lane.report_batch(vec![span], stax_target::TargetRecordBatch::default());
+}
+```
+
+Metadata-only batches are allowed. For example, a target can register source or
+counter definitions before dispatches resolve; `stax diagnose` will show that
+the records are arriving even if no spans have landed yet.
 
 For integration health logs, admin endpoints, or assertions in your own test
 fixtures, read `lane.reporter_stats()` or `stax_target::reporter_stats()`.
@@ -194,7 +225,7 @@ fn encode_kernel(lane: &stax_target::Lane, command: &mut Command) {
 
 ### Bad-origin debugging
 
-If spans arrive but do not show under CPU callers, run:
+If spans arrive but do not link back to CPU dispatch origins, run:
 
 ```bash
 stax diagnose
@@ -239,6 +270,8 @@ For example:
 ```bash
 just demo-corpus
 stax top --tid <corpus-executor-tid> --sort self
+stax target top --by time
+stax target top --by count
 stax top --tid <cpu-tid> --sort total
 stax flame --tid <cpu-tid> --threshold-pct 0
 ```
@@ -248,7 +281,8 @@ stax flame --tid <cpu-tid> --threshold-pct 0
 lanes such as `corpus executor`, `corpus gpu`, and `corpus bad origins`. A
 synthetic lane's `target ms` is the exact duration of reported work and
 `spans` is the span count. When origins link, filtering flame/top to the CPU
-thread that queued work shows `CPU caller -> lane -> job name`.
+thread that queued work limits the target lane tree to that origin's work; the
+web target-span details show the linked CPU dispatch stack.
 
 ## Diagnostics
 
@@ -264,11 +298,12 @@ thread that queued work shows `CPU caller -> lane -> job name`.
 - unlinked-origin reasons: `bad_tid`, `no_thread`, `no_stack`, `too_far`
 - linked and too-far origin PET distance min/avg/max
 
-If spans show up on the synthetic lane but not under CPU callers, check the
-origin counters first. Unlinked origins usually mean the target captured the
-origin too far from the queue point, used the wrong thread, or the CPU sampler
-did not catch a nearby PET sample. If `too_far` dominates, the average/max
-distance tells you how stale the origin was relative to the nearest CPU stack.
+If spans show up on the synthetic lane but do not link to CPU dispatch
+origins, check the origin counters first. Unlinked origins usually mean the
+target captured the origin too far from the queue point, used the wrong
+thread, or the CPU sampler did not catch a nearby PET sample. If `too_far`
+dominates, the average/max distance tells you how stale the origin was
+relative to the nearest CPU stack.
 
 Inside the cooperating process, `reporter_stats()` answers a different
 question: whether the local reporter worker is armed/connected and whether it

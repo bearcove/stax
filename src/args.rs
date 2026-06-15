@@ -80,6 +80,9 @@ pub enum Command {
 
     /// List current real threads and synthetic target lanes with CPU/target/off-CPU breakdown.
     Threads(ThreadsArgs),
+
+    /// Inspect cooperating target lanes and span/shader rankings.
+    Target(TargetArgs),
 }
 
 #[derive(Facet, Debug)]
@@ -196,14 +199,15 @@ pub struct TopArgs {
     #[facet(args::named, args::short = 'n', default = 20)]
     pub limit: u32,
 
-    /// Sort by `self` (leaf) or `total` (any frame). `total` is useful
-    /// for CPU threads with origin-linked target spans because the
-    /// dispatch stack owns the target duration as an ancestor.
+    /// Sort by `self` (leaf) or `total` (any frame). Target lanes are
+    /// parallel execution lanes; origins are provenance links, not CPU
+    /// execution containment.
     #[facet(args::named, default = "self")]
     pub sort: String,
 
-    /// Filter to one thread by tid. Origin-linked target spans are included
-    /// for the CPU thread that queued them. Default: all threads.
+    /// Filter to one thread by tid. For CPU tids, target spans whose
+    /// origins link to that tid are included as parallel lane work.
+    /// Default: all threads.
     #[facet(args::named, default)]
     pub tid: Option<u32>,
 }
@@ -222,6 +226,52 @@ pub struct ThreadsArgs {
 }
 
 #[derive(Facet, Debug)]
+pub struct TargetArgs {
+    #[facet(args::subcommand)]
+    pub command: TargetCommand,
+}
+
+#[derive(Facet, Debug)]
+#[repr(u8)]
+pub enum TargetCommand {
+    /// List cooperating target lanes with exact target time and span counts.
+    Lanes(TargetLanesArgs),
+
+    /// Rank target span/shader names by exact target duration or invocation count.
+    Top(TargetTopArgs),
+}
+
+#[derive(Facet, Debug)]
+pub struct TargetLanesArgs {
+    /// Query a run from `stax list` without changing the selected query state.
+    #[facet(args::named, default)]
+    pub run: Option<u64>,
+
+    /// Maximum number of target lanes to print. 0 to print all.
+    #[facet(args::named, args::short = 'n', default = 20)]
+    pub limit: u32,
+}
+
+#[derive(Facet, Debug)]
+pub struct TargetTopArgs {
+    /// Query a run from `stax list` without changing the selected query state.
+    #[facet(args::named, default)]
+    pub run: Option<u64>,
+
+    /// Maximum number of target span/shader rows to print. 0 to print all.
+    #[facet(args::named, args::short = 'n', default = 20)]
+    pub limit: u32,
+
+    /// Rank by `time`, `count`, `avg`, or `max`.
+    #[facet(args::named, default = "time")]
+    pub by: String,
+
+    /// Filter to one target lane tid, or to target spans linked to one CPU tid.
+    #[facet(args::named, default)]
+    pub tid: Option<u32>,
+}
+
+#[derive(Facet, Debug)]
 pub struct FlameArgs {
     /// Query a run from `stax list` without changing the selected query state.
     #[facet(args::named, default)]
@@ -230,8 +280,8 @@ pub struct FlameArgs {
     /// Maximum tree depth to print. The flamegraph the server returns
     /// is unbounded; this just controls how deep the CLI prints
     /// (children below the cut-off are summarised as `…<N more
-    /// frames>`). Cooperating target lanes render as `lane -> span`, or
-    /// `CPU stack -> lane -> span` when the target reports origins.
+    /// frames>`). Cooperating target lanes render as `lane -> span`.
+    /// Origins link those spans back to the CPU stack that queued them.
     #[facet(args::named, args::short = 'd', default = 12)]
     pub max_depth: usize,
 
@@ -240,8 +290,9 @@ pub struct FlameArgs {
     #[facet(args::named, default = 1.0)]
     pub threshold_pct: f64,
 
-    /// Filter to one thread by tid. Origin-linked target spans are included
-    /// for the CPU thread that queued them. Default: all threads.
+    /// Filter to one thread by tid. For CPU tids, target spans whose
+    /// origins link to that tid are included as parallel lane work.
+    /// Default: all threads.
     #[facet(args::named, default)]
     pub tid: Option<u32>,
 }

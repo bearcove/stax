@@ -25,6 +25,13 @@ import {
   type EmptyRunContext,
   type ObjKind,
 } from "./App.tsx";
+import {
+  TargetMark,
+  hasTargetSignpost,
+  targetClass,
+  targetVisualKind,
+  type TargetVisualKind,
+} from "./targetVisuals.tsx";
 
 const ROW_H = 18;
 
@@ -34,6 +41,8 @@ type Box = {
   x1: number;
   depth: number;
   node: FlameView;
+  targetKind: TargetVisualKind | null;
+  targetSignpost: boolean;
 };
 
 /// Class name for a flame box, picked from the node's kind. The
@@ -120,12 +129,20 @@ function layout(
     keyPrefix: string,
   ) => {
     if (x1 - x0 <= 0) return;
+    const targetKind = targetVisualKind(node);
     boxes.push({
       key: keyPrefix,
       x0,
       x1,
       depth,
       node,
+      targetKind,
+      targetSignpost:
+        node.address !== 0n &&
+        hasTargetSignpost({
+          binary: node.binary,
+          target_spans: node.target_spans,
+        }),
     });
     if (depth > maxDepth) maxDepth = depth;
     const span = x1 - x0;
@@ -374,7 +391,7 @@ export function Flamegraph({
           return (
             <div
               key={b.key}
-              className={`flame-box ${kindClassFor(b.node)}${isMatch ? " match" : ""}`}
+              className={`flame-box ${kindClassFor(b.node)}${b.targetKind ? ` ${targetClass(b.targetKind)}` : ""}${b.targetSignpost ? " has-target-signpost" : ""}${isMatch ? " match" : ""}`}
               style={{
                 left: `${b.x0 * 100}%`,
                 width: `${widthPct}%`,
@@ -398,7 +415,9 @@ export function Flamegraph({
               }}
               title={tooltipFor(b.node, total, displayMode)}
             >
-              {widthPct > 2 ? <FlameBoxLabel node={b.node} /> : null}
+              {widthPct > 2 ? (
+                <FlameBoxLabel node={b.node} targetKind={b.targetKind} />
+              ) : null}
               <OffCpuStripe node={b.node} />
             </div>
           );
@@ -450,11 +469,23 @@ function labelFor(node: FlameView): string {
 /// one line so it fits inside a 17px flame box. Sub-pixel boxes are
 /// blanked out by the caller; this component handles everything from
 /// "narrow but visible" up.
-function FlameBoxLabel({ node }: { node: FlameView }) {
+function FlameBoxLabel({
+  node,
+  targetKind,
+}: {
+  node: FlameView;
+  targetKind: TargetVisualKind | null;
+}) {
   const lang = langOf(node);
   return (
     <>
-      <span className={`glyph lang-${lang}`}>{langIcon(lang)}</span>
+      {targetKind ? (
+        <span className={`glyph target-glyph ${targetClass(targetKind)}`}>
+          <TargetMark kind={targetKind} />
+        </span>
+      ) : (
+        <span className={`glyph lang-${lang}`}>{langIcon(lang)}</span>
+      )}
       <span className="fn-name">{labelFor(node)}</span>
       {node.binary ? (
         <span className="bin-name">{node.binary}</span>

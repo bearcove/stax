@@ -12,9 +12,9 @@ use parking_lot::RwLock;
 use stax_live_proto::{
     AnnotatedLine, AnnotatedView, CfgUpdate, FlameNode, FlamegraphUpdate, IntervalEntry,
     IntervalListUpdate, LiveFilter, NeighborsUpdate, PetSampleEntry, PetSampleListUpdate, Profiler,
-    RunViewParams, TargetLaneTimeline, TargetSpanEntry, TargetSpanGroup, TargetSpanListUpdate,
-    ThreadInfo, ThreadsUpdate, TimelineBucket, TimelineParams, TimelineUpdate, TopEntry, TopSort,
-    TopUpdate, ViewParams,
+    RunViewParams, TargetLaneKind, TargetLaneTimeline, TargetSpanEntry, TargetSpanGroup,
+    TargetSpanListUpdate, ThreadInfo, ThreadsUpdate, TimelineBucket, TimelineParams,
+    TimelineUpdate, TopEntry, TopSort, TopUpdate, ViewParams,
 };
 
 use crate::aggregator::{Aggregation, EventCtx, OffCpuBreakdown, PmcAccum, StackNode};
@@ -651,6 +651,7 @@ fn build_threads_update(
                 off_cpu: aggregation.total_off_cpu.to_proto(),
                 pet_samples,
                 target_spans: aggregation.total_target_spans,
+                target_kind: thread_target_kind(&agg, tid),
             }
         })
         .collect();
@@ -663,6 +664,17 @@ fn build_threads_update(
             .then_with(|| a.tid.cmp(&b.tid))
     });
     ThreadsUpdate { threads }
+}
+
+fn thread_target_kind(agg: &Aggregator, tid: u32) -> Option<TargetLaneKind> {
+    let stats = agg.thread_stats(tid)?;
+    stats
+        .intervals
+        .iter()
+        .find_map(|interval| match &interval.kind {
+            IntervalKind::SyntheticSpan { lane_kind, .. } => Some(*lane_kind),
+            IntervalKind::OnCpu | IntervalKind::OffCpu { .. } => None,
+        })
 }
 
 /// One-stop helper: run `Aggregator::aggregate` with the
@@ -856,6 +868,7 @@ fn build_pet_samples_update(
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct TargetSpanGroupKey {
     tid: u32,
+    lane_kind: TargetLaneKind,
     lane_addr: Option<u64>,
     span_addr: Option<u64>,
     origin_tid: Option<u32>,
@@ -864,6 +877,7 @@ struct TargetSpanGroupKey {
 
 struct TargetSpanGroupAccum {
     tid: u32,
+    lane_kind: TargetLaneKind,
     lane_name: Option<u32>,
     span_name: Option<u32>,
     origin_tid: Option<u32>,
@@ -889,6 +903,7 @@ impl TargetSpanGroupAccum {
         TargetSpanGroup {
             tid: self.tid,
             lane_name: self.lane_name,
+            target_kind: self.lane_kind,
             span_name: self.span_name,
             origin_tid: self.origin_tid,
             origin_linked: self.origin_linked,
@@ -918,8 +933,12 @@ fn build_target_spans_update(
     let mut predicate = make_predicate(filter, session_start);
 
     for (event_tid, raw) in agg.iter_intervals(None) {
-        let (stack, origin_tid) = match &raw.kind {
-            IntervalKind::SyntheticSpan { stack, origin_tid } => (stack, origin_tid),
+        let (stack, origin_tid, lane_kind) = match &raw.kind {
+            IntervalKind::SyntheticSpan {
+                stack,
+                origin_tid,
+                lane_kind,
+            } => (stack, origin_tid, *lane_kind),
             IntervalKind::OnCpu | IntervalKind::OffCpu { .. } => continue,
         };
         if let Some(filter_tid) = tid
@@ -955,6 +974,7 @@ fn build_target_spans_update(
 
         let key = TargetSpanGroupKey {
             tid: event_tid,
+            lane_kind,
             lane_addr,
             span_addr,
             origin_tid: *origin_tid,
@@ -964,6 +984,7 @@ fn build_target_spans_update(
             .entry(key)
             .or_insert_with(|| TargetSpanGroupAccum {
                 tid: event_tid,
+                lane_kind,
                 lane_name,
                 span_name,
                 origin_tid: *origin_tid,
@@ -987,6 +1008,7 @@ fn build_target_spans_update(
             start_ns,
             duration_ns,
             lane_name,
+            target_kind: lane_kind,
             span_name,
             origin_tid: *origin_tid,
             origin_linked: origin_addr.is_some(),
@@ -1046,6 +1068,14 @@ fn resolve_target_origin(
 
 fn is_filter_empty(filter: &LiveFilter) -> bool {
     filter.time_range.is_none() && filter.exclude_symbols.is_empty()
+}
+
+fn set_target_kind(slot: &mut Option<TargetLaneKind>, kind: Option<TargetLaneKind>) {
+    if let Some(kind) = kind
+        && slot.is_none()
+    {
+        *slot = Some(kind);
+    }
 }
 
 /// Build the predicate `Aggregator::aggregate` runs against every PET
@@ -1140,6 +1170,7 @@ fn group_top_entries(
         binary: Option<String>,
         is_main: bool,
         language: stax_demangle::Language,
+        target_kind: Option<TargetLaneKind>,
     }
     let mut groups: HashMap<(String, String), Agg> = HashMap::new();
     for (&address, stats) in &aggregation.by_address {
@@ -1180,6 +1211,7 @@ fn group_top_entries(
                     g.address = address;
                     g.representative_self_ns = candidate_self;
                 }
+                set_target_kind(&mut g.target_kind, stats.target_kind);
             })
             .or_insert(Agg {
                 address,
@@ -1202,6 +1234,7 @@ fn group_top_entries(
                 binary: bin,
                 is_main,
                 language,
+                target_kind: stats.target_kind,
             });
     }
 
@@ -1227,6 +1260,7 @@ fn group_top_entries(
             binary: g.binary,
             is_main: g.is_main,
             language: g.language.as_str().to_owned(),
+            target_kind: g.target_kind,
             self_on_cpu_ns: g.self_on_cpu_ns,
             total_on_cpu_ns: g.total_on_cpu_ns,
             self_target_ns: g.self_target_ns,
@@ -1317,14 +1351,16 @@ fn build_timeline_update(
 
     for (event_tid, interval) in agg.iter_intervals(None) {
         let target_info = match &interval.kind {
-            IntervalKind::SyntheticSpan { stack, origin_tid } => {
-                Some((stack.as_ref(), *origin_tid))
-            }
+            IntervalKind::SyntheticSpan {
+                stack,
+                origin_tid,
+                lane_kind,
+            } => Some((stack.as_ref(), *origin_tid, *lane_kind)),
             IntervalKind::OnCpu | IntervalKind::OffCpu { .. } => None,
         };
         if let Some(filter_tid) = tid
             && event_tid != filter_tid
-            && target_info.and_then(|(_, origin_tid)| origin_tid) != Some(filter_tid)
+            && target_info.and_then(|(_, origin_tid, _)| origin_tid) != Some(filter_tid)
         {
             continue;
         }
@@ -1339,12 +1375,15 @@ fn build_timeline_update(
         }
         let target = target_info.is_some();
         let on_cpu = matches!(interval.kind, IntervalKind::OnCpu) || target;
-        let lane_name = target_info.and_then(|(stack, _)| {
+        let lane_name = target_info.and_then(|(stack, _, _)| {
             stack
                 .get(1)
                 .copied()
                 .and_then(|addr| resolve_target_symbol_name(&binaries, &mut interner, addr))
         });
+        let lane_kind = target_info
+            .map(|(_, _, lane_kind)| lane_kind)
+            .unwrap_or_default();
         // Distribute the interval's duration across the buckets it
         // overlaps. For each overlapping bucket [b_start, b_end), the
         // share is min(int_end, b_end) - max(int_start, b_start).
@@ -1371,6 +1410,7 @@ fn build_timeline_update(
                             .or_insert_with(|| TargetLaneTimelineAccum {
                                 tid: event_tid,
                                 lane_name,
+                                lane_kind,
                                 total_target_ns: 0,
                                 target_spans: 0,
                                 buckets: vec![0; n_buckets.max(1)],
@@ -1389,6 +1429,7 @@ fn build_timeline_update(
                 .or_insert_with(|| TargetLaneTimelineAccum {
                     tid: event_tid,
                     lane_name,
+                    lane_kind,
                     total_target_ns: 0,
                     target_spans: 0,
                     buckets: vec![0; n_buckets.max(1)],
@@ -1436,6 +1477,7 @@ fn build_timeline_update(
 struct TargetLaneTimelineAccum {
     tid: u32,
     lane_name: Option<u32>,
+    lane_kind: TargetLaneKind,
     total_target_ns: u64,
     target_spans: u64,
     buckets: Vec<u64>,
@@ -1446,6 +1488,7 @@ impl TargetLaneTimelineAccum {
         TargetLaneTimeline {
             tid: self.tid,
             lane_name: self.lane_name,
+            target_kind: self.lane_kind,
             total_target_ns: self.total_target_ns,
             target_spans: self.target_spans,
             buckets: self.buckets,
@@ -1486,6 +1529,7 @@ fn compute_neighbors_update(
         rep_self_ns: u64,
         is_main: bool,
         language: stax_demangle::Language,
+        target_kind: Option<TargetLaneKind>,
         children: HashMap<SymbolKey, SymbolNode>,
     }
 
@@ -1522,6 +1566,7 @@ fn compute_neighbors_update(
             node.is_main = is_main;
             node.language = language;
         }
+        set_target_kind(&mut node.target_kind, src.target_kind);
     }
 
     fn merge_descendants(dst: &mut SymbolNode, src: &StackNode, bins: &BinaryRegistry) {
@@ -1589,6 +1634,7 @@ fn compute_neighbors_update(
             rep_address,
             is_main,
             language,
+            target_kind,
             children,
             ..
         } = sn;
@@ -1622,6 +1668,7 @@ fn compute_neighbors_update(
             binary: interner.intern_opt(key.1),
             is_main,
             language: interner.intern_str(language.as_str()),
+            target_kind,
             cycles: 0,
             instructions: 0,
             l1d_misses: 0,
@@ -1667,6 +1714,7 @@ fn compute_neighbors_update(
     callers.rep_address = target_address;
     callers.is_main = target_resolved.as_ref().map(|r| r.is_main).unwrap_or(false);
     callers.language = target_language;
+    callers.target_kind = own.target_kind;
     callees.on_cpu_ns = own.on_cpu_ns;
     callees.target_ns = own.target_ns;
     callees.off_cpu = own.off_cpu;
@@ -1676,6 +1724,7 @@ fn compute_neighbors_update(
     callees.rep_address = target_address;
     callees.is_main = target_resolved.as_ref().map(|r| r.is_main).unwrap_or(false);
     callees.language = target_language;
+    callees.target_kind = own.target_kind;
 
     let own_total_ns = own.on_cpu_ns.saturating_add(own.off_cpu.total_ns());
     // Same lenient 0.05% threshold as the main flamegraph so the
@@ -1795,6 +1844,7 @@ fn compute_flame_update(aggregation: &Aggregation, binaries: &BinaryRegistry) ->
         binary: None,
         is_main: false,
         language: unknown_lang,
+        target_kind: None,
         cycles: total_cycles,
         instructions: total_instructions,
         l1d_misses: total_l1d_misses,
@@ -1874,6 +1924,7 @@ fn build_children(
         rep_self_ns: u64,
         is_main: bool,
         language: stax_demangle::Language,
+        target_kind: Option<TargetLaneKind>,
         sub_sources: Vec<&'a StackNode>,
     }
 
@@ -1922,6 +1973,7 @@ fn build_children(
                 rep_self_ns: 0,
                 is_main,
                 language: lang,
+                target_kind: child.target_kind,
                 sub_sources: Vec::new(),
             });
             acc.on_cpu_ns = acc.on_cpu_ns.saturating_add(child.on_cpu_ns);
@@ -1943,6 +1995,7 @@ fn build_children(
                 acc.is_main = is_main;
                 acc.language = lang;
             }
+            set_target_kind(&mut acc.target_kind, child.target_kind);
             acc.sub_sources.push(child);
         }
     }
@@ -1974,6 +2027,7 @@ fn build_children(
             binary: interner.intern_opt(bin),
             is_main: acc.is_main,
             language: interner.intern_str(acc.language.as_str()),
+            target_kind: acc.target_kind,
             cycles: acc.pmc.cycles,
             instructions: acc.pmc.instructions,
             l1d_misses: acc.pmc.l1d_misses,

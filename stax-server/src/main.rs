@@ -1664,7 +1664,8 @@ mod tests {
     use stax_live_proto::{
         LiveFilter, Profiler as _, RunControl as _, RunViewParams, SavedAggregator,
         SavedBinaryRegistry, SavedEventLogEntry, SavedLoadedBinary, TargetIngest as _,
-        TargetReporterStats, TargetSpan, TargetSpanBatch, TopSort, ViewParams,
+        TargetLaneKind, TargetRecordBatch, TargetReporterStats, TargetSpan, TargetSpanBatch,
+        TopSort, ViewParams,
     };
 
     use super::*;
@@ -1762,7 +1763,9 @@ mod tests {
             .ingest(TargetSpanBatch {
                 pid: 4242,
                 lane: "GPU archive".to_owned(),
+                lane_kind: TargetLaneKind::Generic,
                 spans: vec![TargetSpan::new("archive_kernel", 10_000_000, 16_000_000)],
+                records: TargetRecordBatch::default(),
             })
             .await;
         service
@@ -1985,7 +1988,9 @@ mod tests {
             .ingest(TargetSpanBatch {
                 pid: 1111,
                 lane: "GPU first".to_owned(),
+                lane_kind: TargetLaneKind::Generic,
                 spans: vec![TargetSpan::new("first_kernel", 1_000_000, 3_000_000)],
+                records: TargetRecordBatch::default(),
             })
             .await;
         server.finalize_run(first, StopReason::TargetExited);
@@ -1998,7 +2003,9 @@ mod tests {
             .ingest(TargetSpanBatch {
                 pid: 2222,
                 lane: "GPU second".to_owned(),
+                lane_kind: TargetLaneKind::Generic,
                 spans: vec![TargetSpan::new("second_kernel", 10_000_000, 16_000_000)],
+                records: TargetRecordBatch::default(),
             })
             .await;
         server.finalize_run(second, StopReason::TargetExited);
@@ -2051,7 +2058,9 @@ mod tests {
             .ingest(TargetSpanBatch {
                 pid: 1111,
                 lane: "GPU first".to_owned(),
+                lane_kind: TargetLaneKind::Generic,
                 spans: vec![TargetSpan::new("first_kernel", 1_000_000, 3_000_000)],
+                records: TargetRecordBatch::default(),
             })
             .await;
         server.finalize_run(first, StopReason::TargetExited);
@@ -2064,7 +2073,9 @@ mod tests {
             .ingest(TargetSpanBatch {
                 pid: 2222,
                 lane: "GPU second".to_owned(),
+                lane_kind: TargetLaneKind::Generic,
                 spans: vec![TargetSpan::new("second_kernel", 10_000_000, 16_000_000)],
+                records: TargetRecordBatch::default(),
             })
             .await;
         server.finalize_run(second, StopReason::TargetExited);

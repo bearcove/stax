@@ -73,11 +73,16 @@
   --accent-border-medium: rgba(211, 183, 95, 0.7);
   --target-color: #56b6c2;
   --target-bg-soft: rgba(86, 182, 194, 0.16);
+  --metal-color: #24ff74;
+  --metal-bg-soft: rgba(36, 255, 116, 0.14);
 
   /* Per-kind palette: text/glyph color + flame-box bg/fg. */
   --kind-main-color: #98c379;
   --kind-main-bg: #7fa86a;
   --kind-main-fg: #0e1a07;
+  --kind-target-color: var(--target-color);
+  --kind-target-bg: #3b9aa5;
+  --kind-target-fg: #031316;
   --kind-dylib-color: #61afef;
   --kind-dylib-bg: #9b8453;
   --kind-dylib-fg: #1a1208;
@@ -132,6 +137,8 @@
   --danger: #c2483f;
   --target-color: #0d7f8e;
   --target-bg-soft: rgba(13, 127, 142, 0.14);
+  --metal-color: #0a8f3f;
+  --metal-bg-soft: rgba(36, 255, 116, 0.18);
   --bg-button: #eceef1;
   --bg-button-hover: #dde0e5;
   --border-mid: #c2c8cf;
@@ -149,6 +156,9 @@
   --kind-main-color: #3a8a3a;
   --kind-main-bg: #97c87f;
   --kind-main-fg: #0a1a04;
+  --kind-target-color: var(--target-color);
+  --kind-target-bg: #7ac8d0;
+  --kind-target-fg: #041417;
   --kind-dylib-color: #2f6fb8;
   --kind-dylib-bg: #c79a5e;
   --kind-dylib-fg: #1a1208;
@@ -436,11 +446,21 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   font-family: var(--font-mono);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
 }
 
 .thread-name-anon {
   color: var(--text-muted);
   font-style: normal;
+}
+
+.thread-name-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .thread-tid {
@@ -486,6 +506,14 @@ body {
 
 .thread-target-count {
   color: var(--text-muted);
+}
+
+.thread-row.target-thread .thread-name {
+  color: color-mix(in srgb, var(--target-color) 70%, var(--text-primary));
+}
+
+.thread-row.target-thread.target-metal .thread-name {
+  color: color-mix(in srgb, var(--metal-color) 70%, var(--text-primary));
 }
 
 .thread-empty {
@@ -799,6 +827,20 @@ button.timeline-target-lane:hover {
 
 .timeline-target-lane-label {
   color: var(--target-color);
+  align-items: center;
+  display: inline-flex;
+  gap: 5px;
+  min-width: 0;
+}
+
+.timeline-target-lane.target-metal .timeline-target-lane-label {
+  color: var(--metal-color);
+}
+
+.timeline-target-lane-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .timeline-target-lane-meta {
@@ -818,6 +860,10 @@ button.timeline-target-lane:hover {
 .timeline-target-lane-bars rect {
   fill: var(--target-color);
   opacity: 0.68;
+}
+
+.timeline-target-lane.target-metal .timeline-target-lane-bars rect {
+  fill: var(--metal-color);
 }
 
 .timeline-footer {
@@ -1105,6 +1151,19 @@ button.timeline-target-lane:hover {
   background: var(--kind-main-bg);
   color: var(--kind-main-fg);
 }
+.flame-box.kind-target {
+  background: var(--kind-target-bg);
+  color: var(--kind-target-fg);
+}
+.flame-box.kind-target.target-metal,
+.flame-box.target-metal {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--metal-color) 65%, #0effdd),
+    color-mix(in srgb, var(--metal-color) 72%, #0a1a04)
+  );
+  color: #031006;
+}
 .flame-box.kind-dylib {
   background: var(--kind-dylib-bg);
   color: var(--kind-dylib-fg);
@@ -1116,6 +1175,14 @@ button.timeline-target-lane:hover {
 .flame-box.kind-unknown {
   background: var(--kind-unknown-bg);
   color: var(--kind-unknown-fg);
+}
+
+.flame-box.has-target-signpost:not(.kind-target) {
+  box-shadow: inset 0 -2px 0 var(--target-color);
+}
+
+.flame-box.has-target-signpost.target-metal:not(.kind-target) {
+  box-shadow: inset 0 -2px 0 var(--metal-color);
 }
 
 .flame-status {
@@ -1392,6 +1459,45 @@ td.entry {
   height: 14px;
 }
 
+.target-mark {
+  align-items: center;
+  color: var(--target-color);
+  display: inline-flex;
+  flex: 0 0 auto;
+  height: 1em;
+  justify-content: center;
+  width: 1em;
+}
+
+.target-mark svg {
+  display: block;
+  height: 1em;
+  width: 1em;
+}
+
+.target-mark.target-metal {
+  color: var(--metal-color);
+}
+
+.target-mark.target-metal .target-mark-metal-svg {
+  border-radius: 20%;
+}
+
+.entry-line .target-mark,
+.thread-name .target-mark,
+.timeline-target-lane-label .target-mark,
+button.target-lane-link .target-mark,
+.target-summary-value .target-mark,
+.target-empty-lane .target-mark {
+  height: 14px;
+  width: 14px;
+}
+
+.flame-box .target-mark {
+  height: 11px;
+  width: 11px;
+}
+
 .entry-line .fn-name,
 .entry-line .bin-name {
   flex: 1 1 auto;
@@ -1420,9 +1526,23 @@ td.entry {
 .glyph.lang-unknown { color: var(--text-muted); }
 
 .glyph.obj-main { color: var(--kind-main-color); }
+.glyph.obj-target { color: var(--kind-target-color); }
 .glyph.obj-system { color: var(--kind-system-color); }
 .glyph.obj-dylib { color: var(--kind-dylib-color); }
 .glyph.obj-unknown { color: var(--kind-unknown-color); }
+
+table.top-table tr.target-row .fn-line .fn-name {
+  color: color-mix(in srgb, var(--target-color) 78%, var(--text-primary));
+}
+
+table.top-table tr.target-row.target-metal .fn-line .fn-name {
+  color: color-mix(in srgb, var(--metal-color) 78%, var(--text-primary));
+}
+
+table.top-table tr.has-target-signpost:not(.target-row) .fn-line {
+  border-left: 2px solid var(--target-color);
+  padding-left: 6px;
+}
 
 /* Main-executable rows get a brighter function name; the binary line
    keeps its muted color for readability. The mix gives a tinted text
@@ -1938,6 +2058,11 @@ table.intervals-table td.col-count {
   text-align: right;
 }
 
+table.target-spans-table tr.target-metal td.col-count,
+table.target-spans-table tr.target-metal td.col-lane {
+  color: var(--metal-color);
+}
+
 table.intervals-table td.col-tid {
   color: var(--text-tertiary);
 }
@@ -1981,6 +2106,22 @@ table.intervals-table td.col-origin.empty {
 }
 
 .target-spans-pane .intervals-header strong {
+  color: var(--target-color);
+}
+
+.target-sort-button {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  letter-spacing: inherit;
+  padding: 0;
+  text-transform: inherit;
+}
+
+.target-sort-button:hover,
+.target-sort-button.active {
   color: var(--target-color);
 }
 
@@ -2033,6 +2174,18 @@ button.target-summary-card.clickable:hover {
   white-space: nowrap;
 }
 
+.target-summary-value.with-target-mark {
+  align-items: center;
+  display: inline-flex;
+  gap: 5px;
+}
+
+.target-summary-value.with-target-mark > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .target-summary-value.muted {
   color: var(--text-muted);
   font-weight: 500;
@@ -2077,9 +2230,15 @@ button.target-empty-lane {
   color: var(--target-color);
   cursor: pointer;
   display: inline-flex;
+  align-items: center;
   gap: 6px;
   max-width: 100%;
   padding: 3px 6px;
+}
+
+button.target-empty-lane.target-metal {
+  border-color: color-mix(in srgb, var(--metal-color) 35%, transparent);
+  color: var(--metal-color);
 }
 
 .target-empty-lane-name {
@@ -2115,7 +2274,9 @@ button.target-lane-link {
   border: 0;
   color: inherit;
   cursor: pointer;
-  display: block;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font: inherit;
   font-family: var(--font-mono);
   max-width: 100%;
@@ -2124,6 +2285,13 @@ button.target-lane-link {
   text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.target-lane-name,
+.target-span-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 button.target-lane-link:hover {

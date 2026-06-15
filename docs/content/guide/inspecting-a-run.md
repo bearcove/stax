@@ -4,7 +4,7 @@ weight = 2
 insert_anchor_links = "heading"
 +++
 
-Once a run has samples or cooperating target spans, four commands let you
+Once a run has samples or cooperating target spans, five commands let you
 look at it from different angles — from a one-line leaderboard down to
 individual machine instructions. They all read the **current** aggregator
 state, so they work on a run that is still recording.
@@ -51,10 +51,12 @@ the CPU or target lane running"; `--sort total` answers "what work is
 responsible", and will rank callers like `main` or a runtime's poll loop
 highly because hot code runs *underneath* them.
 For target lanes, `--sort self --tid <synthetic>` shows per-span names;
-`--sort total --tid <synthetic>` can surface the lane aggregate. When spans
-carry origins, `--tid <real CPU tid>` includes the target work queued from
-that CPU thread; `--sort total` charges it to the dispatch stack, while
-`--sort self` still surfaces the span names.
+`--sort total --tid <synthetic>` can surface the lane aggregate. For direct
+target rankings such as "most invoked" or "most target time", use
+[`stax target top`](#stax-target). When spans carry origins, `--tid <real CPU
+tid>` includes target lane work linked to that CPU thread. The origin is a
+provenance link; the target work does not become CPU execution under the
+dispatch stack.
 
 When `stax top` sees Metal command/dispatch frames but no synthetic target
 lane, it prints a hint to stderr suggesting Metal 4 timestamp-counter
@@ -89,8 +91,8 @@ stax flame -d 4 --threshold-pct 2
 Children are sorted by active time, descending, at every level. CPU threads
 contribute scheduler-derived on-CPU time; cooperating target lanes contribute
 reported span duration and render as `(all) -> lane -> span name`. When spans
-carry origins, filtering to the origin CPU tid can render
-`(all) -> CPU caller -> lane -> span name`.
+carry origins, filtering to the origin CPU tid keeps the lane tree and limits
+it to work linked to that CPU origin.
 
 | flag                       | meaning                                                            |
 |----------------------------|--------------------------------------------------------------------|
@@ -109,8 +111,9 @@ discovery hints as `top`.
 ## stax threads
 
 Per-thread and synthetic-lane active/off-CPU breakdown, sorted by total
-activity. CPU thread activity includes origin-linked target spans queued from
-that thread. Synthetic target lanes with spans are included even when they
+activity. CPU thread target columns include origin-linked target spans queued
+from that thread as provenance-linked parallel work. Synthetic target lanes
+with spans are included even when they
 would otherwise fall past the normal `-n` cutoff. Use it to decide *which
 thread or lane* is worth flaming before you call `stax flame --tid`.
 
@@ -128,9 +131,9 @@ stax threads -n 5
 
 The `cpu ms` column is real on-CPU time. `target ms` is exact span duration:
 for synthetic lanes it is lane-active target time; for CPU threads it is
-origin-linked target work queued from that tid. `samples` is PET sample count
-and `spans` is target span count. The `kind` column says whether the row is a
-real sampled thread or a synthetic target lane.
+origin-linked target work queued from that tid, not CPU-busy time. `samples`
+is PET sample count and `spans` is target span count. The `kind` column says
+whether the row is a real sampled thread or a synthetic target lane.
 
 The `blocked` column names the **largest off-CPU bucket** for that thread —
 one of `idle`, `lock`, `sem`, `ipc`, `ioR`, `ioW`, `ready`, `sleep`, `conn`,
@@ -144,6 +147,37 @@ one of `idle`, `lock`, `sem`, `ipc`, `ioR`, `ioW`, `ready`, `sleep`, `conn`,
 Off-CPU intervals are recorded on both macOS and Linux. The *waker*
 attribution shown elsewhere needs the `staxd` broker on Linux — see
 [Platform Support](@/concepts/platform-support.md).
+
+## stax target
+
+Target-focused queries for cooperating lanes. Use them once `stax threads` has
+shown synthetic lanes, or when you already know target spans exist and want the
+answer without CPU rows mixed in.
+
+```bash
+stax target lanes
+stax target top --by time
+stax target top --by count
+```
+
+```text
+ target ms    count     avg ms     max ms    kind  lane                     span
+    220.10      198      1.112      4.300   metal  GPU tq1s                 tq6_1s_rows
+```
+
+`stax target lanes` lists synthetic target lanes by exact target time. `stax
+target top` ranks lane + span/shader names and aggregates across CPU origin
+groups, so a shader dispatched from several stacks still appears once.
+
+| flag              | meaning                                              |
+|-------------------|------------------------------------------------------|
+| `-n, --limit <N>` | how many rows to print — default **20**; `0` for all |
+| `--by time`       | rank by total target duration — default             |
+| `--by count`      | rank by invocation/span count                        |
+| `--by avg`        | rank by average duration                             |
+| `--by max`        | rank by max observed duration                        |
+| `--tid <TID>`     | filter to a target lane tid or origin-linked CPU tid |
+| `--run <RUN_ID>`  | query a run without changing selected query state    |
 
 ## stax annotate
 
@@ -190,6 +224,8 @@ annotation works without re-reading the target's memory.
 stax record -- ./bench &
 stax wait --for-samples 10000   # block until there's enough data
 stax threads -n 5               # which thread is hot?
+stax target top --by time       # which target spans/shaders dominate?
+stax target top --by count      # which target spans/shaders run most often?
 stax flame --tid 501 -d 8       # flame just that thread
 stax top -n 20 --sort self      # the hot leaves
 stax annotate 'hot_fn'          # down to the instruction

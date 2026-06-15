@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { channel } from "@bearcove/vox-core";
 import type {
   IntervalEntry,
   IntervalListUpdate,
   LiveFilter,
   ProfilerClient,
+  TargetLaneKind,
   TargetSpanEntry,
   TargetSpanGroup,
   TargetSpanListUpdate,
@@ -19,8 +20,15 @@ import {
   type ReasonKey,
 } from "./wire.ts";
 import { viewParams } from "./App.tsx";
+import {
+  TargetMark,
+  targetClass,
+  targetVisualKind,
+  type TargetVisualKind,
+} from "./targetVisuals.tsx";
 
 const SYNTH_TID_BASE = 0xfff00000;
+type TargetGroupSort = "total" | "count" | "max";
 
 /// Drill-down view of every off-CPU interval attributed to the
 /// selected flame subtree. Each row carries: time the wait started,
@@ -156,6 +164,7 @@ export function TargetSpansPanel({
   onSelectOrigin: (tid: number, address: bigint | null) => void;
 }) {
   const [update, setUpdate] = useState<TargetSpanListUpdate | null>(null);
+  const [groupSort, setGroupSort] = useState<TargetGroupSort>("total");
 
   useEffect(() => {
     let cancelled = false;
@@ -174,6 +183,14 @@ export function TargetSpansPanel({
       cancelled = true;
     };
   }, [client, flameKey, tid, filter, runId]);
+
+  const sortedGroups = useMemo(
+    () =>
+      update
+        ? [...update.groups].sort((a, b) => compareGroups(a, b, groupSort))
+        : [],
+    [update, groupSort],
+  );
 
   if (!update) {
     return <div className="placeholder">streaming target spans…</div>;
@@ -230,16 +247,34 @@ export function TargetSpansPanel({
           <caption>top target work</caption>
           <thead>
             <tr>
-              <th>count</th>
-              <th>total</th>
-              <th>max</th>
+              <TargetSortHeader
+                sort="count"
+                current={groupSort}
+                onSort={setGroupSort}
+              >
+                count
+              </TargetSortHeader>
+              <TargetSortHeader
+                sort="total"
+                current={groupSort}
+                onSort={setGroupSort}
+              >
+                total
+              </TargetSortHeader>
+              <TargetSortHeader
+                sort="max"
+                current={groupSort}
+                onSort={setGroupSort}
+              >
+                max
+              </TargetSortHeader>
               <th>lane</th>
               <th>span</th>
               <th>origin</th>
             </tr>
           </thead>
           <tbody>
-            {update.groups.map((group, i) => (
+            {sortedGroups.map((group, i) => (
               <TargetSpanGroupRow
                 key={i}
                 group={group}
@@ -313,10 +348,25 @@ function TargetSpansEmptyState({
             <button
               key={lane.tid}
               type="button"
-              className="target-empty-lane"
+              className={`target-empty-lane ${targetClass(
+                targetVisualKind({
+                  lane: lane.name,
+                  target_spans: lane.target_spans,
+                  target_kind: lane.target_kind,
+                }) ?? "target",
+              )}`}
               onClick={() => onSelectTid(lane.tid)}
               title={`tid ${lane.tid}`}
             >
+              <TargetMark
+                kind={
+                  targetVisualKind({
+                    lane: lane.name,
+                    target_spans: lane.target_spans,
+                    target_kind: lane.target_kind,
+                  }) ?? "target"
+                }
+              />
               <span className="target-empty-lane-name">
                 {lane.name ?? `tid ${lane.tid}`}
               </span>
@@ -329,6 +379,57 @@ function TargetSpansEmptyState({
         </div>
       ) : null}
     </div>
+  );
+}
+
+function compareGroups(
+  a: TargetSpanGroup,
+  b: TargetSpanGroup,
+  sort: TargetGroupSort,
+): number {
+  const metric = (group: TargetSpanGroup) => {
+    switch (sort) {
+      case "count":
+        return group.count;
+      case "total":
+        return group.total_duration_ns;
+      case "max":
+        return group.max_duration_ns;
+    }
+  };
+  const av = metric(a);
+  const bv = metric(b);
+  if (av !== bv) return av > bv ? -1 : 1;
+  if (a.total_duration_ns !== b.total_duration_ns) {
+    return a.total_duration_ns > b.total_duration_ns ? -1 : 1;
+  }
+  if (a.count !== b.count) return a.count > b.count ? -1 : 1;
+  return 0;
+}
+
+function TargetSortHeader({
+  sort,
+  current,
+  onSort,
+  children,
+}: {
+  sort: TargetGroupSort;
+  current: TargetGroupSort;
+  onSort: (sort: TargetGroupSort) => void;
+  children: ReactNode;
+}) {
+  return (
+    <th>
+      <button
+        type="button"
+        className={`target-sort-button${current === sort ? " active" : ""}`}
+        onClick={() => onSort(sort)}
+        title={`sort target work by ${sort}`}
+      >
+        {children}
+        {current === sort ? " ↓" : ""}
+      </button>
+    </th>
   );
 }
 
@@ -347,15 +448,29 @@ function TargetSpanGroupRow({
 }) {
   const lane = group.lane_name != null ? strings[group.lane_name] : "(lane)";
   const span = group.span_name != null ? strings[group.span_name] : "(span)";
+  const targetKind =
+    targetVisualKind({
+      lane,
+      span,
+      target_spans: group.count,
+      target_kind: group.target_kind,
+    }) ?? "target";
   return (
-    <tr>
+    <tr className={`target-span-row ${targetClass(targetKind)}`}>
       <td className="col-count">{group.count.toString()}</td>
       <td className="col-duration">
         {formatDuration(group.total_duration_ns)}
       </td>
       <td className="col-duration">{formatDuration(group.max_duration_ns)}</td>
-      <LaneCell tid={group.tid} lane={lane} onSelectTid={onSelectTid} />
-      <td className="col-span">{span}</td>
+      <LaneCell
+        tid={group.tid}
+        lane={lane}
+        targetKind={targetKind}
+        onSelectTid={onSelectTid}
+      />
+      <td className="col-span">
+        <span className="target-span-name">{span}</span>
+      </td>
       <OriginCell
         originTid={group.origin_tid}
         originLinked={group.origin_linked}
@@ -386,12 +501,26 @@ function TargetSpanRow({
   const startSec = (Number(entry.start_ns) / 1e9).toFixed(3);
   const lane = entry.lane_name != null ? strings[entry.lane_name] : "(lane)";
   const span = entry.span_name != null ? strings[entry.span_name] : "(span)";
+  const targetKind =
+    targetVisualKind({
+      lane,
+      span,
+      target_spans: 1n,
+      target_kind: entry.target_kind,
+    }) ?? "target";
   return (
-    <tr>
+    <tr className={`target-span-row ${targetClass(targetKind)}`}>
       <td className="col-start">{startSec}s</td>
       <td className="col-duration">{formatDuration(entry.duration_ns)}</td>
-      <LaneCell tid={entry.tid} lane={lane} onSelectTid={onSelectTid} />
-      <td className="col-span">{span}</td>
+      <LaneCell
+        tid={entry.tid}
+        lane={lane}
+        targetKind={targetKind}
+        onSelectTid={onSelectTid}
+      />
+      <td className="col-span">
+        <span className="target-span-name">{span}</span>
+      </td>
       <OriginCell
         originTid={entry.origin_tid}
         originLinked={entry.origin_linked}
@@ -409,6 +538,7 @@ function TargetSpanRow({
 type LaneSummary = {
   tid: number;
   laneName: number | null;
+  targetKind: TargetLaneKind;
   totalDurationNs: bigint;
   count: bigint;
   maxDurationNs: bigint;
@@ -446,6 +576,7 @@ function buildTargetSummary(update: TargetSpanListUpdate): TargetSummary {
       {
         tid: group.tid,
         laneName: group.lane_name,
+        targetKind: group.target_kind,
         totalDurationNs: 0n,
         count: 0n,
         maxDurationNs: 0n,
@@ -536,6 +667,19 @@ function TargetSummaryStrip({
     summary.topSpan?.lane_name != null
       ? strings[summary.topSpan.lane_name]
       : "(lane)";
+  const laneKind =
+    targetVisualKind({
+      lane: laneName,
+      target_spans: summary.topLane?.count,
+      target_kind: summary.topLane?.targetKind,
+    }) ?? "target";
+  const spanKind =
+    targetVisualKind({
+      lane: spanLaneName,
+      span: spanName,
+      target_spans: summary.topSpan?.count,
+      target_kind: summary.topSpan?.target_kind,
+    }) ?? "target";
   const originFn =
     summary.topOrigin?.originFunctionName != null
       ? strings[summary.topOrigin.originFunctionName]
@@ -555,12 +699,15 @@ function TargetSummaryStrip({
       {summary.topLane ? (
         <button
           type="button"
-          className="target-summary-card clickable"
+          className={`target-summary-card clickable ${targetClass(laneKind)}`}
           onClick={() => onSelectTid(summary.topLane!.tid)}
           title={`tid ${summary.topLane.tid}`}
         >
           <span className="target-summary-label">top lane</span>
-          <span className="target-summary-value">{laneName}</span>
+          <span className="target-summary-value with-target-mark">
+            <TargetMark kind={laneKind} />
+            <span>{laneName}</span>
+          </span>
           <span className="target-summary-meta">
             {formatDuration(summary.topLane.totalDurationNs)} ·{" "}
             {summary.topLane.count.toString()} spans
@@ -568,9 +715,12 @@ function TargetSummaryStrip({
         </button>
       ) : null}
       {summary.topSpan ? (
-        <div className="target-summary-card">
+        <div className={`target-summary-card ${targetClass(spanKind)}`}>
           <span className="target-summary-label">top span</span>
-          <span className="target-summary-value">{spanName}</span>
+          <span className="target-summary-value with-target-mark">
+            <TargetMark kind={spanKind} />
+            <span>{spanName}</span>
+          </span>
           <span className="target-summary-meta">
             {spanLaneName} · {formatDuration(summary.topSpan.total_duration_ns)} ·{" "}
             {summary.topSpan.count.toString()} spans
@@ -624,10 +774,12 @@ function TargetSummaryStrip({
 function LaneCell({
   tid,
   lane,
+  targetKind,
   onSelectTid,
 }: {
   tid: number;
   lane: string;
+  targetKind: TargetVisualKind;
   onSelectTid: (tid: number) => void;
 }) {
   return (
@@ -638,7 +790,8 @@ function LaneCell({
         onClick={() => onSelectTid(tid)}
         title={`tid ${tid}`}
       >
-        {lane}
+        <TargetMark kind={targetKind} />
+        <span className="target-lane-name">{lane}</span>
       </button>
     </td>
   );

@@ -77,7 +77,9 @@ to reload. The layout, top to bottom:
   off-CPU reason stripes. CPU mode makes flame width sampled CPU time only;
   target mode makes flame width exact target-span duration. Hover text breaks
   out CPU, active, target time, and span counts. Origin-linked target spans
-  appear under the CPU stack that queued them when that thread is selected.
+  can be filtered to the CPU thread that queued them, while still rendering as
+  parallel target lane work; the target-spans detail panel links each span
+  back to its dispatch origin.
 - **Top-N table** — the hot-leaf or target-span leaderboard, the same data as
   [`stax top`](@/guide/inspecting-a-run.md#stax-top), sortable by self or
   total. Its bar and primary duration follow the same display metric as the

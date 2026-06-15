@@ -230,14 +230,16 @@ stax top [OPTIONS]
 Output columns are active time, target-executor time, PET samples, target
 span count, and function/span name. For a synthetic target lane,
 `--tid <TID>` shows per-span durations in `target ms` and span counts in
-`spans`. When target spans carry origins, filtering to the origin CPU tid also
-includes those spans under the CPU dispatch stack; `--sort total` then charges
-the target duration to dispatch callers. If Metal command/dispatch frames are
+`spans`. For a target-only ranking that aggregates across origins, use
+[`stax target top`](#stax-target). When target spans carry origins, filtering
+to the origin CPU tid also includes the matching target lane work as
+provenance-linked parallel work; it does not turn GPU/accelerator time into CPU
+execution under the dispatch stack. If Metal command/dispatch frames are
 visible but no target lane is present, `stax top` prints a stderr hint about
-`stax-target` Metal 4 timestamp-counter cooperation. If the view is empty but
-the run has off-CPU/thread activity or target lanes outside a `--tid` filter,
-`top` prints a discovery hint for `stax threads -n 0`, target-lane tids, or
-`stax-target` integration.
+explicit `stax-target` / `Lane::metal` Metal 4 timestamp cooperation. If the
+view is empty but the run has off-CPU/thread activity or target lanes outside a
+`--tid` filter, `top` prints a discovery hint for `stax threads -n 0`,
+target-lane tids, or `stax-target` integration.
 
 ## `stax flame`
 
@@ -257,8 +259,8 @@ stax flame [OPTIONS]
 
 Cooperating target lanes render as `(all) -> lane -> span name`, with per-node
 active time, target time, span count, and percent columns. When target spans
-carry origins, `--tid <cpu tid>` can render
-`(all) -> CPU caller -> lane -> span name`. Like `top`, `flame` prints a Metal
+carry origins, `--tid <cpu tid>` keeps the lane tree and filters it to work
+linked to that CPU origin. Like `top`, `flame` prints a Metal
 cooperation hint when Metal command/dispatch frames are visible but no
 synthetic target lane has reported spans. Empty flame views also get the same
 `threads` / target-lane / `stax-target` discovery hints as `top`.
@@ -267,8 +269,9 @@ synthetic target lane has reported spans. Empty flame views also get the same
 
 Per-thread and synthetic-lane CPU/target/off-CPU breakdown for the current
 run, sorted by total activity. CPU thread rows include origin-linked target
-spans queued from that thread, and synthetic target lanes with spans are
-included even if they fall past the normal `-n` cutoff. The output includes a
+span duration queued from that thread as provenance-linked parallel work, and
+synthetic target lanes with spans are included even if they fall past the
+normal `-n` cutoff. The output includes a
 `kind` column: `thread` for real sampled threads and `target` for synthetic
 target lanes. See
 [Inspecting a Run](@/guide/inspecting-a-run.md#stax-threads).
@@ -281,6 +284,48 @@ stax threads [OPTIONS]
 |---------------------|-------|---------|----------------------------------------------------------|
 | `--run <RUN_ID>`    | `u64` | *(none)*| query a run without changing selected query state        |
 | `-n, --limit <N>`   | `u32` | `20`    | maximum threads to print; `0` prints every thread        |
+
+## `stax target`
+
+Inspect cooperating target lanes and target span/shader names directly. These
+commands are the CLI discovery points for questions like "which GPU lane
+exists?", "which shader/span took the most time?", and "which shader/span ran
+most often?" They use the same target-span aggregate as the web target details
+panel, and they keep target work parallel instead of pretending it is CPU stack
+execution.
+
+### `stax target lanes`
+
+```text
+stax target lanes [OPTIONS]
+```
+
+| flag                | type  | default | meaning                                           |
+|---------------------|-------|---------|---------------------------------------------------|
+| `--run <RUN_ID>`    | `u64` | *(none)*| query a run without changing selected query state |
+| `-n, --limit <N>`   | `u32` | `20`    | maximum target lanes to print; `0` prints all     |
+
+Output columns are exact target time, span count, lane kind, synthetic tid, and
+lane name. It is equivalent to the target-only subset of `stax threads`, sorted
+by target time.
+
+### `stax target top`
+
+```text
+stax target top [OPTIONS]
+```
+
+| flag              | type     | default  | meaning                                                   |
+|-------------------|----------|----------|-----------------------------------------------------------|
+| `--run <RUN_ID>`  | `u64`    | *(none)* | query a run without changing selected query state         |
+| `-n, --limit <N>` | `u32`    | `20`     | maximum span/shader rows to print; `0` prints all         |
+| `--by <MODE>`     | `String` | `time`   | `time`, `count`, `avg`, or `max`                          |
+| `--tid <TID>`     | `u32`    | *(none)* | filter to a target lane tid or origin-linked CPU tid      |
+
+Rows aggregate by lane + span/shader name across origin groups, so one kernel
+does not split into many rows merely because it was dispatched from several CPU
+stacks. Columns are total target time, invocation count, average duration, max
+duration, lane kind, lane name, and span/shader name.
 
 ## `stax annotate`
 
@@ -304,11 +349,13 @@ leaf-self functions; the hottest match wins.
 
 Dump `stax-server` diagnostics, including target-span ingest counters
 (batches, recorded/dropped spans, lane totals, origin link/unlink counts,
-unlinked-origin reasons, PET origin-distance min/avg/max, and stax-target local
-queue drops). It also prints target-ingest hints for missing batches, invalid
-span durations, missing origins, origins that failed to link, batches that
-arrived with no active run, batches from the wrong pid, and target-side
-queue-full / worker-disconnected drops. See
+unlinked-origin reasons, PET origin-distance min/avg/max, typed target metadata
+record counts, and stax-target local queue drops). It also prints target-ingest
+hints for missing batches, invalid span durations, missing origins, origins that
+failed to link, metadata records that arrive without executable spans, missing
+source/shader pairing, counter definitions without samples, batches that arrived
+with no active run, batches from the wrong pid, and target-side queue-full /
+worker-disconnected drops. See
 [Troubleshooting](@/guide/troubleshooting.md#diagnostic-commands--stax-diagnose).
 
 ```text

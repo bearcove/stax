@@ -10,6 +10,11 @@ import type {
 import type { DisplayMode } from "./App.tsx";
 import { timelineParams } from "./App.tsx";
 import { cpuOnlyNs, formatDuration } from "./wire.ts";
+import {
+  TargetMark,
+  targetClass,
+  targetVisualKind,
+} from "./targetVisuals.tsx";
 
 /// Compact timeline strip across the top of the page. Each bucket is
 /// drawn as a compact area; height is proportional to the selected
@@ -220,16 +225,24 @@ function TargetLaneTracks({
       {lanes.map((lane) => {
         const label =
           lane.lane_name != null ? strings[lane.lane_name] : `tid ${lane.tid}`;
+        const targetKind = targetVisualKind({
+          lane: label,
+          target_spans: lane.target_spans,
+          target_kind: lane.target_kind,
+        });
         const n = lane.buckets.length || 1;
         return (
           <button
             key={lane.tid}
             type="button"
-            className="timeline-target-lane"
+            className={`timeline-target-lane${targetKind ? ` ${targetClass(targetKind)}` : ""}`}
             onClick={() => onSelectTid(lane.tid)}
             title={`tid ${lane.tid} · ${formatDuration(lane.total_target_ns)} target · ${lane.target_spans.toString()} spans`}
           >
-            <span className="timeline-target-lane-label">{label}</span>
+            <span className="timeline-target-lane-label">
+              {targetKind ? <TargetMark kind={targetKind} /> : null}
+              <span className="timeline-target-lane-name">{label}</span>
+            </span>
             <svg
               className="timeline-target-lane-bars"
               viewBox="0 0 100 12"

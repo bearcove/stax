@@ -9,7 +9,8 @@ use facet::Facet;
 use figue as args;
 use stax_core::args::{
     AnnotateArgs, Cli, Command, CompareArgs, DiagnoseArgs, FlameArgs, OpenArgs, RecordArgs,
-    SaveArgs, ThreadsArgs, TopArgs, WaitArgs,
+    SaveArgs, TargetArgs, TargetCommand, TargetLanesArgs, TargetTopArgs, ThreadsArgs, TopArgs,
+    WaitArgs,
 };
 #[cfg(target_os = "linux")]
 use stax_core::cmd_setup_linux;
@@ -19,8 +20,8 @@ use stax_live_proto::{
     DiagnosticsSnapshot, FlameNode, FlamegraphUpdate, LiveFilter, OffCpuBreakdown, ProfilerClient,
     RunControlClient, RunId, RunSummary, RunViewParams, SavedArchiveBlob, SavedEventLogEntry,
     SavedIntervalKind, SavedRunArchive, SavedRunArchiveBundle, SavedRunArchiveManifest,
-    ServerStatus, StopReason, TargetIngestDiagnostics, ThreadsUpdate, TopEntry, TopSort, TopUpdate,
-    ViewParams, WaitCondition, WaitOutcome,
+    ServerStatus, StopReason, TargetIngestDiagnostics, TargetLaneKind, TargetSpanListUpdate,
+    ThreadsUpdate, TopEntry, TopSort, TopUpdate, ViewParams, WaitCondition, WaitOutcome,
 };
 
 #[cfg(target_os = "macos")]
@@ -81,6 +82,7 @@ fn main_impl() -> Result<(), Box<dyn Error>> {
         Command::Annotate(args) => block_on_async(async { run_annotate(args).await })?,
         Command::Flame(args) => block_on_async(async { run_flame(args).await })?,
         Command::Threads(args) => block_on_async(async { run_threads(args).await })?,
+        Command::Target(args) => block_on_async(async { run_target(args).await })?,
     }
     Ok(())
 }
@@ -1539,7 +1541,11 @@ fn summarize_archive(archive: &SavedRunArchive) -> ArchiveCompareStats {
                 SavedIntervalKind::OffCpu { .. } => {
                     stats.off_cpu_ns = stats.off_cpu_ns.saturating_add(duration_ns);
                 }
-                SavedIntervalKind::SyntheticSpan { stack, origin_tid } => {
+                SavedIntervalKind::SyntheticSpan {
+                    stack,
+                    origin_tid,
+                    lane_kind: _,
+                } => {
                     stats.target_ns = stats.target_ns.saturating_add(duration_ns);
                     stats.target_spans = stats.target_spans.saturating_add(1);
                     match origin_tid {
@@ -1754,10 +1760,264 @@ async fn run_threads(args: ThreadsArgs) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+async fn run_target(args: TargetArgs) -> Result<(), Box<dyn Error>> {
+    match args.command {
+        TargetCommand::Lanes(args) => run_target_lanes(args).await,
+        TargetCommand::Top(args) => run_target_top(args).await,
+    }
+}
+
+async fn run_target_lanes(args: TargetLanesArgs) -> Result<(), Box<dyn Error>> {
+    let url = require_server_socket()?;
+    ensure_query_run_if_requested(&url, "target lanes --run", args.run).await?;
+    let client: ProfilerClient = vox::connect(&url).await?;
+    let _debug_registration = register_profiler_client("target-lanes", &client);
+    let update = client
+        .threads(run_view_params(args.run))
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+    print_target_lanes(&update, args.limit);
+    Ok(())
+}
+
+async fn run_target_top(args: TargetTopArgs) -> Result<(), Box<dyn Error>> {
+    let by = TargetTopBy::parse(&args.by)?;
+    let url = require_server_socket()?;
+    ensure_query_run_if_requested(&url, "target top --run", args.run).await?;
+    let client: ProfilerClient = vox::connect(&url).await?;
+    let _debug_registration = register_profiler_client("target-top", &client);
+    let update = client
+        .target_spans("cli-target-top".to_owned(), view_params(args.run, args.tid))
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+    print_target_top(&update, args.limit, by);
+    Ok(())
+}
+
 fn print_threads(update: &ThreadsUpdate, limit: u32) {
     let stdout = io::stdout();
     let mut out = stdout.lock();
     write_threads(&mut out, update, limit).expect("write threads output");
+}
+
+fn print_target_lanes(update: &ThreadsUpdate, limit: u32) {
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    write_target_lanes(&mut out, update, limit).expect("write target lanes output");
+}
+
+fn write_target_lanes<W: Write>(out: &mut W, update: &ThreadsUpdate, limit: u32) -> io::Result<()> {
+    let mut lanes: Vec<&stax_live_proto::ThreadInfo> = update
+        .threads
+        .iter()
+        .filter(|thread| thread.tid >= SYNTH_TID_BASE && thread.target_spans > 0)
+        .collect();
+    lanes.sort_by(|a, b| {
+        b.target_ns
+            .cmp(&a.target_ns)
+            .then_with(|| b.target_spans.cmp(&a.target_spans))
+            .then_with(|| a.tid.cmp(&b.tid))
+    });
+
+    if lanes.is_empty() {
+        writeln!(
+            out,
+            "(no target lanes yet — link `stax-target` and report spans from cooperating GPU/executor/runtime work)"
+        )?;
+        return Ok(());
+    }
+
+    writeln!(
+        out,
+        "{:>10} {:>8} {:>7}  tid    name",
+        "target ms", "spans", "kind",
+    )?;
+    let visible = limit_items(lanes.len(), limit);
+    for lane in lanes.iter().take(visible) {
+        writeln!(
+            out,
+            "{:>10.3} {:>8} {:>7}  {:<6} {}",
+            lane.target_ns as f64 / 1e6,
+            lane.target_spans,
+            target_kind_label(lane.target_kind.unwrap_or(TargetLaneKind::Generic)),
+            lane.tid,
+            lane.name.as_deref().unwrap_or("(unnamed target lane)"),
+        )?;
+    }
+    if lanes.len() > visible {
+        let hidden = lanes.len() - visible;
+        writeln!(
+            out,
+            "…{hidden} more target lane{}",
+            if hidden == 1 { "" } else { "s" }
+        )?;
+    }
+    Ok(())
+}
+
+fn print_target_top(update: &TargetSpanListUpdate, limit: u32, by: TargetTopBy) {
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    write_target_top(&mut out, update, limit, by).expect("write target top output");
+}
+
+fn write_target_top<W: Write>(
+    out: &mut W,
+    update: &TargetSpanListUpdate,
+    limit: u32,
+    by: TargetTopBy,
+) -> io::Result<()> {
+    let rows = target_top_rows(update, by);
+    if rows.is_empty() {
+        writeln!(
+            out,
+            "(no target spans yet — use `stax target lanes` or `stax threads -n 0` to confirm target ingest)"
+        )?;
+        return Ok(());
+    }
+
+    writeln!(
+        out,
+        "{:>10} {:>8} {:>10} {:>10} {:>7}  {:<24} span",
+        "target ms", "count", "avg ms", "max ms", "kind", "lane",
+    )?;
+    let visible = limit_items(rows.len(), limit);
+    for row in rows.iter().take(visible) {
+        writeln!(
+            out,
+            "{:>10.3} {:>8} {:>10.3} {:>10.3} {:>7}  {:<24} {}",
+            row.total_duration_ns as f64 / 1e6,
+            row.count,
+            row.avg_duration_ns() as f64 / 1e6,
+            row.max_duration_ns as f64 / 1e6,
+            target_kind_label(row.target_kind),
+            truncate_label(&row.lane, 24),
+            row.span,
+        )?;
+    }
+    if rows.len() > visible {
+        let hidden = rows.len() - visible;
+        writeln!(
+            out,
+            "…{hidden} more target span{}",
+            if hidden == 1 { "" } else { "s" }
+        )?;
+    }
+    Ok(())
+}
+
+fn limit_items(len: usize, limit: u32) -> usize {
+    if limit == 0 {
+        len
+    } else {
+        len.min(limit as usize)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TargetTopBy {
+    Time,
+    Count,
+    Avg,
+    Max,
+}
+
+impl TargetTopBy {
+    fn parse(value: &str) -> Result<Self, Box<dyn Error>> {
+        match value {
+            "time" => Ok(Self::Time),
+            "count" => Ok(Self::Count),
+            "avg" => Ok(Self::Avg),
+            "max" => Ok(Self::Max),
+            other => Err(format!(
+                "unknown --by value {other:?} (use `time`, `count`, `avg`, or `max`)"
+            )
+            .into()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct TargetTopKey {
+    lane: String,
+    span: String,
+    target_kind: TargetLaneKind,
+}
+
+#[derive(Clone, Debug)]
+struct TargetTopRow {
+    lane: String,
+    span: String,
+    target_kind: TargetLaneKind,
+    count: u64,
+    total_duration_ns: u64,
+    max_duration_ns: u64,
+}
+
+impl TargetTopRow {
+    fn avg_duration_ns(&self) -> u64 {
+        if self.count == 0 {
+            return 0;
+        }
+        self.total_duration_ns / self.count
+    }
+}
+
+fn target_top_rows(update: &TargetSpanListUpdate, by: TargetTopBy) -> Vec<TargetTopRow> {
+    let mut rows: HashMap<TargetTopKey, TargetTopRow> = HashMap::new();
+    for group in &update.groups {
+        let lane = string_at(&update.strings, group.lane_name)
+            .unwrap_or("(unknown target lane)")
+            .to_owned();
+        let span = string_at(&update.strings, group.span_name)
+            .unwrap_or("(unknown target span)")
+            .to_owned();
+        let key = TargetTopKey {
+            lane: lane.clone(),
+            span: span.clone(),
+            target_kind: group.target_kind,
+        };
+        let row = rows.entry(key).or_insert_with(|| TargetTopRow {
+            lane,
+            span,
+            target_kind: group.target_kind,
+            count: 0,
+            total_duration_ns: 0,
+            max_duration_ns: 0,
+        });
+        row.count = row.count.saturating_add(group.count);
+        row.total_duration_ns = row
+            .total_duration_ns
+            .saturating_add(group.total_duration_ns);
+        row.max_duration_ns = row.max_duration_ns.max(group.max_duration_ns);
+    }
+
+    let mut rows: Vec<TargetTopRow> = rows.into_values().collect();
+    rows.sort_by(|a, b| {
+        let primary = match by {
+            TargetTopBy::Time => b.total_duration_ns.cmp(&a.total_duration_ns),
+            TargetTopBy::Count => b.count.cmp(&a.count),
+            TargetTopBy::Avg => b.avg_duration_ns().cmp(&a.avg_duration_ns()),
+            TargetTopBy::Max => b.max_duration_ns.cmp(&a.max_duration_ns),
+        };
+        primary
+            .then_with(|| b.total_duration_ns.cmp(&a.total_duration_ns))
+            .then_with(|| b.count.cmp(&a.count))
+            .then_with(|| a.lane.cmp(&b.lane))
+            .then_with(|| a.span.cmp(&b.span))
+    });
+    rows
+}
+
+fn string_at(strings: &[String], index: Option<u32>) -> Option<&str> {
+    index.and_then(|index| strings.get(index as usize).map(String::as_str))
+}
+
+fn target_kind_label(kind: TargetLaneKind) -> &'static str {
+    match kind {
+        TargetLaneKind::Generic => "target",
+        TargetLaneKind::Metal => "metal",
+    }
 }
 
 fn write_threads<W: Write>(out: &mut W, update: &ThreadsUpdate, limit: u32) -> io::Result<()> {
@@ -2095,9 +2355,9 @@ fn maybe_print_metal_target_hint(threads: Option<&ThreadsUpdate>, saw_metal_disp
     }
     eprintln!(
         "hint: Metal command/dispatch frames are visible, but no cooperating target lane is present. \
-         Link stax-target in the profiled process and report Metal 4 timestamp-counter spans from the dispatch/reporting thread; \
+         Link stax-target in the profiled process, use `stax_target::Lane::metal(...)`, and report Metal 4 timestamp-counter spans from the dispatch/reporting thread; \
          then `stax threads` will show the synthetic lane, `stax top --tid <lane tid>` will show per-kernel durations, \
-         and span origins let `stax flame --tid <cpu tid>` show CPU stack -> GPU lane -> kernel."
+         and span origins let the web target-span details link kernels back to the CPU stack that queued them."
     );
 }
 
@@ -2133,7 +2393,7 @@ fn mentions_metal_cooperation(function_name: Option<&str>, binary: Option<&str>)
     let binary = binary.unwrap_or_default().to_ascii_lowercase();
     let metal_binary =
         binary.contains("metal") || binary.contains("agx") || binary.contains("metalkit");
-    let metal_name = name.contains("metal4")
+    let metal_name = name.contains("mtl4")
         || name.contains("mtlcommandbuffer")
         || name.contains("mtlcommandqueue")
         || name.contains("mtlcomputecommandencoder")
@@ -2157,16 +2417,18 @@ mod tests {
         ARCHIVE_AGGREGATOR_FILE_NAME, ARCHIVE_BINARIES_FILE_NAME, ARCHIVE_BLOBS_DIR_NAME,
         ARCHIVE_EVENTS_FILE_NAME, ARCHIVE_FORMAT_VERSION, ARCHIVE_MANIFEST_FILE_NAME,
         ARCHIVE_SINGLE_FILE_EXTENSION, ARCHIVE_TARGET_INGEST_FILE_NAME, ARCHIVE_V1_FILE_NAME,
-        ARCHIVE_V1_FORMAT_VERSION, SYNTH_TID_BASE, binary_text_blob_member, build_compare_report,
-        empty_view_hint, mentions_metal_cooperation, read_saved_archive, summarize_archive,
-        target_ingest_hints, thread_kind, write_threads,
+        ARCHIVE_V1_FORMAT_VERSION, SYNTH_TID_BASE, TargetTopBy, binary_text_blob_member,
+        build_compare_report, empty_view_hint, mentions_metal_cooperation, read_saved_archive,
+        summarize_archive, target_ingest_hints, target_top_rows, thread_kind, write_target_lanes,
+        write_target_top, write_threads,
     };
     use stax_live_proto::{
         OffCpuBreakdown, SavedAggregator, SavedArchiveBlob, SavedBinaryRegistry,
         SavedEventLogEntry, SavedInterval, SavedIntervalKind, SavedLoadedBinary, SavedPetSample,
         SavedPmuSample, SavedRunArchive, SavedRunArchiveBundle, SavedRunArchiveFiles,
         SavedRunArchiveManifest, SavedRunArchiveProvenance, SavedThread, SavedThreadName,
-        TargetIngestDiagnostics, ThreadInfo, ThreadsUpdate,
+        TargetIngestDiagnostics, TargetLaneKind, TargetSpanGroup, TargetSpanListUpdate, ThreadInfo,
+        ThreadsUpdate,
     };
 
     #[test]
@@ -2176,6 +2438,10 @@ mod tests {
             Some("Metal")
         ));
         assert!(mentions_metal_cooperation(
+            Some("MTL4ComputeCommandEncoder::dispatchThreadgroups"),
+            Some("hx")
+        ));
+        assert!(!mentions_metal_cooperation(
             Some("bee::helix_metal4::encoder::dispatch_kernel"),
             Some("hx")
         ));
@@ -2311,6 +2577,47 @@ mod tests {
     }
 
     #[test]
+    fn target_ingest_hints_explain_metadata_without_spans() {
+        let hints = target_ingest_hints(&TargetIngestDiagnostics {
+            batches: 1,
+            records_received: 1,
+            source_records: 1,
+            ..TargetIngestDiagnostics::default()
+        });
+
+        assert!(hints.iter().any(|hint| hint.contains("metadata records")));
+        assert!(
+            hints
+                .iter()
+                .any(|hint| hint.contains("without shader records"))
+        );
+    }
+
+    #[test]
+    fn target_ingest_hints_explain_partial_source_and_counter_records() {
+        let hints = target_ingest_hints(&TargetIngestDiagnostics {
+            batches: 1,
+            spans_recorded: 1,
+            spans_with_origin: 1,
+            records_received: 2,
+            shader_records: 1,
+            counter_set_records: 1,
+            ..TargetIngestDiagnostics::default()
+        });
+
+        assert!(
+            hints
+                .iter()
+                .any(|hint| hint.contains("without source records"))
+        );
+        assert!(
+            hints
+                .iter()
+                .any(|hint| hint.contains("without counter samples"))
+        );
+    }
+
+    #[test]
     fn target_ingest_hints_explain_unlinked_origins() {
         let hints = target_ingest_hints(&TargetIngestDiagnostics {
             batches: 1,
@@ -2325,7 +2632,7 @@ mod tests {
         assert_eq!(hints.len(), 1);
         assert!(hints[0].contains("2 of 3"));
         assert!(hints[0].contains("queue/submit time"));
-        assert!(hints[0].contains("stax flame --tid <cpu tid>"));
+        assert!(hints[0].contains("web target-span details"));
     }
 
     #[test]
@@ -2384,6 +2691,59 @@ mod tests {
     }
 
     #[test]
+    fn target_lanes_output_only_lists_synthetic_target_lanes() {
+        let update = ThreadsUpdate {
+            threads: vec![
+                thread(10, Some("cpu"), 10_000_000, 0, 10, 0),
+                thread(SYNTH_TID_BASE + 1, Some("GPU tq1s"), 4_000_000, 0, 0, 4),
+                thread(SYNTH_TID_BASE + 2, Some("executor"), 1_000_000, 0, 0, 1),
+            ],
+        };
+        let mut out = Vec::new();
+        write_target_lanes(&mut out, &update, 1).expect("write target lanes table");
+        let out = String::from_utf8(out).expect("utf8 target lanes table");
+
+        assert!(out.contains("GPU tq1s"));
+        assert!(!out.contains("cpu"));
+        assert!(out.contains("…1 more target lane"));
+    }
+
+    #[test]
+    fn target_top_aggregates_same_span_across_origin_groups() {
+        let update = TargetSpanListUpdate {
+            strings: vec![
+                "GPU tq1s".to_owned(),
+                "kernel_a".to_owned(),
+                "kernel_b".to_owned(),
+            ],
+            total_spans: 4,
+            total_duration_ns: 10_000_000,
+            groups: vec![
+                target_group(0, 1, TargetLaneKind::Metal, 1, 4_000_000, 4_000_000),
+                target_group(0, 1, TargetLaneKind::Metal, 2, 3_000_000, 2_000_000),
+                target_group(0, 2, TargetLaneKind::Metal, 1, 3_000_000, 3_000_000),
+            ],
+            entries: Vec::new(),
+        };
+
+        let by_time = target_top_rows(&update, TargetTopBy::Time);
+        assert_eq!(by_time[0].span, "kernel_a");
+        assert_eq!(by_time[0].count, 3);
+        assert_eq!(by_time[0].total_duration_ns, 7_000_000);
+        assert_eq!(by_time[0].max_duration_ns, 4_000_000);
+
+        let by_count = target_top_rows(&update, TargetTopBy::Count);
+        assert_eq!(by_count[0].span, "kernel_a");
+
+        let mut out = Vec::new();
+        write_target_top(&mut out, &update, 1, TargetTopBy::Time).expect("write target top table");
+        let out = String::from_utf8(out).expect("utf8 target top table");
+        assert!(out.contains("kernel_a"));
+        assert!(out.contains("GPU tq1s"));
+        assert!(out.contains("…1 more target span"));
+    }
+
+    #[test]
     fn summarize_archive_counts_target_and_origin_dimensions() {
         let archive = SavedRunArchive {
             format_version: 1,
@@ -2425,6 +2785,7 @@ mod tests {
                             kind: SavedIntervalKind::SyntheticSpan {
                                 stack: vec![10, 20, 30],
                                 origin_tid: Some(7),
+                                lane_kind: TargetLaneKind::Generic,
                             },
                         },
                         SavedInterval {
@@ -2433,6 +2794,7 @@ mod tests {
                             kind: SavedIntervalKind::SyntheticSpan {
                                 stack: vec![10, 20],
                                 origin_tid: Some(7),
+                                lane_kind: TargetLaneKind::Generic,
                             },
                         },
                         SavedInterval {
@@ -2441,6 +2803,7 @@ mod tests {
                             kind: SavedIntervalKind::SyntheticSpan {
                                 stack: vec![10, 20],
                                 origin_tid: None,
+                                lane_kind: TargetLaneKind::Generic,
                             },
                         },
                     ],
@@ -2897,6 +3260,11 @@ mod tests {
             },
             pet_samples,
             target_spans,
+            target_kind: if target_spans > 0 {
+                Some(TargetLaneKind::Generic)
+            } else {
+                None
+            },
         }
     }
 
@@ -2929,6 +3297,7 @@ mod tests {
                     kind: SavedIntervalKind::SyntheticSpan {
                         stack: vec![1, 2],
                         origin_tid: None,
+                        lane_kind: TargetLaneKind::Generic,
                     },
                 },
             },
@@ -2940,6 +3309,31 @@ mod tests {
                 },
             },
         ]
+    }
+
+    fn target_group(
+        lane_name: u32,
+        span_name: u32,
+        target_kind: TargetLaneKind,
+        count: u64,
+        total_duration_ns: u64,
+        max_duration_ns: u64,
+    ) -> TargetSpanGroup {
+        TargetSpanGroup {
+            tid: SYNTH_TID_BASE,
+            lane_name: Some(lane_name),
+            target_kind,
+            span_name: Some(span_name),
+            origin_tid: None,
+            origin_linked: false,
+            origin_address: None,
+            origin_function_name: None,
+            origin_binary: None,
+            count,
+            total_duration_ns,
+            max_duration_ns,
+            last_start_ns: 0,
+        }
     }
 
     fn test_saved_binary() -> SavedLoadedBinary {
@@ -3078,6 +3472,18 @@ fn print_diagnostics(snapshot: &DiagnosticsSnapshot) {
         target.spans_dropped_bad_duration,
         target.total_duration_ns as f64 / 1e6,
     );
+    if target.records_received > 0 {
+        println!(
+            "  records {}  dispatches {}  sources {}  shaders {}  attachments {}  counter sets {}  counter samples {}",
+            target.records_received,
+            target.dispatch_records,
+            target.source_records,
+            target.shader_records,
+            target.attachment_records,
+            target.counter_set_records,
+            target.counter_sample_records,
+        );
+    }
     if target.spans_with_origin > 0 {
         println!(
             "  origins {} linked / {} unlinked",
@@ -3109,6 +3515,18 @@ fn print_diagnostics(snapshot: &DiagnosticsSnapshot) {
                     lane.spans_origin_no_thread,
                     lane.spans_origin_no_stack,
                     lane.spans_origin_too_far,
+                );
+            }
+            if lane.records_received > 0 {
+                println!(
+                    "    records for {}: dispatches {}  sources {}  shaders {}  attachments {}  counter sets {}  counter samples {}",
+                    lane.name,
+                    lane.dispatch_records,
+                    lane.source_records,
+                    lane.shader_records,
+                    lane.attachment_records,
+                    lane.counter_set_records,
+                    lane.counter_sample_records,
                 );
             }
         }
@@ -3253,9 +3671,34 @@ fn target_ingest_hints(target: &TargetIngestDiagnostics) -> Vec<String> {
         ));
     }
 
+    if target.records_received > 0 && target.spans_recorded == 0 {
+        hints.push(
+            "typed target metadata records are arriving, but no executable target spans have landed yet; verify dispatch timestamp reporting still calls `Lane::report` or `Lane::report_batch`"
+                .to_owned(),
+        );
+    }
+    if target.shader_records > 0 && target.source_records == 0 {
+        hints.push(
+            "shader records are arriving without source records; source panes need source registration or a source manifest from the target build"
+                .to_owned(),
+        );
+    }
+    if target.source_records > 0 && target.shader_records == 0 {
+        hints.push(
+            "source records are arriving without shader records; selected target spans need shader ids to jump to source"
+                .to_owned(),
+        );
+    }
+    if target.counter_set_records > 0 && target.counter_sample_records == 0 {
+        hints.push(
+            "counter definitions are arriving without counter samples; counters are described, but the target has not reported per-dispatch samples"
+                .to_owned(),
+        );
+    }
+
     if target.spans_recorded > 0 && target.spans_with_origin == 0 {
         hints.push(
-            "spans have no origins; synthetic lane views work, but CPU stack -> lane attribution needs `stax_target::current_span_origin()` captured at queue/dispatch time"
+            "spans have no origins; synthetic lane views work, but CPU dispatch provenance needs `stax_target::current_span_origin()` captured at queue/dispatch time"
                 .to_owned(),
         );
     } else if target.spans_unlinked_origin > 0 {
@@ -3297,7 +3740,7 @@ fn target_ingest_hints(target: &TargetIngestDiagnostics) -> Vec<String> {
             .saturating_add(target.spans_origin_too_far);
         if explained_unlinked < target.spans_unlinked_origin {
             hints.push(format!(
-                "{} of {} origin-carrying span{} did not link to a sampled CPU stack; capture origins on the dispatching OS thread immediately at queue/submit time, then inspect with `stax top --tid <cpu tid> --sort total` or `stax flame --tid <cpu tid>`",
+                "{} of {} origin-carrying span{} did not link to a sampled CPU stack; capture origins on the dispatching OS thread immediately at queue/submit time, then inspect the web target-span details or filter target work with `stax top --tid <cpu tid>` / `stax flame --tid <cpu tid>`",
                 target.spans_unlinked_origin,
                 target.spans_with_origin,
                 plural(target.spans_with_origin),

@@ -28,7 +28,7 @@ struct ExecutorWork {
 
 fn main() {
     let executor_lane = stax_target::Lane::new("corpus executor");
-    let gpu_lane = stax_target::Lane::new("corpus gpu");
+    let gpu_lane = stax_target::Lane::metal("corpus gpu");
     let bad_lane = stax_target::Lane::new("corpus bad origins");
 
     let (tx, rx) = mpsc::channel::<ExecutorWork>();

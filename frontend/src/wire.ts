@@ -14,6 +14,7 @@ import type {
   FlamegraphUpdate as WireFlamegraphUpdate,
   NeighborsUpdate as WireNeighborsUpdate,
   OffCpuBreakdown as WireOffCpuBreakdown,
+  TargetLaneKind,
 } from "./generated/profiler.generated.ts";
 
 /// Re-export so non-wire code paths can describe their own breakdowns.
@@ -38,6 +39,7 @@ export interface FlameView {
   binary: string | null;
   is_main: boolean;
   language: string;
+  target_kind: TargetLaneKind | null;
   cycles: bigint;
   instructions: bigint;
   l1d_misses: bigint;
@@ -83,6 +85,7 @@ function hydrateNode(node: WireFlameNode, strings: string[]): FlameView {
     binary: lookup(strings, node.binary),
     is_main: node.is_main,
     language: strings[node.language],
+    target_kind: node.target_kind,
     cycles: node.cycles,
     instructions: node.instructions,
     l1d_misses: node.l1d_misses,
