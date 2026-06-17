@@ -118,7 +118,11 @@ async fn run_attach(
         "recording lifecycle starting"
     );
 
-    let sink = LiveOnlySink::new(Some(Box::new(ServerLiveSink {
+    // macOS moves `sink` by value into `drive_session_with_hooks`; Linux borrows it
+    // `&mut` in `record`/`record_via_daemon`. Declare `mut` for Linux; allow the
+    // unused-mut on macOS where it's moved.
+    #[allow(unused_mut)]
+    let mut sink = LiveOnlySink::new(Some(Box::new(ServerLiveSink {
         server: server.clone(),
         run_id,
     })));
