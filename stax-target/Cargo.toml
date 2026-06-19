@@ -9,6 +9,6 @@ description = "Target-side latch for stax: report execution-lane spans (GPU kern
 [dependencies]
 libc = "0.2"
 stax-live-proto = { path = "../stax-live-proto" }
-tokio = { version = "1", features = ["rt", "sync", "time"] }
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 tracing = "0.1"
 vox = "0.10.0-rc.1"
