@@ -9,4 +9,4 @@ description = "Shared Vox runtime observer logging for stax components."
 [dependencies]
 tokio = { version = "1", features = ["rt", "signal"] }
 tracing = "0.1"
-vox = "0.9.0-rc.0"
+vox = "0.10.0-rc.0"

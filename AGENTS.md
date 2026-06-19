@@ -307,11 +307,12 @@ just target-span-check       # all focused target-span checks above
 ```
 
 GitHub Actions runs the same focused target-span verifier in
-`.github/workflows/target-spans.yml`. That workflow checks out `bearcove/vox`
-as a sibling of stax because this workspace patches the vox crates to
-`../vox/rust/*`. The same workflow also runs live archive/browser smokes on
-the `bearcove-ubuntu-24.04` runner for normal push/PR checks; manual
-`workflow_dispatch` keeps the `live_smokes` switch for explicit reruns.
+`.github/workflows/target-spans.yml`. Vox now lives in the Facet monorepo, so
+local patches should point at `/Users/amos/oss/facet/vox/rust/*` rather than a
+retired sibling checkout. The same workflow also runs live
+archive/browser smokes on the `bearcove-ubuntu-24.04` runner for normal push/PR
+checks; manual `workflow_dispatch` keeps the `live_smokes` switch for explicit
+reruns.
 
 If you need to abort:
 

@@ -7,12 +7,12 @@ export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: {
-      "@bearcove/phon-engine": workspaceSource("../../phon/typescript/packages/phon-engine/src/index.ts"),
-      "@bearcove/phon-schema": workspaceSource("../../phon/typescript/packages/phon-schema/src/index.ts"),
-      "@bearcove/vox-core": workspaceSource("../../vox/typescript/packages/vox-core/src/index.ts"),
-      "@bearcove/vox-tcp": workspaceSource("../../vox/typescript/packages/vox-tcp/src/index.ts"),
-      "@bearcove/vox-wire": workspaceSource("../../vox/typescript/packages/vox-wire/src/index.ts"),
-      "@bearcove/vox-ws": workspaceSource("../../vox/typescript/packages/vox-ws/src/index.ts"),
+      "@bearcove/phon-engine": workspaceSource("../../oss/facet/phon/typescript/packages/phon-engine/src/index.ts"),
+      "@bearcove/phon-schema": workspaceSource("../../oss/facet/phon/typescript/packages/phon-schema/src/index.ts"),
+      "@bearcove/vox-core": workspaceSource("../../oss/facet/vox/typescript/packages/vox-core/src/index.ts"),
+      "@bearcove/vox-tcp": workspaceSource("../../oss/facet/vox/typescript/packages/vox-tcp/src/index.ts"),
+      "@bearcove/vox-wire": workspaceSource("../../oss/facet/vox/typescript/packages/vox-wire/src/index.ts"),
+      "@bearcove/vox-ws": workspaceSource("../../oss/facet/vox/typescript/packages/vox-ws/src/index.ts"),
     },
   },
   server: {

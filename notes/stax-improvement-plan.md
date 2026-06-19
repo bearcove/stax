@@ -724,8 +724,8 @@ Tasks:
   - done: `just web-target-smoke` for checkout-local browser verification of
     the run selector, target lanes, target display mode, and target-span
     details
-  - done: GitHub Actions focused target-span workflow, with `bearcove/vox`
-    checked out as the required sibling
+  - done: GitHub Actions focused target-span workflow, with Vox resolved from
+    the Facet monorepo checkout
   - done: live archive/browser smokes run on the `bearcove-ubuntu-24.04`
     runner for normal push/PR checks, with manual `workflow_dispatch`
     retained for explicit reruns

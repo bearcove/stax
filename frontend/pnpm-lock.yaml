@@ -5,26 +5,26 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  '@bearcove/phon-engine': link:/Users/amos/phon/typescript/packages/phon-engine
-  '@bearcove/phon-schema': link:/Users/amos/phon/typescript/packages/phon-schema
-  '@bearcove/vox-core': link:/Users/amos/vox/typescript/packages/vox-core
-  '@bearcove/vox-tcp': link:/Users/amos/vox/typescript/packages/vox-tcp
-  '@bearcove/vox-wire': link:/Users/amos/vox/typescript/packages/vox-wire
-  '@bearcove/vox-ws': link:/Users/amos/vox/typescript/packages/vox-ws
+  '@bearcove/phon-engine': link:/Users/amos/oss/facet/phon/typescript/packages/phon-engine
+  '@bearcove/phon-schema': link:/Users/amos/oss/facet/phon/typescript/packages/phon-schema
+  '@bearcove/vox-core': link:/Users/amos/oss/facet/vox/typescript/packages/vox-core
+  '@bearcove/vox-tcp': link:/Users/amos/oss/facet/vox/typescript/packages/vox-tcp
+  '@bearcove/vox-wire': link:/Users/amos/oss/facet/vox/typescript/packages/vox-wire
+  '@bearcove/vox-ws': link:/Users/amos/oss/facet/vox/typescript/packages/vox-ws
 
 importers:
 
   .:
     dependencies:
       '@bearcove/phon-schema':
-        specifier: link:/Users/amos/phon/typescript/packages/phon-schema
-        version: link:../../phon/typescript/packages/phon-schema
+        specifier: link:/Users/amos/oss/facet/phon/typescript/packages/phon-schema
+        version: link:../../oss/facet/phon/typescript/packages/phon-schema
       '@bearcove/vox-core':
-        specifier: link:/Users/amos/vox/typescript/packages/vox-core
-        version: link:../../vox/typescript/packages/vox-core
+        specifier: link:/Users/amos/oss/facet/vox/typescript/packages/vox-core
+        version: link:../../oss/facet/vox/typescript/packages/vox-core
       '@bearcove/vox-ws':
-        specifier: link:/Users/amos/vox/typescript/packages/vox-ws
-        version: link:../../vox/typescript/packages/vox-ws
+        specifier: link:/Users/amos/oss/facet/vox/typescript/packages/vox-ws
+        version: link:../../oss/facet/vox/typescript/packages/vox-ws
       react:
         specifier: ^18.3.1
         version: 18.3.1

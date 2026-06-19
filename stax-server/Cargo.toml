@@ -23,7 +23,7 @@ libc = "0.2"
 
 stax-core = { path = "..", default-features = false }
 
-vox = { version = "0.9.0-rc.0", features = ["transport-websocket"] }
+vox = { version = "0.10.0-rc.0", features = ["transport-websocket"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 stax-mac-shared-cache = { version = "0.1", path = "../stax-mac-shared-cache" }

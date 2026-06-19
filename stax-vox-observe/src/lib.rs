@@ -1,7 +1,8 @@
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 const SLOW_CHANNEL_SEND: Duration = Duration::from_millis(10);
 const SLOW_REQUEST: Duration = Duration::from_millis(10);
@@ -208,48 +209,48 @@ fn format_debug_snapshot(snapshot: &vox::VoxDebugSnapshot) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "# Vox Debug Snapshot\n\n- connections: {}",
-        snapshot.connections.len()
+        "# Vox Debug Snapshot\n\n- lanes: {}",
+        snapshot.lanes.len()
     );
 
-    for connection in &snapshot.connections {
+    for lane in &snapshot.lanes {
         let _ = writeln!(
             out,
-            "\n## Connection {:?}\n\n- state: {:?}\n- driver: {:?}",
-            connection.connection_id, connection.state, connection.driver_task_status
+            "\n## Lane {:?}\n\n- state: {:?}\n- driver: {:?}",
+            lane.lane_id, lane.state, lane.driver_task_status
         );
         let _ = writeln!(
             out,
             "- endpoint: {}\n- surface: {}\n- component: {}\n- close_reason: {}",
-            display_opt_debug(&connection.endpoint),
-            display_opt_debug(&connection.surface),
-            display_opt_debug(&connection.component),
-            display_opt_debug(&connection.close_reason)
+            display_opt_debug(&lane.endpoint),
+            display_opt_debug(&lane.surface),
+            display_opt_debug(&lane.component),
+            display_opt_debug(&lane.close_reason)
         );
         let _ = writeln!(
             out,
             "- queues: outbound={}/{} · local_control={}/{}",
-            display_opt_usize(connection.outbound_queue_depth),
-            display_opt_usize(connection.outbound_queue_capacity),
-            display_opt_usize(connection.local_control_queue_depth),
-            display_opt_usize(connection.local_control_queue_capacity)
+            display_opt_usize(lane.outbound_queue_depth),
+            display_opt_usize(lane.outbound_queue_capacity),
+            display_opt_usize(lane.local_control_queue_depth),
+            display_opt_usize(lane.local_control_queue_capacity)
         );
         let _ = writeln!(
             out,
             "- last: inbound={} · outbound={} · progress={}",
-            instant_age(connection.last_inbound_message_at, now),
-            instant_age(connection.last_outbound_message_at, now),
-            instant_age(connection.last_progress_at, now)
+            instant_age(lane.last_inbound_message_at, now),
+            instant_age(lane.last_outbound_message_at, now),
+            instant_age(lane.last_progress_at, now)
         );
 
-        if !connection.requests.is_empty() {
+        if !lane.requests.is_empty() {
             let _ = writeln!(
                 out,
                 "\n### Requests\n\n- outstanding: {}\n- tracked: {}",
-                connection.outstanding_requests,
-                connection.requests.len(),
+                lane.outstanding_requests,
+                lane.requests.len(),
             );
-            for request in &connection.requests {
+            for request in &lane.requests {
                 let _ = writeln!(
                     out,
                     "\n#### {:?}\n\n- state: {:?}\n- age: {}\n- method: {}::{}\n- method_id: {:?}\n- response_sender_blocked: {}\n- associated_channels: {}",
@@ -265,17 +266,17 @@ fn format_debug_snapshot(snapshot: &vox::VoxDebugSnapshot) -> String {
             }
         }
 
-        if !connection.open_channels.is_empty() {
+        if !lane.open_channels.is_empty() {
             let _ = writeln!(
                 out,
                 "\n### Channels\n\n- open: {}",
-                connection.open_channels.len()
+                lane.open_channels.len()
             );
-            for channel in &connection.open_channels {
+            for channel in &lane.open_channels {
                 let _ = writeln!(
                     out,
                     "\n#### {:?}/{:?} · {:?}\n\n{}",
-                    channel.connection_id,
+                    channel.lane_id,
                     channel.channel_id,
                     channel.direction,
                     format_channel_debug_block(channel.debug)
@@ -547,7 +548,7 @@ impl vox::VoxObserver for VoxObserverLogger {
                     component = self.component,
                     surface = self.surface,
                     pid = ?self.pid,
-                    connection_id = ?channel.connection_id,
+                    lane_id = ?channel.lane_id,
                     channel_id = ?channel.channel_id,
                     channel_debug = ?channel.debug,
                     direction = ?direction,
@@ -560,7 +561,7 @@ impl vox::VoxObserver for VoxObserverLogger {
                     component = self.component,
                     surface = self.surface,
                     pid = ?self.pid,
-                    connection_id = ?channel.connection_id,
+                    lane_id = ?channel.lane_id,
                     channel_id = ?channel.channel_id,
                     channel_debug = ?channel.debug,
                     "vox channel waiting for credit"
@@ -576,7 +577,7 @@ impl vox::VoxObserver for VoxObserverLogger {
                         component = self.component,
                         surface = self.surface,
                         pid = ?self.pid,
-                        connection_id = ?channel.connection_id,
+                        lane_id = ?channel.lane_id,
                         channel_id = ?channel.channel_id,
                         channel_debug = ?channel.debug,
                         outcome = ?outcome,
@@ -588,7 +589,7 @@ impl vox::VoxObserver for VoxObserverLogger {
                         component = self.component,
                         surface = self.surface,
                         pid = ?self.pid,
-                        connection_id = ?channel.connection_id,
+                        lane_id = ?channel.lane_id,
                         channel_id = ?channel.channel_id,
                         channel_debug = ?channel.debug,
                         outcome = ?outcome,
@@ -603,7 +604,7 @@ impl vox::VoxObserver for VoxObserverLogger {
                         component = self.component,
                         surface = self.surface,
                         pid = ?self.pid,
-                        connection_id = ?channel.connection_id,
+                        lane_id = ?channel.lane_id,
                         channel_id = ?channel.channel_id,
                         channel_debug = ?channel.debug,
                         outcome = ?outcome,
@@ -616,7 +617,7 @@ impl vox::VoxObserver for VoxObserverLogger {
                     component = self.component,
                     surface = self.surface,
                     pid = ?self.pid,
-                    connection_id = ?channel.connection_id,
+                    lane_id = ?channel.lane_id,
                     channel_id = ?channel.channel_id,
                     channel_debug = ?channel.debug,
                     reason = ?reason,
@@ -628,7 +629,7 @@ impl vox::VoxObserver for VoxObserverLogger {
                     component = self.component,
                     surface = self.surface,
                     pid = ?self.pid,
-                    connection_id = ?channel.connection_id,
+                    lane_id = ?channel.lane_id,
                     channel_id = ?channel.channel_id,
                     channel_debug = ?channel.debug,
                     reason = ?reason,
@@ -640,7 +641,7 @@ impl vox::VoxObserver for VoxObserverLogger {
                     component = self.component,
                     surface = self.surface,
                     pid = ?self.pid,
-                    connection_id = ?channel.connection_id,
+                    lane_id = ?channel.lane_id,
                     channel_id = ?channel.channel_id,
                     channel_debug = ?channel.debug,
                     "vox channel send started"
@@ -651,7 +652,7 @@ impl vox::VoxObserver for VoxObserverLogger {
                     component = self.component,
                     surface = self.surface,
                     pid = ?self.pid,
-                    connection_id = ?channel.connection_id,
+                    lane_id = ?channel.lane_id,
                     channel_id = ?channel.channel_id,
                     channel_debug = ?channel.debug,
                     amount,
@@ -663,7 +664,7 @@ impl vox::VoxObserver for VoxObserverLogger {
                     component = self.component,
                     surface = self.surface,
                     pid = ?self.pid,
-                    connection_id = ?channel.connection_id,
+                    lane_id = ?channel.lane_id,
                     channel_id = ?channel.channel_id,
                     channel_debug = ?channel.debug,
                     "vox channel item received"
@@ -674,7 +675,7 @@ impl vox::VoxObserver for VoxObserverLogger {
                     component = self.component,
                     surface = self.surface,
                     pid = ?self.pid,
-                    connection_id = ?channel.connection_id,
+                    lane_id = ?channel.lane_id,
                     channel_id = ?channel.channel_id,
                     channel_debug = ?channel.debug,
                     "vox channel item consumed"
@@ -685,30 +686,27 @@ impl vox::VoxObserver for VoxObserverLogger {
 
     fn driver_event(&self, event: vox::DriverEvent) {
         match event {
-            vox::DriverEvent::ConnectionOpened { connection_id } => {
+            vox::DriverEvent::LaneOpened { lane_id } => {
                 tracing::info!(
                     component = self.component,
                     surface = self.surface,
                     pid = ?self.pid,
-                    connection_id = ?connection_id,
-                    "vox connection opened"
+                    lane_id = ?lane_id,
+                    "vox lane opened"
                 );
             }
-            vox::DriverEvent::ConnectionClosed {
-                connection_id,
-                reason,
-            } => {
+            vox::DriverEvent::LaneClosed { lane_id, reason } => {
                 tracing::info!(
                     component = self.component,
                     surface = self.surface,
                     pid = ?self.pid,
-                    connection_id = ?connection_id,
+                    lane_id = ?lane_id,
                     reason = ?reason,
-                    "vox connection closed"
+                    "vox lane closed"
                 );
             }
             vox::DriverEvent::RequestFinished {
-                connection_id,
+                lane_id,
                 request_id,
                 outcome,
                 elapsed,
@@ -718,7 +716,7 @@ impl vox::VoxObserver for VoxObserverLogger {
                         component = self.component,
                         surface = self.surface,
                         pid = ?self.pid,
-                        connection_id = ?connection_id,
+                        lane_id = ?lane_id,
                         request_id = ?request_id,
                         outcome = ?outcome,
                         elapsed = ?elapsed,
@@ -729,7 +727,7 @@ impl vox::VoxObserver for VoxObserverLogger {
                         component = self.component,
                         surface = self.surface,
                         pid = ?self.pid,
-                        connection_id = ?connection_id,
+                        lane_id = ?lane_id,
                         request_id = ?request_id,
                         outcome = ?outcome,
                         elapsed = ?elapsed,
@@ -737,65 +735,56 @@ impl vox::VoxObserver for VoxObserverLogger {
                     );
                 }
             }
-            vox::DriverEvent::OutboundQueueFull { connection_id } => {
+            vox::DriverEvent::OutboundQueueFull { lane_id } => {
                 tracing::warn!(
                     component = self.component,
                     surface = self.surface,
                     pid = ?self.pid,
-                    connection_id = ?connection_id,
+                    lane_id = ?lane_id,
                     "vox outbound queue full"
                 );
             }
-            vox::DriverEvent::OutboundQueueClosed { connection_id } => {
+            vox::DriverEvent::OutboundQueueClosed { lane_id } => {
                 tracing::warn!(
                     component = self.component,
                     surface = self.surface,
                     pid = ?self.pid,
-                    connection_id = ?connection_id,
+                    lane_id = ?lane_id,
                     "vox outbound queue closed"
                 );
             }
-            vox::DriverEvent::DecodeError {
-                connection_id,
-                kind,
-            } => {
+            vox::DriverEvent::DecodeError { lane_id, kind } => {
                 tracing::warn!(
                     component = self.component,
                     surface = self.surface,
                     pid = ?self.pid,
-                    connection_id = ?connection_id,
+                    lane_id = ?lane_id,
                     kind = ?kind,
                     "vox decode error"
                 );
             }
-            vox::DriverEvent::EncodeError {
-                connection_id,
-                kind,
-            } => {
+            vox::DriverEvent::EncodeError { lane_id, kind } => {
                 tracing::warn!(
                     component = self.component,
                     surface = self.surface,
                     pid = ?self.pid,
-                    connection_id = ?connection_id,
+                    lane_id = ?lane_id,
                     kind = ?kind,
                     "vox encode error"
                 );
             }
-            vox::DriverEvent::ProtocolError {
-                connection_id,
-                kind,
-            } => {
+            vox::DriverEvent::ProtocolError { lane_id, kind } => {
                 tracing::warn!(
                     component = self.component,
                     surface = self.surface,
                     pid = ?self.pid,
-                    connection_id = ?connection_id,
+                    lane_id = ?lane_id,
                     kind = ?kind,
                     "vox protocol error"
                 );
             }
             vox::DriverEvent::RequestStarted {
-                connection_id,
+                lane_id,
                 request_id,
                 method_id,
             } => {
@@ -803,34 +792,28 @@ impl vox::VoxObserver for VoxObserverLogger {
                     component = self.component,
                     surface = self.surface,
                     pid = ?self.pid,
-                    connection_id = ?connection_id,
+                    lane_id = ?lane_id,
                     request_id = ?request_id,
                     method_id = ?method_id,
                     "vox request started"
                 );
             }
-            vox::DriverEvent::FrameRead {
-                connection_id,
-                bytes,
-            } => {
+            vox::DriverEvent::FrameRead { lane_id, bytes } => {
                 tracing::trace!(
                     component = self.component,
                     surface = self.surface,
                     pid = ?self.pid,
-                    connection_id = ?connection_id,
+                    lane_id = ?lane_id,
                     bytes,
                     "vox frame read"
                 );
             }
-            vox::DriverEvent::FrameWritten {
-                connection_id,
-                bytes,
-            } => {
+            vox::DriverEvent::FrameWritten { lane_id, bytes } => {
                 tracing::trace!(
                     component = self.component,
                     surface = self.surface,
                     pid = ?self.pid,
-                    connection_id = ?connection_id,
+                    lane_id = ?lane_id,
                     bytes,
                     "vox frame written"
                 );

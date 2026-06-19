@@ -8,7 +8,7 @@ description = "Schema for the staxd RPC. Tiny crate consumed by both the runtime
 
 [dependencies]
 facet = { version = "0.50.0-rc.0", features = ["camino", "reflect"] }
-vox = { version = "0.9.0-rc.0", default-features = false, features = ["runtime"] }
+vox = { version = "0.10.0-rc.0", default-features = false, features = ["runtime"] }
 
 # macOS streams raw KdBuf records, so the wire schema embeds the xnu
 # kd_buf representation. Linux is a pure fd broker (vox::Fd only) and
