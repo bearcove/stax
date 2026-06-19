@@ -11,8 +11,8 @@
 //! engaged, depths should jump for any image that lacks frame
 //! pointers (libc, OpenSSL, Rust release builds, …).
 
-#![cfg(target_os = "linux")]
-
+#[cfg(target_os = "linux")]
+mod linux {
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
@@ -65,7 +65,7 @@ fn run_once(prog: &str, dwarf_unwind: bool, secs: u64) -> eyre::Result<DepthSums
     Ok(sink)
 }
 
-fn main() -> eyre::Result<()> {
+pub(super) fn main() -> eyre::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -120,3 +120,12 @@ fn main() -> eyre::Result<()> {
     }
     Ok(())
 }
+}
+
+#[cfg(target_os = "linux")]
+fn main() -> eyre::Result<()> {
+    linux::main()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn main() {}

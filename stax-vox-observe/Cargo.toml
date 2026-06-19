@@ -2,11 +2,11 @@
 name = "stax-vox-observe"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.91"
+rust-version = "1.92"
 license = "MIT OR Apache-2.0"
 description = "Shared Vox runtime observer logging for stax components."
 
 [dependencies]
 tokio = { version = "1", features = ["rt", "signal"] }
 tracing = "0.1"
-vox = "0.10.0-rc.0"
+vox = "0.10.0-rc.1"

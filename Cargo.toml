@@ -2,20 +2,20 @@
 name = "stax-core"
 version = "0.1.1"
 edition = "2024"
-rust-version = "1.91"
+rust-version = "1.92"
 
 [dependencies]
 libc = "0.2"
 log = "0.4"
 tracing = "0.1"
-facet = { version = "0.50.0-rc.0" }
-figue = { version = "5.0.0-rc.0" }
+facet = { version = "0.50.0-rc.1" }
+figue = { version = "5.0.0-rc.1" }
 eyre = "0.6"
 async-trait = "0.1"
 futures = { version = "0.3", default-features = false, features = ["executor"] }
 stax-live-proto = { path = "stax-live-proto" }
 stax-vox-observe = { path = "stax-vox-observe" }
-vox = "0.10.0-rc.0"
+vox = "0.10.0-rc.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 stax-mac-capture = { version = "0.1", path = "stax-mac-capture" }
@@ -55,25 +55,3 @@ members = [
   "staxd",
   "staxd-client",
 ]
-
-[patch.crates-io]
-facet = { path = "../oss/facet/facet" }
-facet-core = { path = "../oss/facet/facet-core" }
-facet-macro-parse = { path = "../oss/facet/facet-macro-parse" }
-facet-macro-types = { path = "../oss/facet/facet-macro-types" }
-facet-macros = { path = "../oss/facet/facet-macros" }
-facet-macros-impl = { path = "../oss/facet/facet-macros-impl" }
-facet-path = { path = "../oss/facet/facet-path" }
-facet-reflect = { path = "../oss/facet/facet-reflect" }
-vox = { path = "../oss/facet/vox/rust/vox" }
-vox-codegen = { path = "../oss/facet/vox/rust/vox-codegen" }
-vox-core = { path = "../oss/facet/vox/rust/vox-core" }
-vox-fdpass = { path = "../oss/facet/vox/rust/vox-fdpass" }
-vox-macros-core = { path = "../oss/facet/vox/rust/vox-macros-core" }
-vox-macros-parse = { path = "../oss/facet/vox/rust/vox-macros-parse" }
-vox-phon = { path = "../oss/facet/vox/rust/vox-phon" }
-vox-schema = { path = "../oss/facet/vox/rust/vox-schema" }
-vox-service-macros = { path = "../oss/facet/vox/rust/vox-macros" }
-vox-stream = { path = "../oss/facet/vox/rust/vox-stream" }
-vox-types = { path = "../oss/facet/vox/rust/vox-types" }
-vox-websocket = { path = "../oss/facet/vox/rust/vox-websocket" }

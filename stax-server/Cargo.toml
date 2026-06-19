@@ -2,7 +2,7 @@
 name = "stax-server"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.91"
+rust-version = "1.92"
 license = "MIT OR Apache-2.0"
 description = "Unprivileged long-running daemon: hosts the run registry, the live aggregator, the web UI, and the agent-facing RunControl service."
 
@@ -16,14 +16,14 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }
 parking_lot = "0.12"
 async-trait = "0.1"
-facet-json = "0.50.0-rc.0"
+facet-json = "0.50.0-rc.1"
 
 eyre = "0.6"
 libc = "0.2"
 
 stax-core = { path = "..", default-features = false }
 
-vox = { version = "0.10.0-rc.0", features = ["transport-websocket"] }
+vox = { version = "0.10.0-rc.1", features = ["transport-websocket"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 stax-mac-shared-cache = { version = "0.1", path = "../stax-mac-shared-cache" }

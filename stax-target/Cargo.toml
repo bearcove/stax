@@ -2,7 +2,7 @@
 name = "stax-target"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.91"
+rust-version = "1.92"
 license = "MIT OR Apache-2.0"
 description = "Target-side latch for stax: report execution-lane spans (GPU kernels, accelerators, executors) into a live stax recording."
 
@@ -11,4 +11,4 @@ libc = "0.2"
 stax-live-proto = { path = "../stax-live-proto" }
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 tracing = "0.1"
-vox = "0.10.0-rc.0"
+vox = "0.10.0-rc.1"

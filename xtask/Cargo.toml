@@ -2,11 +2,11 @@
 name = "xtask"
 version = "0.0.0"
 edition = "2024"
-rust-version = "1.91"
+rust-version = "1.92"
 publish = false
 description = "Dev-only entrypoints (cargo xtask install, ...)."
 
 [dependencies]
 stax-live-proto = { path = "../stax-live-proto" }
-vox-codegen = "0.10.0-rc.0"
+vox-codegen = "0.10.0-rc.1"
 libc = "0.2"

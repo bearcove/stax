@@ -2,12 +2,12 @@
 name = "stax-live-proto"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.91"
+rust-version = "1.92"
 license = "MIT OR Apache-2.0"
 description = "Schema for the stax live RPC service. Lightweight crate consumed by both the runtime (stax-live) and the codegen (xtask)."
 
 [dependencies]
-facet = { version = "0.50.0-rc.0", features = ["camino", "reflect"] }
-vox = { version = "0.10.0-rc.0", default-features = false, features = [
+facet = { version = "0.50.0-rc.1", features = ["camino", "reflect"] }
+vox = { version = "0.10.0-rc.1", default-features = false, features = [
   "runtime",
 ] }

@@ -2,7 +2,7 @@
 name = "stax-target-images"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.91"
+rust-version = "1.92"
 license = "MIT OR Apache-2.0"
 description = "Walk a target Mach task's loaded images via dyld_all_image_infos. Reads the target's dyld image registry through mach_vm_read and parses each loaded Mach-O to surface __unwind_info / __compact_unwind / __eh_frame / __TEXT bytes — the inputs framehop needs to walk user stacks accurately on Apple Silicon."
 

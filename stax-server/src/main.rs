@@ -107,7 +107,7 @@ async fn main() -> eyre::Result<()> {
 
 fn build_factory(server: ServerState) -> impl vox::LaneAcceptor + 'static {
     vox::lane_acceptor_fn(
-        move |request: &vox::LaneRequest, lane: vox::PendingLane| -> Result<(), vox::Metadata> {
+        move |request: &vox::LaneRequest, lane: vox::PendingLane| -> Result<(), vox::LaneRejection> {
             match request.service() {
                 "RunControl" => {
                     lane.handle_with(RunControlDispatcher::new(server.clone()));
@@ -125,7 +125,7 @@ fn build_factory(server: ServerState) -> impl vox::LaneAcceptor + 'static {
                 }
                 other => {
                     tracing::warn!("stax-server: rejecting unknown service {other:?}");
-                    Err(vox::Metadata::default())
+                    Err(vox::LaneRejection::new(vox::LaneRejectReason::UnknownService))
                 }
             }
         },
@@ -163,7 +163,7 @@ fn spawn_session_local(server: ServerState, link: vox::transport::local::LocalLi
                 ping_interval: std::time::Duration::from_secs(5),
                 pong_timeout: std::time::Duration::from_secs(30),
             })
-            .on_connection(factory)
+            .on_lane(factory)
             .establish_connection()
             .await;
         match result {
@@ -182,7 +182,7 @@ fn spawn_session_ws(server: ServerState, link: <vox::WsListener as vox::VoxListe
         let result = vox::acceptor_on(link)
             .channel_capacity(STAX_SERVER_CHANNEL_CAPACITY)
             .observer(observer)
-            .on_connection(factory)
+            .on_lane(factory)
             .establish_connection()
             .await;
         match result {

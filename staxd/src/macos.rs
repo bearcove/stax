@@ -103,7 +103,7 @@ pub async fn main() -> Result<()> {
                         ping_interval: Duration::from_secs(5),
                         pong_timeout: Duration::from_secs(30),
                     })
-                    .on_connection(dispatcher)
+                    .on_lane(dispatcher)
                     .establish_connection()
                     .await;
                 match result {

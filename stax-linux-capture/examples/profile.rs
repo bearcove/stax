@@ -8,6 +8,8 @@
 //!
 //!   cargo run -p stax-linux-capture --example profile
 
+#[cfg(target_os = "linux")]
+mod linux {
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -102,7 +104,7 @@ impl SampleSink for Collector {
     }
 }
 
-fn main() {
+pub(super) fn main() {
     tracing_subscriber::fmt()
         .with_env_filter("stax_linux_capture=info")
         .without_time()
@@ -178,3 +180,12 @@ fn main() {
     assert!(summary.binaries > 0, "no images — MMAP2/ELF path broken");
     println!("\nOK: capture + symbolization spine works on Linux.");
 }
+}
+
+#[cfg(target_os = "linux")]
+fn main() {
+    linux::main()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn main() {}

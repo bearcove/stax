@@ -9,6 +9,8 @@
 //!   cargo run -p stax-linux-capture --example flamegraph
 //!   # -> /tmp/stax-linux-flame.svg  (+ .folded)
 
+#[cfg(target_os = "linux")]
+mod linux {
 use std::collections::HashMap;
 use std::fs::File;
 use std::hint::black_box;
@@ -117,7 +119,7 @@ fn hot_outer(stop: &AtomicBool, acc: &AtomicU64) {
     }
 }
 
-fn main() {
+pub(super) fn main() {
     tracing_subscriber::fmt()
         .with_env_filter("stax_linux_capture=warn")
         .without_time()
@@ -203,3 +205,12 @@ fn main() {
     );
     println!("\nOK: usable flamegraph profiler works on Linux ({svg_len} byte SVG).");
 }
+}
+
+#[cfg(target_os = "linux")]
+fn main() {
+    linux::main()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn main() {}

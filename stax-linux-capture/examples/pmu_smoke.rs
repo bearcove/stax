@@ -5,15 +5,17 @@
 //!
 //! Run: `cargo run -p stax-linux-capture --example pmu_smoke -- /tmp/busy`.
 
-#![cfg(target_os = "linux")]
-
+#[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
 use stax_linux_capture::{
     BinaryLoadedEvent, BinaryUnloadedEvent, RecordOptions, SampleEvent, SampleSink, ThreadNameEvent,
 };
 
+#[cfg(target_os = "linux")]
 #[derive(Default)]
 struct PmuSums {
     samples: u64,
@@ -23,6 +25,7 @@ struct PmuSums {
     branch_mispreds: u128,
 }
 
+#[cfg(target_os = "linux")]
 impl SampleSink for PmuSums {
     fn on_sample(&mut self, ev: SampleEvent<'_>) {
         self.samples += 1;
@@ -36,6 +39,7 @@ impl SampleSink for PmuSums {
     fn on_thread_name(&mut self, _ev: ThreadNameEvent<'_>) {}
 }
 
+#[cfg(target_os = "linux")]
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -124,3 +128,6 @@ fn main() {
         }
     }
 }
+
+#[cfg(not(target_os = "linux"))]
+fn main() {}

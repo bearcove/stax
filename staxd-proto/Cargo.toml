@@ -2,13 +2,13 @@
 name = "staxd-proto"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.91"
+rust-version = "1.92"
 license = "MIT OR Apache-2.0"
 description = "Schema for the staxd RPC. Tiny crate consumed by both the runtime (staxd, the root daemon) and the client (stax-live) so the wire stays the same on both sides. Mirrors the deliberately-thin design of stax-live-proto."
 
 [dependencies]
-facet = { version = "0.50.0-rc.0", features = ["camino", "reflect"] }
-vox = { version = "0.10.0-rc.0", default-features = false, features = ["runtime"] }
+facet = { version = "0.50.0-rc.1", features = ["camino", "reflect"] }
+vox = { version = "0.10.0-rc.1", default-features = false, features = ["runtime"] }
 
 # macOS streams raw KdBuf records, so the wire schema embeds the xnu
 # kd_buf representation. Linux is a pure fd broker (vox::Fd only) and
