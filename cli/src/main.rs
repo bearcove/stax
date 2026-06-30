@@ -1678,6 +1678,10 @@ async fn run_top(args: TopArgs) -> Result<(), Box<dyn Error>> {
     }
     let entries = update.entries;
     println!(
+        "note: this is a flat ranking of frames in isolation — run `stax flame` \
+         to see how they nest (caller → callee) and which costs are siblings vs. stacked.",
+    );
+    println!(
         "{:>10} {:>10} {:>8} {:>8}  function",
         "active ms", "target ms", "samples", "spans",
     );
