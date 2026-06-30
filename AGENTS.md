@@ -251,6 +251,46 @@ then restore it later with `stax open <DIR>`. For one-off inspection,
 `stax annotate --run <ID> …`, and `stax diagnose --run <ID>` query that
 stopped in-memory run without changing the current query state.
 
+## Build your target so it's profilable
+
+A profile is only as good as the symbols in the binary. Get this right *before*
+you record, or every later view is degraded.
+
+- **Plain `cargo build --release`** is unstripped by default, so `flame` and
+  `top` resolve your function names — but release sets `debug = false`, so there
+  are **no line tables**. `stax annotate` then can't interleave source, and
+  inlined frames fold into their callers. Fine for a first glance, wrong for real
+  work.
+- **Add just enough debug info with a dedicated profile** that inherits release:
+
+      # Cargo.toml (workspace root)
+      [profile.profiling]
+      inherits = "release"
+      debug = "line-tables-only"   # line numbers + inline attribution; cheap
+      strip = false                # never strip — stripping drops the symbol table
+
+  then build and record the artifact:
+
+      cargo build --profile profiling --example mybench
+      stax record -- ./target/profiling/examples/mybench
+
+  `line-tables-only` is the sweet spot for a profiler. Use `debug = true` (= 2)
+  only when you also want variables/types in `annotate`; `debug = 1` behaves like
+  line-tables for profiling.
+- **Or abuse release in place:** drop `debug = "line-tables-only"` straight into
+  `[profile.release]`. Keeps every optimization, just emits line tables. A
+  separate `profiling` profile is tidier (release artifacts stay lean), but
+  in-place works when you can't add one.
+- **Never `strip = true`** on something you mean to profile — you'll get raw
+  addresses instead of names.
+- You don't symbolicate *system/library* frames yourself: stax pulls those from
+  debuginfod / local debug packages (Linux) and the dyld shared cache (macOS).
+  The settings above are about **your own code** — debuginfod won't have your crate.
+- **Unwinding needs no frame pointers:** on Linux x86-64 stax recovers full
+  stacks from `.eh_frame` (auto-detected; force with `stax record --dwarf-unwind`).
+  macOS/aarch64 walk full stacks already. So optimize freely — you don't need
+  `force-frame-pointers` for stax to see the call tree.
+
 ## Lifecycle from an agent's POV
 
 Typical agent flow:
@@ -813,6 +853,11 @@ TypeScript bindings are generated into `frontend/src/generated/` by
   activity, target lanes, or `stax-target`, follow that hint first: the CPU
   view may be empty because the interesting work is waiting, hidden behind an
   executor, or filtered away from an existing synthetic lane.
+
+- **Raw addresses, or `annotate` with no source lines** — the target was
+  stripped or built with `debug = false` (plain `--release`). Rebuild with a
+  `profiling` profile (`debug = "line-tables-only"`, `strip = false`); see
+  "Build your target so it's profilable".
 
 - **Hardened-runtime targets** (macOS) are out of scope. The attachment
   helper is same-uid and intended for normal local developer processes.
