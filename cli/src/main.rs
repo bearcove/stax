@@ -8,9 +8,9 @@ use std::process::exit;
 use facet::Facet;
 use figue as args;
 use stax_core::args::{
-    AnnotateArgs, Cli, Command, CompareArgs, DiagnoseArgs, FlameArgs, OpenArgs, RecordArgs,
-    SaveArgs, TargetArgs, TargetCommand, TargetLanesArgs, TargetTopArgs, ThreadsArgs, TopArgs,
-    WaitArgs,
+    AnnotateArgs, Cli, Command, CompareArgs, DiagnoseArgs, FlameArgs, MarkArgs, OpenArgs,
+    RecordArgs, SaveArgs, TargetArgs, TargetCommand, TargetLanesArgs, TargetTopArgs, ThreadsArgs,
+    TopArgs, WaitArgs,
 };
 #[cfg(target_os = "linux")]
 use stax_core::cmd_setup_linux;
@@ -83,7 +83,24 @@ fn main_impl() -> Result<(), Box<dyn Error>> {
         Command::Flame(args) => block_on_async(async { run_flame(args).await })?,
         Command::Threads(args) => block_on_async(async { run_threads(args).await })?,
         Command::Target(args) => block_on_async(async { run_target(args).await })?,
+        Command::Mark(args) => block_on_async(async { run_mark(args).await })?,
     }
+    Ok(())
+}
+
+async fn run_mark(args: MarkArgs) -> Result<(), Box<dyn Error>> {
+    let url = require_server_socket()?;
+    let client: RunControlClient = vox::connect_lane(&url).await?;
+    let _debug_registration = register_run_control_client("mark", &client);
+    let marker = client
+        .mark(args.label.clone())
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+    println!(
+        "marked {:?} at {:.3}s",
+        marker.label,
+        marker.timestamp_ns as f64 / 1e9
+    );
     Ok(())
 }
 
@@ -126,20 +143,60 @@ fn run_record(args: RecordArgs) -> Result<(), Box<dyn Error>> {
     block_on_async(async { run_record_async(args).await })
 }
 
-fn stax_server_socket() -> Option<PathBuf> {
+/// How to reach stax-server. Local socket path is the default; a
+/// `ws://`/`local://` URL in `STAX_SERVER_SOCKET` is honoured verbatim so
+/// a remote or root-owned server can be reached without filesystem
+/// access to its socket.
+enum ServerEndpoint {
+    Local(PathBuf),
+    Url(String),
+}
+
+/// Resolve the stax-server endpoint. Returns `Err` when the env var
+/// points at something that exists but can't be used (the EACCES case
+/// that otherwise reports as "isn't running").
+fn stax_server_endpoint() -> Result<Option<ServerEndpoint>, Box<dyn Error>> {
     if let Ok(p) = env::var("STAX_SERVER_SOCKET") {
+        if p.starts_with("ws://") || p.starts_with("local://") {
+            return Ok(Some(ServerEndpoint::Url(p)));
+        }
         let p = PathBuf::from(p);
-        return p.exists().then_some(p);
+        return match std::fs::metadata(&p) {
+            Ok(_) => {
+                // stat alone can't tell a 0600 root-owned socket apart from a
+                // readable one (the parent dir is traversable either way) — a
+                // unix connect needs write access, so probe that directly.
+                let c_path = std::ffi::CString::new(p.to_string_lossy().as_bytes())
+                    .expect("socket path contains no NUL");
+                if unsafe { libc::access(c_path.as_ptr(), libc::W_OK | libc::R_OK) } != 0 {
+                    let e = std::io::Error::last_os_error();
+                    return Err(format!(
+                        "stax-server socket {} is not accessible to this user ({e}). \
+                         It is likely owned by root; run the query under `sudo`, or set \
+                         STAX_SERVER_SOCKET=ws://<host>:<port> to its WebSocket endpoint.",
+                        p.display()
+                    )
+                    .into());
+                }
+                Ok(Some(ServerEndpoint::Local(p)))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!(
+                "cannot stat STAX_SERVER_SOCKET={}: {e}",
+                p.display()
+            )
+            .into()),
+        };
     }
     if let Ok(rt) = env::var("XDG_RUNTIME_DIR") {
         let p = PathBuf::from(rt).join("stax-server.sock");
         if p.exists() {
-            return Some(p);
+            return Ok(Some(ServerEndpoint::Local(p)));
         }
     }
     let uid = unsafe { libc::getuid() };
     let p = PathBuf::from(format!("/tmp/stax-server-{uid}.sock"));
-    p.exists().then_some(p)
+    Ok(p.exists().then_some(ServerEndpoint::Local(p)))
 }
 
 // --- agent-facing subcommands ------------------------------------------
@@ -598,12 +655,15 @@ fn current_terminal_size() -> Option<TerminalSize> {
 }
 
 fn require_server_socket() -> Result<String, Box<dyn Error>> {
-    let socket = stax_server_socket().ok_or_else(|| {
+    let endpoint = stax_server_endpoint()?.ok_or_else(|| {
         "stax-server isn't running. \
              Start it with `stax-server` (or set STAX_SERVER_SOCKET if you've moved the socket)."
             .to_string()
     })?;
-    Ok(format!("local://{}", socket.display()))
+    Ok(match endpoint {
+        ServerEndpoint::Local(path) => format!("local://{}", path.display()),
+        ServerEndpoint::Url(url) => url,
+    })
 }
 
 fn register_run_control_client(
@@ -774,15 +834,131 @@ fn run_view_params(run: Option<u64>) -> RunViewParams {
     }
 }
 
-fn view_params(run: Option<u64>, tid: Option<u32>) -> ViewParams {
+fn view_params(
+    run: Option<u64>,
+    tid: Option<u32>,
+    window: Option<stax_live_proto::TimeRange>,
+) -> ViewParams {
     ViewParams {
         run: run.map(RunId),
         tid,
         filter: LiveFilter {
-            time_range: None,
+            time_range: window,
             exclude_symbols: Vec::new(),
         },
     }
+}
+
+/// Resolve a `--window` spec into a recording-relative `TimeRange`.
+///
+/// The duration must come from the *perf clock* the server's filter
+/// compares against (`TimelineUpdate.recording_duration_ns`, computed
+/// from `last_event_ns - session_start_ns`), not wall-clock
+/// `started_at_unix_ns`/`stopped_at_unix_ns` — those are a different
+/// epoch (boot-offset) and would silently slide every window off its
+/// data. An open-ended slice keeps `end` unset so the server reads
+/// through the latest event rather than a frozen snapshot.
+async fn resolve_window(
+    url: &str,
+    run: Option<u64>,
+    window: &stax_core::args::WindowArgs,
+) -> Result<Option<stax_live_proto::TimeRange>, Box<dyn Error>> {
+    if window.window.is_none() {
+        return Ok(None);
+    }
+    let client: ProfilerClient = vox::connect_lane(url).await?;
+    let timeline = client
+        .timeline(stax_live_proto::TimelineParams {
+            run: run.map(RunId),
+            tid: None,
+        })
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+    let duration_ns = timeline.recording_duration_ns;
+
+    // A bound that isn't a duration is a marker label (`--window
+    // freeze..`). Markers arrive session-relative, the same clock the
+    // filter uses, so they drop straight into the range.
+    if let Some(range) = resolve_marker_window(&window.window.as_deref().unwrap_or(""), &timeline.markers, duration_ns)? {
+        return Ok(Some(range));
+    }
+
+    let Some((start_ns, end_ns)) = window
+        .resolve(duration_ns)
+        .map_err(|e| format!("invalid --window: {e}"))?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(stax_live_proto::TimeRange {
+        start_ns,
+        end_ns: end_ns.unwrap_or(duration_ns),
+    }))
+}
+
+/// Resolve a window whose bounds may be marker labels. Returns `Ok(None)`
+/// when the spec names no marker, so the numeric parser still handles
+/// plain-duration specs. An unknown label is a hard error, not a silent
+/// fallthrough — a mistyped label that read as "filter dropped" is the
+/// papercut this feature exists to remove.
+fn resolve_marker_window(
+    spec: &str,
+    markers: &[stax_live_proto::RunMarker],
+    duration_ns: u64,
+) -> Result<Option<stax_live_proto::TimeRange>, Box<dyn Error>> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Ok(None);
+    }
+
+    // Is this term a duration (e.g. `30s`, `500ms`, `2`) or a marker
+    // label? Durations start with a digit (or `..`), labels don't.
+    fn is_duration(term: &str) -> bool {
+        term.chars().next().is_some_and(|c| c.is_ascii_digit())
+    }
+    let find_marker = |name: &str| -> Result<u64, Box<dyn Error>> {
+        markers
+            .iter()
+            .rfind(|m| m.label == name)
+            .map(|m| m.timestamp_ns)
+            .ok_or_else(|| {
+                format!(
+                    "no marker named {name:?} (have: {})",
+                    markers
+                        .iter()
+                        .map(|m| m.label.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+                .into()
+            })
+    };
+
+    // Decide whether the spec references any marker at all. If every
+    // bound is a duration, defer to the numeric parser.
+    let (a, b) = match spec.split_once("..") {
+        Some((a, b)) => (a.trim(), b.trim()),
+        None => (spec, ""),
+    };
+    let has_marker = (!a.is_empty() && !is_duration(a)) || (!b.is_empty() && !is_duration(b));
+    if !has_marker {
+        return Ok(None);
+    }
+
+    let start_ns = if a.is_empty() {
+        0
+    } else if is_duration(a) {
+        stax_core::args::parse_duration(a).map_err(|e| format!("invalid --window: {e}"))?
+    } else {
+        find_marker(a)?
+    };
+    let end_ns = if b.is_empty() {
+        duration_ns
+    } else if is_duration(b) {
+        stax_core::args::parse_duration(b).map_err(|e| format!("invalid --window: {e}"))?
+    } else {
+        find_marker(b)?
+    };
+    Ok(Some(stax_live_proto::TimeRange { start_ns, end_ns }))
 }
 
 fn run_compare(args: CompareArgs) -> Result<(), Box<dyn Error>> {
@@ -1667,8 +1843,9 @@ async fn run_top(args: TopArgs) -> Result<(), Box<dyn Error>> {
     };
     let client: ProfilerClient = vox::connect_lane(&url).await?;
     let _debug_registration = register_profiler_client("top", &client);
+    let window = resolve_window(&url, args.run, &args.window).await?;
     let update = client
-        .top_update(args.limit, sort, view_params(args.run, args.tid))
+        .top_update(args.limit, sort, view_params(args.run, args.tid, window))
         .await
         .map_err(|e| format!("{e:?}"))?;
     let threads = client.threads(run_view_params(args.run)).await.ok();
@@ -1724,7 +1901,7 @@ async fn run_annotate(args: AnnotateArgs) -> Result<(), Box<dyn Error>> {
     ensure_query_run_if_requested(&url, "annotate --run", args.run).await?;
     let client: ProfilerClient = vox::connect_lane(&url).await?;
     let _debug_registration = register_profiler_client("annotate", &client);
-    let view_params = view_params(args.run, args.tid);
+    let view_params = view_params(args.run, args.tid, None);
     let address = resolve_target(&client, &args.target, view_params.clone()).await?;
     let view = client
         .annotated(address, view_params)
@@ -1791,7 +1968,7 @@ async fn run_target_top(args: TargetTopArgs) -> Result<(), Box<dyn Error>> {
     let client: ProfilerClient = vox::connect_lane(&url).await?;
     let _debug_registration = register_profiler_client("target-top", &client);
     let update = client
-        .target_spans("cli-target-top".to_owned(), view_params(args.run, args.tid))
+        .target_spans("cli-target-top".to_owned(), view_params(args.run, args.tid, None))
         .await
         .map_err(|e| format!("{e:?}"))?;
     print_target_top(&update, args.limit, by);
@@ -2127,12 +2304,18 @@ async fn run_flame(args: FlameArgs) -> Result<(), Box<dyn Error>> {
     ensure_query_run_if_requested(&url, "flame --run", args.run).await?;
     let client: ProfilerClient = vox::connect_lane(&url).await?;
     let _debug_registration = register_profiler_client("flame", &client);
+    let window = resolve_window(&url, args.run, &args.window).await?;
     let update = client
-        .flamegraph(view_params(args.run, args.tid))
+        .flamegraph(view_params(args.run, args.tid, window))
         .await
         .map_err(|e| format!("{e:?}"))?;
     let threads = client.threads(run_view_params(args.run)).await.ok();
-    print_flame(&update, args.max_depth, args.threshold_pct);
+    let mode = if args.off_cpu {
+        FlameMode::OffCpu
+    } else {
+        FlameMode::OnCpu
+    };
+    print_flame(&update, args.max_depth, args.threshold_pct, mode);
     if update.root.children.is_empty() {
         maybe_print_empty_view_hint("flame", &update.total_off_cpu, threads.as_ref(), args.tid);
     }
@@ -2143,25 +2326,66 @@ async fn run_flame(args: FlameArgs) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn print_flame(update: &FlamegraphUpdate, max_depth: usize, threshold_pct: f64) {
-    let total = update.total_on_cpu_ns.max(1) as f64;
+/// Which axis drives the flame's box width and child sort.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FlameMode {
+    /// On-CPU active time (the default; where the program *ran*).
+    OnCpu,
+    /// Off-CPU blocked time (where the program *parked*). This is the
+    /// view for "what was this thread stuck on during the freeze?" —
+    /// a parked thread yields ~no on-CPU samples, so only off-CPU can
+    /// show it.
+    OffCpu,
+}
+
+impl FlameMode {
+    /// The width/percent field for a node in this mode.
+    fn node_ns(self, node: &FlameNode) -> u64 {
+        match self {
+            FlameMode::OnCpu => node.on_cpu_ns,
+            FlameMode::OffCpu => off_cpu_total_ns(&node.off_cpu),
+        }
+    }
+
+    /// The run-wide total that percentages are relative to.
+    fn total_ns(self, update: &FlamegraphUpdate) -> u64 {
+        match self {
+            FlameMode::OnCpu => update.total_on_cpu_ns,
+            FlameMode::OffCpu => off_cpu_total_ns(&update.total_off_cpu),
+        }
+    }
+}
+
+fn print_flame(
+    update: &FlamegraphUpdate,
+    max_depth: usize,
+    threshold_pct: f64,
+    mode: FlameMode,
+) {
+    let total = mode.total_ns(update).max(1) as f64;
+    let mode_label = match mode {
+        FlameMode::OnCpu => "active",
+        FlameMode::OffCpu => "off-CPU",
+    };
     println!(
-        "# stax flame · total active {:.3}s · target {:.3}s · off-CPU {:.3}s",
+        "# stax flame · total active {:.3}s · target {:.3}s · off-CPU {:.3}s · showing {mode_label}",
         update.total_on_cpu_ns as f64 / 1e9,
         update.total_target_ns as f64 / 1e9,
         off_cpu_total_ns(&update.total_off_cpu) as f64 / 1e9,
     );
-    if let Some(tid) = update.root.children.first().and(None::<u32>) {
-        // placeholder — root has no tid annotation; left as a hook
-        // for future per-thread renders.
-        let _ = tid;
-    }
     println!();
     println!("```");
-    println!(
-        "{:>8} {:>8} {:>7} {:>5}  frame",
-        "active", "target", "spans", "%",
-    );
+    match mode {
+        FlameMode::OnCpu => {
+            println!(
+                "{:>8} {:>8} {:>7} {:>5}  frame",
+                "active", "target", "spans", "%",
+            );
+        }
+        FlameMode::OffCpu => {
+            println!("{:>8} {:>7} {:>5}  frame", "off-CPU", "reason", "%",);
+        }
+    }
     print_flame_node(
         &update.root,
         &update.strings,
@@ -2169,6 +2393,7 @@ fn print_flame(update: &FlamegraphUpdate, max_depth: usize, threshold_pct: f64) 
         threshold_pct,
         0,
         max_depth,
+        mode,
     );
     println!("```");
 }
@@ -2289,8 +2514,10 @@ fn print_flame_node(
     threshold_pct: f64,
     depth: usize,
     max_depth: usize,
+    mode: FlameMode,
 ) {
-    let pct = node.on_cpu_ns as f64 / total_ns * 100.0;
+    let node_ns = mode.node_ns(node);
+    let pct = node_ns as f64 / total_ns * 100.0;
     if depth > 0 && pct < threshold_pct {
         return;
     }
@@ -2309,16 +2536,36 @@ fn print_flame_node(
         format!("{name}  ({bin})")
     };
     let indent = "  ".repeat(depth);
-    println!(
-        "{:>8.2} {:>8.2} {:>7} {:>5.1}  {indent}{prefix}{label}",
-        node.on_cpu_ns as f64 / 1e6,
-        node.target_ns as f64 / 1e6,
-        node.target_spans,
-        pct,
-        indent = indent,
-        prefix = if depth == 0 { "" } else { "└─ " },
-        label = label,
-    );
+    let prefix = if depth == 0 { "" } else { "└─ " };
+    match mode {
+        FlameMode::OnCpu => {
+            println!(
+                "{:>8.2} {:>8.2} {:>7} {:>5.1}  {indent}{prefix}{label}",
+                node.on_cpu_ns as f64 / 1e6,
+                node.target_ns as f64 / 1e6,
+                node.target_spans,
+                pct,
+                indent = indent,
+                prefix = prefix,
+                label = label,
+            );
+        }
+        FlameMode::OffCpu => {
+            // The off-CPU column is *why* this frame matters: a parked
+            // thread with no on-CPU samples still shows its dominant
+            // blocking reason, so "what was it stuck on" reads straight
+            // off the tree.
+            println!(
+                "{:>8.2} {:>7} {:>5.1}  {indent}{prefix}{label}",
+                node_ns as f64 / 1e6,
+                dominant_off_cpu_reason(&node.off_cpu),
+                pct,
+                indent = indent,
+                prefix = prefix,
+                label = label,
+            );
+        }
+    }
 
     if depth + 1 > max_depth {
         if !node.children.is_empty() {
@@ -2333,18 +2580,11 @@ fn print_flame_node(
         return;
     }
 
-    // Sort children by on_cpu_ns descending for a focused view.
+    // Sort children by the mode's width field descending for a focused view.
     let mut children: Vec<&FlameNode> = node.children.iter().collect();
-    children.sort_by(|a, b| b.on_cpu_ns.cmp(&a.on_cpu_ns));
+    children.sort_by(|a, b| mode.node_ns(b).cmp(&mode.node_ns(a)));
     for child in children {
-        print_flame_node(
-            child,
-            strings,
-            total_ns,
-            threshold_pct,
-            depth + 1,
-            max_depth,
-        );
+        print_flame_node(child, strings, total_ns, threshold_pct, depth + 1, max_depth, mode);
     }
 }
 
@@ -2760,6 +3000,7 @@ mod tests {
                     tid: SYNTH_TID_BASE,
                     name: "GPU lane".to_owned(),
                 }],
+                markers: Vec::new(),
                 threads: vec![SavedThread {
                     tid: SYNTH_TID_BASE,
                     pet_samples: vec![SavedPetSample {

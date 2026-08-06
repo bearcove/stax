@@ -287,7 +287,7 @@ you record, or every later view is degraded.
   debuginfod / local debug packages (Linux) and the dyld shared cache (macOS).
   The settings above are about **your own code** — debuginfod won't have your crate.
 - **Unwinding needs no frame pointers:** on Linux x86-64 stax recovers full
-  stacks from `.eh_frame` (auto-detected; force with `stax record --dwarf-unwind`).
+  stacks from `.eh_frame` (on by default; `--no-dwarf-unwind` opts out).
   macOS/aarch64 walk full stacks already. So optimize freely — you don't need
   `force-frame-pointers` for stax to see the call tree.
 
@@ -386,9 +386,10 @@ Useful flags:
 - `-F, --frequency <HZ>` — sampling rate (default 900)
 - `-l, --time-limit <SECS>` — stop after N seconds (otherwise Ctrl-C)
 - `-p, --pid <PID>` — attach to an existing process instead of launching one
-- `--dwarf-unwind` — Linux x86-64 only: force `.eh_frame` DWARF unwinding of
-  user stacks. Auto-detected by default (on when the target omits frame
-  pointers); `STAX_DWARF_UNWIND=0` forces it off. No-op on macOS.
+- `--no-dwarf-unwind` — Linux x86-64 only: `.eh_frame` DWARF unwinding is
+  **on by default** (the system libc is `-fomit-frame-pointer`, so the
+  kernel's frame-pointer walk truncates). This flag turns it off, as does
+  `STAX_DWARF_UNWIND=0`. No-op on macOS.
 - `--daemon-socket <PATH>` — override `staxd`'s socket
 
 `stax record` does no sampling itself. It launches the target (or resolves
@@ -837,8 +838,9 @@ TypeScript bindings are generated into `frontend/src/generated/` by
   `staxd` broker (`sudo stax setup`) so the host setting stops mattering.
 
 - **Linux: a suspiciously flat flamegraph on x86-64** — the target was built
-  `-fomit-frame-pointer`. stax auto-detects this; force it with
-  `stax record --dwarf-unwind`.
+  `-fomit-frame-pointer`. stax recovers full stacks from `.eh_frame` by
+  default; if it's off (a stray `--no-dwarf-unwind` or `STAX_DWARF_UNWIND=0`),
+  drop the override and re-record.
 
 - **macOS asks whether `stax-server` can access another app's data** — the
   server is touching an app/container data path. By default it uses

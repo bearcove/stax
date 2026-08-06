@@ -61,6 +61,37 @@ const UNIT_PATH: &str = "/etc/systemd/system/eu.bearcove.staxd.service";
 const BINARY_INSTALL_PATH: &str = "/usr/local/bin/staxd";
 const SYSTEMD_UNIT: &str = "eu.bearcove.staxd";
 
+/// Optional root-mode stax-server (`--server-root`), for profiling
+/// root-owned targets. Runs on its own socket so the per-user server
+/// keeps the default path; the CLI reaches it as root via
+/// `STAX_SERVER_SOCKET=/run/stax-server-root.sock`.
+const STAX_SERVER_ROOT_SYSTEMD_UNIT: &str = r#"[Unit]
+Description=stax profiler server (root), for root-owned targets
+Documentation=https://github.com/bearcove/stax
+After=network.target
+
+[Service]
+Type=simple
+# Root so it can read /proc/<pid>/maps and /proc/<pid>/exe for
+# root-owned targets — symbol resolution needs both.
+User=root
+Environment=STAX_SERVER_SOCKET=/run/stax-server-root.sock
+Environment=STAX_SERVER_WS_BIND=127.0.0.1:8091
+ExecStart=/usr/local/bin/stax-server
+Restart=always
+RestartSec=1
+Environment=RUST_LOG=stax_server=info
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+"#;
+
+const SERVER_ROOT_UNIT_PATH: &str = "/etc/systemd/system/eu.bearcove.stax-server-root.service";
+const SERVER_ROOT_BINARY_PATH: &str = "/usr/local/bin/stax-server";
+const SERVER_ROOT_UNIT: &str = "eu.bearcove.stax-server-root";
+
 pub fn main(args: args::SetupArgs) -> Result<(), Box<dyn Error>> {
     if is_root() {
         install_daemon(&args)
@@ -148,6 +179,42 @@ Press Enter to continue, or Ctrl-C to cancel."#,
     println!(":: logs   : journalctl -u {SYSTEMD_UNIT} -f");
     println!(":: status : systemctl status {SYSTEMD_UNIT}");
     println!(":: now    : stax record --serve 127.0.0.1:8080 -- /bin/foo");
+
+    if args.server_root {
+        install_root_server()?;
+    }
+    Ok(())
+}
+
+/// Install `stax-server` as a root service for root-owned targets
+/// (`--server-root`). A display server, compositor, or daemon runs as
+/// root; the per-user stax-server cannot read its `/proc/<pid>/maps`, so
+/// every symbol resolves to `<unresolved>`. A root server fixes that in
+/// one step instead of the hand-rolled wrapper-script dance.
+fn install_root_server() -> Result<(), Box<dyn Error>> {
+    let staged = locate_staged_binary("stax-server")?;
+    println!(":: --server-root: found staged stax-server at {}", staged.display());
+
+    println!(":: copying binary -> {SERVER_ROOT_BINARY_PATH}");
+    fs::copy(&staged, SERVER_ROOT_BINARY_PATH)
+        .map_err(|err| format!("copying stax-server to {SERVER_ROOT_BINARY_PATH}: {err}"))?;
+    fs::set_permissions(SERVER_ROOT_BINARY_PATH, fs::Permissions::from_mode(0o755))?;
+
+    println!(":: writing systemd unit -> {SERVER_ROOT_UNIT_PATH}");
+    fs::write(SERVER_ROOT_UNIT_PATH, STAX_SERVER_ROOT_SYSTEMD_UNIT)
+        .map_err(|err| format!("writing {SERVER_ROOT_UNIT_PATH}: {err}"))?;
+    fs::set_permissions(SERVER_ROOT_UNIT_PATH, fs::Permissions::from_mode(0o644))?;
+
+    println!(":: systemctl daemon-reload");
+    run_systemctl(&["daemon-reload"])?;
+    println!(":: systemctl enable --now {SERVER_ROOT_UNIT}");
+    run_systemctl(&["enable", "--now", SERVER_ROOT_UNIT])?;
+
+    println!();
+    println!(":: root stax-server installed and running.");
+    println!(":: socket : /run/stax-server-root.sock (root-only)");
+    println!(":: logs   : journalctl -u {SERVER_ROOT_UNIT} -f");
+    println!(":: use    : sudo STAX_SERVER_SOCKET=/run/stax-server-root.sock stax record --pid <PID>");
     Ok(())
 }
 
@@ -163,17 +230,17 @@ fn run_systemctl(systemctl_args: &[&str]) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Find `staxd` to install. `~$SUDO_USER/.cargo/bin/staxd` (where
-/// `cargo xtask install` dropped it as the normal user), then root's
-/// own `~/.cargo/bin/staxd`.
-fn locate_staged_daemon() -> Result<PathBuf, Box<dyn Error>> {
+/// Find a staged binary to install. `~$SUDO_USER/.cargo/bin/<name>`
+/// (where `cargo xtask install` dropped it as the normal user), then
+/// root's own `~/.cargo/bin/<name>`.
+fn locate_staged_binary(name: &str) -> Result<PathBuf, Box<dyn Error>> {
     let mut candidates: Vec<PathBuf> = Vec::new();
 
     if let Some(user_home) = sudo_user_home() {
-        candidates.push(user_home.join(".cargo").join("bin").join("staxd"));
+        candidates.push(user_home.join(".cargo").join("bin").join(name));
     }
     if let Some(home) = env::var_os("HOME") {
-        candidates.push(PathBuf::from(home).join(".cargo").join("bin").join("staxd"));
+        candidates.push(PathBuf::from(home).join(".cargo").join("bin").join(name));
     }
 
     for c in &candidates {
@@ -182,7 +249,7 @@ fn locate_staged_daemon() -> Result<PathBuf, Box<dyn Error>> {
         }
     }
     Err(format!(
-        "couldn't find a staged `staxd` binary. Looked in:\n{}\n\
+        "couldn't find a staged `{name}` binary. Looked in:\n{}\n\
          Run `cargo xtask install` first (as your normal user, not under sudo).",
         candidates
             .iter()
@@ -191,6 +258,10 @@ fn locate_staged_daemon() -> Result<PathBuf, Box<dyn Error>> {
             .join("\n"),
     )
     .into())
+}
+
+fn locate_staged_daemon() -> Result<PathBuf, Box<dyn Error>> {
+    locate_staged_binary("staxd")
 }
 
 /// When invoked via `sudo`, $SUDO_USER carries the original username.

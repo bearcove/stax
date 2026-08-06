@@ -219,6 +219,28 @@ fn map_ring(fd: RawFd, kind: PerfRingKind) -> io::Result<PerfRing> {
         let e = io::Error::last_os_error();
         // SAFETY: closing the fd we just opened on the error path.
         unsafe { libc::close(fd) };
+        // EPERM here is almost always the perf pinned-page budget, not a
+        // permissions problem: `kernel.perf_event_mlock_kb` gates how much
+        // an unprivileged mmap of a perf ring may lock, and the default
+        // (~516 KB) is smaller than one ring's (1 + DATA_PAGES) pages, so
+        // mapping N cpus × 3 ring kinds exhausts it partway through and
+        // fails with a bare EPERM that reads as a permissions bug. Name the
+        // actual knob so the fix is discoverable instead of a wild goose
+        // chase through perf_event_paranoid.
+        if e.kind() == io::ErrorKind::PermissionDenied {
+            let mlock_kb = std::fs::read_to_string("/proc/sys/kernel/perf_event_mlock_kb")
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(0);
+            return Err(io::Error::new(
+                e.kind(),
+                format!(
+                    "{e} — mapping a perf ring needs pinned pages beyond \
+                     kernel.perf_event_mlock_kb (currently {mlock_kb} KB). Raise it: \
+                     `sudo sysctl kernel.perf_event_mlock_kb=65536`"
+                ),
+            ));
+        }
         return Err(e);
     }
 
