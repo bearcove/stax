@@ -169,6 +169,13 @@ pub enum Command {
     /// stall is observed, then `stax flame --window freeze..` reads
     /// what the process was doing from that moment.
     Mark(MarkArgs),
+
+    /// Find whole-process work gaps: wall-time bins where on-CPU
+    /// throughput collapses below a fraction of the run's median.
+    /// The "it stalled a whole second, just show me that" command --
+    /// no manual markers needed. Ranks detected stalls by duration and
+    /// prints a ready-to-paste `flame --window` for each.
+    Stalls(StallsArgs),
 }
 
 #[derive(Facet, Debug)]
@@ -495,6 +502,28 @@ pub struct MarkArgs {
     /// anchor: `--window freeze..` starts at this marker.
     #[facet(args::positional)]
     pub label: String,
+}
+
+#[derive(Facet, Debug)]
+pub struct StallsArgs {
+    /// Query a run from `stax list` without changing the selected query state.
+    #[facet(args::named, default)]
+    pub run: Option<u64>,
+
+    /// Minimum stall duration to report. Shorter gaps are ignored;
+    /// use this to filter noise on a long recording.
+    #[facet(args::named, default = 100_000_000)]
+    pub min_duration_ns: u64,
+
+    /// Flag a bin as "stalled" when its on-CPU ns falls below this
+    /// fraction of the run's median bin. 0.2 = a bin must be under
+    /// 20% of typical throughput to count.
+    #[facet(args::named, default = 0.2)]
+    pub threshold: f64,
+
+    /// Maximum number of stalls to print, ranked by duration.
+    #[facet(args::named, args::short = 'n', default = 10)]
+    pub limit: usize,
 }
 
 #[cfg(test)]
