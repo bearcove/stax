@@ -455,6 +455,23 @@ pub struct TimelineUpdate {
     /// Top target lanes by target duration, each with a dense
     /// per-bucket target-time series.
     pub target_lanes: Vec<TargetLaneTimeline>,
+    /// Agent/user-placed markers, in timestamp order. The timeline
+    /// renders these as vertical anchors so a stall can be labelled
+    /// (`stax mark freeze`) and later queried (`--window freeze..`)
+    /// without converting wall-clock to recording time by hand.
+    pub markers: Vec<RunMarker>,
+}
+
+/// A named point in recording time, dropped by an agent or user to
+/// anchor later queries. `timestamp_ns` is recording-relative (ns
+/// since the first sample), matching `TimeRange` and the timeline, so
+/// a marker can directly seed a `--window` bound.
+#[derive(Clone, Debug, Facet)]
+pub struct RunMarker {
+    /// Recording-relative timestamp (ns since the first sample).
+    pub timestamp_ns: u64,
+    /// Free-form label, e.g. "freeze", "click", "attach".
+    pub label: String,
 }
 
 /// kcachegrind-style "family tree" of a symbol's neighbors.
@@ -1570,6 +1587,9 @@ pub struct SavedAggregator {
     pub last_event_ns: Option<u64>,
     pub thread_names: Vec<SavedThreadName>,
     pub threads: Vec<SavedThread>,
+    /// Agent/user-placed markers for this run. Persisted so an opened
+    /// archive keeps its `--window <marker>..` anchors.
+    pub markers: Vec<RunMarker>,
 }
 
 #[derive(Clone, Debug, Facet)]
@@ -1799,6 +1819,19 @@ pub trait RunControl {
     /// workflows and older clients. Fails while a recording is active, because
     /// the live aggregator belongs to that recording.
     async fn select_run(&self, run_id: RunId) -> Result<RunSummary, RunControlError>;
+
+    /// Drop a named marker into the active run at the current
+    /// recording time. The point of the feature is stall forensics:
+    /// `stax mark freeze` when the user reports a stall, then
+    /// `stax flame --window freeze..` reads exactly what the process
+    /// was doing from that moment on. Errors with `NoActiveRun` when
+    /// nothing is recording.
+    async fn mark(&self, label: String) -> Result<RunMarker, RunControlError>;
+
+    /// All markers recorded in the current/most-recent query state,
+    /// in timestamp order. The CLI uses these to resolve a
+    /// `--window <marker>..` anchor without re-reading the timeline.
+    async fn markers(&self, params: RunViewParams) -> Vec<RunMarker>;
 }
 
 /// All service descriptors exposed by stax-live; the codegen iterates over

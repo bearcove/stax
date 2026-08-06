@@ -15,7 +15,10 @@ stax-core = { path = "..", default-features = false }
 stax-live-proto = { path = "../stax-live-proto" }
 stax-vox-observe = { path = "../stax-vox-observe" }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }
-vox = "0.10.0-rc.1"
+# transport-websocket lets `STAX_SERVER_SOCKET=ws://host:port` reach a
+# server without filesystem access to its unix socket — the root-owned /
+# remote case, where the local:// path is unreadable.
+vox = { version = "0.10.0-rc.1", features = ["transport-websocket"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tracing-oslog = "0.3"

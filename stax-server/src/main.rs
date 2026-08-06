@@ -27,7 +27,7 @@ use stax_live::{Aggregator, BinaryRegistry, LiveServer};
 use stax_live_proto::{
     AnnotatedView, CfgUpdate, DiagnosticsSnapshot, FlamegraphUpdate, IntervalListUpdate,
     NeighborsUpdate, PetSampleListUpdate, Profiler, ProfilerDispatcher, RunConfig, RunControl,
-    RunControlDispatcher, RunControlError, RunId, RunState, RunSummary, RunViewParams,
+    RunControlDispatcher, RunControlError, RunId, RunMarker, RunState, RunSummary, RunViewParams,
     SavedAggregator, SavedArchiveBlob, SavedBinaryRegistry, SavedEventLogEntry, SavedRunArchive,
     SavedRunArchiveBundle, SavedRunArchiveFiles, SavedRunArchiveManifest,
     SavedRunArchiveProvenance, ServerStatus, StopReason, TargetIngestDiagnostics,
@@ -74,7 +74,20 @@ async fn main() -> eyre::Result<()> {
 
     let ws_addr =
         std::env::var("STAX_SERVER_WS_BIND").unwrap_or_else(|_| DEFAULT_WS_BIND.to_owned());
-    let mut ws_listener = vox::WsListener::bind(&ws_addr).await?;
+    let mut ws_listener = vox::WsListener::bind(&ws_addr).await.map_err(|e| {
+        // A bare "Address already in use" says neither *which* address nor
+        // that it is movable — name both, since the collision is almost
+        // always another stax-server (or another service) holding the
+        // default port.
+        std::io::Error::new(
+            e.kind(),
+            format!(
+                "cannot bind WebSocket listener to {ws_addr}: {e}. \
+                 Another stax-server may be running; pick a free port with \
+                 STAX_SERVER_WS_BIND=host:port"
+            ),
+        )
+    })?;
     let ws_local = ws_listener.local_addr()?;
     tracing::info!("stax-server listening on ws://{ws_local}");
 
@@ -1152,6 +1165,29 @@ impl RunControl for ServerState {
 
     async fn select_run(&self, run_id: RunId) -> Result<RunSummary, RunControlError> {
         self.select_run_archive(run_id)
+    }
+
+    async fn mark(&self, label: String) -> Result<RunMarker, RunControlError> {
+        {
+            let inner = self.inner.lock();
+            if inner.active.is_none() {
+                return Err(RunControlError::NoActiveRun);
+            }
+        }
+        let timestamp_ns = self.aggregator.write().record_marker(label.clone());
+        self.bump_revision();
+        Ok(RunMarker {
+            timestamp_ns,
+            label,
+        })
+    }
+
+    async fn markers(&self, params: RunViewParams) -> Vec<RunMarker> {
+        // The current query state carries its own aggregator; a stopped
+        // `--run` snapshot resolves to its archived copy. Markers persist
+        // in the saved aggregator, so both paths read the same field.
+        let profiler = self.profiler_for_run(params.run);
+        profiler.aggregator.read().markers().to_vec()
     }
 }
 

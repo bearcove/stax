@@ -6,6 +6,86 @@ pub enum TargetProcess {
     Launch { program: String, args: Vec<String> },
 }
 
+/// A recording-time window, shared by the query subcommands. Parsed
+/// once here so `flame`, `top`, and `threads` accept identical syntax
+/// and produce identical ranges.
+///
+/// Forms (`D` is a duration like `500ms`, `30s`, `1m`, or a bare
+/// number of seconds):
+///
+/// - `--window D`      → the last D of the recording
+/// - `--window A..B`   → the absolute slice [A, B) from recording start
+/// - `--window A..`    → from A to the end
+/// - `--window ..B`    → from the start to B
+#[derive(Facet, Debug, Default)]
+pub struct WindowArgs {
+    /// Restrict the query to a time window within the recording.
+    /// `500ms`, `30s`, `1m` select the trailing window; `A..B`,
+    /// `A..`, and `..B` select an absolute slice relative to
+    /// recording start.
+    #[facet(args::named, default)]
+    pub window: Option<String>,
+}
+
+impl WindowArgs {
+    /// Resolve the window string into recording-relative `[start_ns,
+    /// end_ns)` bounds. `end_ns` is the recording's duration; an open
+    /// end returns `None` so the server keeps "to the latest event."
+    ///
+    /// Errors with a precise message rather than guessing: a window
+    /// that is silently dropped reads as "the filter didn't work."
+    pub fn resolve(&self, recording_duration_ns: u64) -> Result<Option<(u64, Option<u64>)>, String> {
+        let Some(spec) = self.window.as_deref() else {
+            return Ok(None);
+        };
+        let spec = spec.trim();
+        if spec.is_empty() {
+            return Ok(None);
+        }
+        if let Some((a, b)) = spec.split_once("..") {
+            let start = if a.is_empty() { 0 } else { parse_duration(a)? };
+            let end = if b.is_empty() {
+                None
+            } else {
+                Some(parse_duration(b)?)
+            };
+            if let Some(end_ns) = end {
+                if end_ns <= start {
+                    return Err(format!("window end must be after start (got {spec:?})"));
+                }
+            }
+            return Ok(Some((start, end)));
+        }
+        let dur = parse_duration(spec)?;
+        let start = recording_duration_ns.saturating_sub(dur);
+        Ok(Some((start, None)))
+    }
+}
+
+/// Parse `500ms`, `30s`, `1m`, or a bare number (seconds) into ns.
+/// Public so the CLI can resolve marker-window bounds with identical
+/// units instead of carrying a second parser that would drift.
+pub fn parse_duration(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    let (digits, mult) = if let Some(d) = s.strip_suffix("ms") {
+        (d, 1_000_000u64)
+    } else if let Some(d) = s.strip_suffix('s') {
+        (d, 1_000_000_000u64)
+    } else if let Some(d) = s.strip_suffix('m') {
+        (d, 60 * 1_000_000_000u64)
+    } else {
+        (s, 1_000_000_000u64)
+    };
+    let value: f64 = digits
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid duration {s:?} (expected e.g. 500ms, 30s, 1m)"))?;
+    if value < 0.0 {
+        return Err(format!("duration must be non-negative (got {s:?})"));
+    }
+    Ok((value * mult as f64) as u64)
+}
+
 /// stax — live profiler frontend for CPU stacks, off-CPU waits, and
 /// cooperating target spans, streamed through stax-server.
 #[derive(Facet, Debug)]
@@ -83,6 +163,12 @@ pub enum Command {
 
     /// Inspect cooperating target lanes and span/shader rankings.
     Target(TargetArgs),
+
+    /// Drop a named marker into the active run at the current
+    /// recording time. For stall forensics: `stax mark freeze` when a
+    /// stall is observed, then `stax flame --window freeze..` reads
+    /// what the process was doing from that moment.
+    Mark(MarkArgs),
 }
 
 #[derive(Facet, Debug)]
@@ -210,6 +296,9 @@ pub struct TopArgs {
     /// Default: all threads.
     #[facet(args::named, default)]
     pub tid: Option<u32>,
+
+    #[facet(flatten, default)]
+    pub window: WindowArgs,
 }
 
 #[derive(Facet, Debug)]
@@ -295,6 +384,18 @@ pub struct FlameArgs {
     /// Default: all threads.
     #[facet(args::named, default)]
     pub tid: Option<u32>,
+
+    /// Drive the flame from off-CPU time instead of on-CPU time. Use
+    /// this to find where threads *parked* rather than where they ran:
+    /// the tree is laid out by off-CPU duration and each node reports
+    /// its dominant blocking reason (lock, sleep, io, …). The answer
+    /// to "what was this thread stuck on during the freeze?", which an
+    /// on-CPU flame cannot give (a parked thread yields ~no samples).
+    #[facet(args::named, default)]
+    pub off_cpu: bool,
+
+    #[facet(flatten, default)]
+    pub window: WindowArgs,
 }
 
 #[derive(Facet, Debug)]
@@ -378,4 +479,76 @@ pub struct SetupArgs {
     /// Skip the confirmation prompt before running `codesign`.
     #[facet(args::named, args::short = 'y', default)]
     pub yes: bool,
+
+    /// Linux only, with `sudo`: also install `stax-server` as a root
+    /// systemd service on `/run/stax-server-root.sock`, for profiling
+    /// root-owned targets (a display/compositor, a daemon) that the
+    /// per-user server cannot read `/proc/<pid>/maps` for. Off by
+    /// default; the per-user server covers ordinary user targets.
+    #[facet(args::named, default)]
+    pub server_root: bool,
+}
+
+#[derive(Facet, Debug)]
+pub struct MarkArgs {
+    /// Marker label, e.g. `freeze`. Referenced later as a window
+    /// anchor: `--window freeze..` starts at this marker.
+    #[facet(args::positional)]
+    pub label: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn window(spec: &str) -> WindowArgs {
+        WindowArgs {
+            window: Some(spec.to_owned()),
+        }
+    }
+
+    #[test]
+    fn trailing_window_anchors_to_end() {
+        // 60s recording; `30s` selects [30s, end).
+        let (start, end) = window("30s").resolve(60_000_000_000).unwrap().unwrap();
+        assert_eq!(start, 30_000_000_000);
+        assert_eq!(end, None);
+    }
+
+    #[test]
+    fn absolute_slice() {
+        let (start, end) = window("10s..20s").resolve(60_000_000_000).unwrap().unwrap();
+        assert_eq!(start, 10_000_000_000);
+        assert_eq!(end, Some(20_000_000_000));
+    }
+
+    #[test]
+    fn open_ended_and_leading() {
+        let (start, end) = window("5s..").resolve(60_000_000_000).unwrap().unwrap();
+        assert_eq!((start, end), (5_000_000_000, None));
+        let (start, end) = window("..5s").resolve(60_000_000_000).unwrap().unwrap();
+        assert_eq!((start, end), (0, Some(5_000_000_000)));
+    }
+
+    #[test]
+    fn duration_units() {
+        assert_eq!(parse_duration("500ms").unwrap(), 500_000_000);
+        assert_eq!(parse_duration("30s").unwrap(), 30_000_000_000);
+        assert_eq!(parse_duration("1m").unwrap(), 60_000_000_000);
+        assert_eq!(parse_duration("2").unwrap(), 2_000_000_000);
+    }
+
+    #[test]
+    fn trailing_window_clamps_to_recording() {
+        // Window longer than the recording must not underflow.
+        let (start, end) = window("10m").resolve(30_000_000_000).unwrap().unwrap();
+        assert_eq!((start, end), (0, None));
+    }
+
+    #[test]
+    fn rejects_bad_input() {
+        assert!(window("bogus").resolve(1_000_000_000).is_err());
+        assert!(window("20s..10s").resolve(60_000_000_000).is_err());
+        assert!(WindowArgs { window: None }.resolve(1_000).unwrap().is_none());
+    }
 }

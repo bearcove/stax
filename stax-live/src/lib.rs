@@ -12,7 +12,7 @@ use parking_lot::RwLock;
 use stax_live_proto::{
     AnnotatedLine, AnnotatedView, CfgUpdate, FlameNode, FlamegraphUpdate, IntervalEntry,
     IntervalListUpdate, LiveFilter, NeighborsUpdate, PetSampleEntry, PetSampleListUpdate, Profiler,
-    RunViewParams, TargetLaneKind, TargetLaneTimeline, TargetSpanEntry, TargetSpanGroup,
+    RunMarker, RunViewParams, TargetLaneKind, TargetLaneTimeline, TargetSpanEntry, TargetSpanGroup,
     TargetSpanListUpdate, ThreadInfo, ThreadsUpdate, TimelineBucket, TimelineParams,
     TimelineUpdate, TopEntry, TopSort, TopUpdate, ViewParams,
 };
@@ -1471,6 +1471,18 @@ fn build_timeline_update(
         total_off_cpu_ns,
         buckets,
         target_lanes,
+        // Markers are stored in absolute perf-clock ns; the timeline and
+        // `TimeRange` are session-relative, so convert on the way out or
+        // every `--window <marker>..` anchor lands off by the
+        // session-start offset.
+        markers: agg
+            .markers()
+            .iter()
+            .map(|m| RunMarker {
+                timestamp_ns: m.timestamp_ns.saturating_sub(start),
+                label: m.label.clone(),
+            })
+            .collect(),
     }
 }
 

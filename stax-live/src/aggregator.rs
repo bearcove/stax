@@ -326,6 +326,10 @@ pub struct Aggregator {
     /// recorder fed us. Open intervals are treated as ending here at
     /// query time.
     last_event_ns: Option<u64>,
+    /// Agent/user-placed markers, in timestamp order. Stamped with
+    /// `last_event_ns` at mark time so they land in the recording's
+    /// own clock domain without a wall-clock conversion.
+    markers: Vec<stax_live_proto::RunMarker>,
 }
 
 impl Aggregator {
@@ -410,6 +414,7 @@ impl Aggregator {
             last_event_ns: self.last_event_ns,
             thread_names,
             threads,
+            markers: self.markers.clone(),
         }
     }
 
@@ -418,6 +423,7 @@ impl Aggregator {
         self.thread_names.clear();
         self.session_start_ns = saved.session_start_ns;
         self.last_event_ns = saved.last_event_ns;
+        self.markers = saved.markers;
 
         for name in saved.thread_names {
             self.thread_names.insert(name.tid, name.name);
@@ -593,6 +599,26 @@ impl Aggregator {
 
     pub fn last_event_ns(&self) -> Option<u64> {
         self.last_event_ns
+    }
+
+    /// Record a named marker at the recording's current time.
+    ///
+    /// The stamp is `last_event_ns` — the newest sample/interval the
+    /// run has ingested — deliberately *not* wall-clock, because the
+    /// aggregator's timeline is in the perf clock and a `SystemTime`
+    /// conversion would land the marker in the wrong epoch. Returns the
+    /// recording-relative timestamp used.
+    pub fn record_marker(&mut self, label: String) -> u64 {
+        let timestamp_ns = self.last_event_ns.unwrap_or(0);
+        self.markers.push(stax_live_proto::RunMarker {
+            timestamp_ns,
+            label,
+        });
+        timestamp_ns
+    }
+
+    pub fn markers(&self) -> &[stax_live_proto::RunMarker] {
+        &self.markers
     }
 
     pub fn set_thread_name(&mut self, tid: u32, name: String) {
