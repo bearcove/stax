@@ -9,8 +9,8 @@ use facet::Facet;
 use figue as args;
 use stax_core::args::{
     AnnotateArgs, Cli, Command, CompareArgs, DiagnoseArgs, FlameArgs, MarkArgs, OpenArgs,
-    RecordArgs, SaveArgs, TargetArgs, TargetCommand, TargetLanesArgs, TargetTopArgs, ThreadsArgs,
-    TopArgs, WaitArgs,
+    RecordArgs, SaveArgs, StallsArgs, TargetArgs, TargetCommand, TargetLanesArgs, TargetTopArgs,
+    ThreadsArgs, TopArgs, WaitArgs,
 };
 #[cfg(target_os = "linux")]
 use stax_core::cmd_setup_linux;
@@ -21,7 +21,8 @@ use stax_live_proto::{
     RunControlClient, RunId, RunSummary, RunViewParams, SavedArchiveBlob, SavedEventLogEntry,
     SavedIntervalKind, SavedRunArchive, SavedRunArchiveBundle, SavedRunArchiveManifest,
     ServerStatus, StopReason, TargetIngestDiagnostics, TargetLaneKind, TargetSpanListUpdate,
-    ThreadsUpdate, TopEntry, TopSort, TopUpdate, ViewParams, WaitCondition, WaitOutcome,
+    ThreadsUpdate, TimelineParams, TopEntry, TopSort, TopUpdate, ViewParams, WaitCondition,
+    WaitOutcome,
 };
 
 #[cfg(target_os = "macos")]
@@ -84,6 +85,7 @@ fn main_impl() -> Result<(), Box<dyn Error>> {
         Command::Threads(args) => block_on_async(async { run_threads(args).await })?,
         Command::Target(args) => block_on_async(async { run_target(args).await })?,
         Command::Mark(args) => block_on_async(async { run_mark(args).await })?,
+        Command::Stalls(args) => block_on_async(async { run_stalls(args).await })?,
     }
     Ok(())
 }
@@ -2326,6 +2328,207 @@ async fn run_flame(args: FlameArgs) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// A detected stall: a run of consecutive timeline bins whose on-CPU
+/// throughput collapsed below `threshold × median`.
+struct Stall {
+    /// Index of the first stalled bin.
+    first_bin: usize,
+    /// Index of the last stalled bin (inclusive).
+    last_bin: usize,
+    /// Sum of on-CPU ns across the stalled bins.
+    on_cpu_ns: u64,
+    /// Sum of target-span ns across the stalled bins.
+    target_ns: u64,
+}
+
+/// Pure stall detector. Walks the timeline buckets, computes the median
+/// per-bin on-CPU ns, flags any bin at or below `threshold × median`,
+/// merges consecutive flagged bins into windows, drops windows shorter
+/// than `min_duration_ns`, and ranks the survivors by duration.
+///
+/// Returns `(median_on_cpu_per_bin, stalls)` so the caller can report
+/// the baseline alongside the detected gaps.
+fn detect_stalls(
+    buckets: &[stax_live_proto::TimelineBucket],
+    bucket_ns: u64,
+    threshold: f64,
+    min_duration_ns: u64,
+) -> (u64, Vec<Stall>) {
+    if buckets.is_empty() {
+        return (0, Vec::new());
+    }
+
+    let mut sorted: Vec<u64> = buckets.iter().map(|b| b.on_cpu_ns).collect();
+    sorted.sort_unstable();
+    let median = sorted[sorted.len() / 2];
+    if median == 0 {
+        return (0, Vec::new());
+    }
+
+    let stall_ceiling = ((median as f64) * threshold) as u64;
+
+    // Flag + merge consecutive stalled bins. `cur` tracks the opening
+    // bin of the current run; it is NOT updated on subsequent stalled
+    // bins — only their on-CPU/target ns are accumulated.
+    let mut windows: Vec<Stall> = Vec::new();
+    let mut cur: Option<(usize, u64, u64)> = None; // (first_bin, on_cpu, target)
+    for (i, b) in buckets.iter().enumerate() {
+        if b.on_cpu_ns <= stall_ceiling {
+            match &mut cur {
+                Some((_first, on_cpu, target)) => {
+                    *on_cpu = on_cpu.saturating_add(b.on_cpu_ns);
+                    *target = target.saturating_add(b.target_ns);
+                }
+                None => {
+                    cur = Some((i, b.on_cpu_ns, b.target_ns));
+                }
+            }
+        } else if let Some((first, on_cpu, target)) = cur.take() {
+            windows.push(Stall {
+                first_bin: first,
+                last_bin: i.saturating_sub(1),
+                on_cpu_ns: on_cpu,
+                target_ns: target,
+            });
+        }
+    }
+    if let Some((first, on_cpu, target)) = cur.take() {
+        windows.push(Stall {
+            first_bin: first,
+            last_bin: buckets.len() - 1,
+            on_cpu_ns: on_cpu,
+            target_ns: target,
+        });
+    }
+
+    // Filter by minimum duration, rank by duration descending.
+    let mut stalls: Vec<Stall> = windows
+        .into_iter()
+        .filter(|s| {
+            let dur_bins = s.last_bin - s.first_bin + 1;
+            (dur_bins as u64) * bucket_ns >= min_duration_ns
+        })
+        .collect();
+    stalls.sort_by(|a, b| {
+        let dur_a = (a.last_bin - a.first_bin + 1) as u64 * bucket_ns;
+        let dur_b = (b.last_bin - b.first_bin + 1) as u64 * bucket_ns;
+        dur_b.cmp(&dur_a)
+    });
+
+    (median, stalls)
+}
+
+async fn run_stalls(args: StallsArgs) -> Result<(), Box<dyn Error>> {
+    let url = require_server_socket()?;
+    ensure_query_run_if_requested(&url, "stalls --run", args.run).await?;
+    let client: ProfilerClient = vox::connect_lane(&url).await?;
+    let _debug_registration = register_profiler_client("stalls", &client);
+
+    let update = client
+        .timeline(TimelineParams {
+            run: args.run.map(RunId),
+            tid: None,
+        })
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+
+    let buckets = &update.buckets;
+    if buckets.is_empty() {
+        println!("(no timeline buckets — is a recording in progress?)");
+        return Ok(());
+    }
+
+    let bucket_ns = update.bucket_size_ns;
+    let (median, stalls) = detect_stalls(buckets, bucket_ns, args.threshold, args.min_duration_ns);
+
+    if median == 0 {
+        println!(
+            "median on-CPU per bin is 0 — the process didn't do enough \
+             work to establish a throughput baseline."
+        );
+        return Ok(());
+    }
+
+    let total_stall_ns: u64 = stalls
+        .iter()
+        .map(|s| (s.last_bin - s.first_bin + 1) as u64 * bucket_ns)
+        .sum();
+
+    let dur_total = update.recording_duration_ns;
+    let pct = if dur_total > 0 {
+        (total_stall_ns as f64 / dur_total as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    println!(
+        "# stax stalls · {} buckets × {:.0}ms · {} recorded · median {:.0}ms on-CPU/bin · threshold {:.0}%",
+        buckets.len(),
+        bucket_ns as f64 / 1_000_000.0,
+        fmt_ns(dur_total),
+        median as f64 / 1_000_000.0,
+        args.threshold * 100.0,
+    );
+    println!(
+        "# {} stall(s) totalling {} ({:.1}% of recording)\n",
+        stalls.len(),
+        fmt_ns(total_stall_ns),
+        pct,
+    );
+
+    if stalls.is_empty() {
+        println!("No stalls detected at the current threshold.");
+        println!(
+            "Lower the bar: `stax stalls --threshold 0.1` or `--min-duration-ns 50_000_000`."
+        );
+        return Ok(());
+    }
+
+    for (rank, s) in stalls.iter().take(args.limit).enumerate() {
+        let start_ns = (s.first_bin as u64) * bucket_ns;
+        let end_ns = ((s.last_bin + 1) as u64) * bucket_ns;
+        let dur_ns = end_ns - start_ns;
+        let dur_bins = s.last_bin - s.first_bin + 1;
+        let median_over_bins = median * dur_bins as u64;
+        let pct_of_median = if median_over_bins > 0 {
+            (s.on_cpu_ns as f64 / median_over_bins as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        println!(
+            "  #{}  {} at t={:.3}s",
+            rank + 1,
+            fmt_ns(dur_ns),
+            start_ns as f64 / 1_000_000_000.0,
+        );
+        println!(
+            "       on-CPU {:.0}ms ({:.0}% of median), target: {} ns",
+            s.on_cpu_ns as f64 / 1_000_000.0,
+            pct_of_median,
+            s.target_ns,
+        );
+        // Ready-to-paste flame command for this exact window.
+        println!(
+            "       stax flame --window {:.3}..{:.3}",
+            start_ns as f64 / 1_000_000_000.0,
+            end_ns as f64 / 1_000_000_000.0,
+        );
+        println!();
+    }
+
+    Ok(())
+}
+
+fn fmt_ns(ns: u64) -> String {
+    let ms = ns as f64 / 1_000_000.0;
+    if ms >= 1000.0 {
+        format!("{:.2}s", ms / 1000.0)
+    } else {
+        format!("{:.0}ms", ms)
+    }
+}
+
 /// Which axis drives the flame's box width and child sort.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FlameMode {
@@ -3613,6 +3816,102 @@ mod tests {
             std::process::id()
         ))
     }
+
+    // ---- stall detection ----
+
+    use super::{detect_stalls, Stall};
+    use stax_live_proto::TimelineBucket;
+
+    fn bucket(start_ns: u64, on_cpu_ns: u64, target_ns: u64) -> TimelineBucket {
+        TimelineBucket {
+            start_ns,
+            on_cpu_ns,
+            target_ns,
+            off_cpu_ns: 0,
+        }
+    }
+
+    #[test]
+    fn detects_single_gap_in_steady_throughput() {
+        // 10 bins at 50ms each. Normal bins have 40ms on-CPU; bins
+        // 4-6 (the "freeze") collapse to ~0. That's a 150ms stall.
+        let buckets: Vec<TimelineBucket> = (0..10)
+            .map(|i| {
+                let on = if (4..=6).contains(&i) { 1 } else { 40_000_000 };
+                bucket(i * 50_000_000, on, on)
+            })
+            .collect();
+        let (median, stalls) = detect_stalls(&buckets, 50_000_000, 0.2, 100_000_000);
+        assert_eq!(median, 40_000_000);
+        assert_eq!(stalls.len(), 1);
+        assert_eq!(stalls[0].first_bin, 4);
+        assert_eq!(stalls[0].last_bin, 6);
+        // 3 bins × 50ms = 150ms ≥ 100ms min.
+        assert_eq!(stalls[0].on_cpu_ns, 3);
+    }
+
+    #[test]
+    fn merges_adjacent_stalled_bins() {
+        // Bins 2,3,4 are all stalled; they should merge into one
+        // window, not three.
+        let buckets: Vec<TimelineBucket> = (0..8)
+            .map(|i| {
+                let on = if (2..=4).contains(&i) { 0 } else { 30_000_000 };
+                bucket(i * 50_000_000, on, 0)
+            })
+            .collect();
+        let (_, stalls) = detect_stalls(&buckets, 50_000_000, 0.2, 50_000_000);
+        assert_eq!(stalls.len(), 1);
+        assert_eq!(stalls[0].first_bin, 2);
+        assert_eq!(stalls[0].last_bin, 4);
+    }
+
+    #[test]
+    fn filters_short_gaps_below_min_duration() {
+        // One stalled bin (50ms) when min is 100ms: dropped.
+        let buckets: Vec<TimelineBucket> = (0..6)
+            .map(|i| {
+                let on = if i == 3 { 0 } else { 30_000_000 };
+                bucket(i * 50_000_000, on, 0)
+            })
+            .collect();
+        let (_, stalls) = detect_stalls(&buckets, 50_000_000, 0.2, 100_000_000);
+        assert!(stalls.is_empty());
+    }
+
+    #[test]
+    fn ranks_by_duration_descending() {
+        // Two gaps: bins 1-2 (100ms) and bins 5-7 (150ms). The longer
+        // one should rank first.
+        let buckets: Vec<TimelineBucket> = (0..10)
+            .map(|i| {
+                let on = if (1..=2).contains(&i) || (5..=7).contains(&i) {
+                    0
+                } else {
+                    30_000_000
+                };
+                bucket(i * 50_000_000, on, 0)
+            })
+            .collect();
+        let (_, stalls) = detect_stalls(&buckets, 50_000_000, 0.2, 50_000_000);
+        assert_eq!(stalls.len(), 2);
+        assert_eq!(stalls[0].first_bin, 5);
+        assert_eq!(stalls[0].last_bin, 7);
+        assert_eq!(stalls[1].first_bin, 1);
+        assert_eq!(stalls[1].last_bin, 2);
+    }
+
+    #[test]
+    fn returns_empty_when_process_never_ran() {
+        let buckets: Vec<TimelineBucket> = (0..5)
+            .map(|i| bucket(i * 50_000_000, 0, 0))
+            .collect();
+        let (median, stalls) = detect_stalls(&buckets, 50_000_000, 0.2, 0);
+        assert_eq!(median, 0);
+        assert!(stalls.is_empty());
+    }
+
+    fn _stall_omitted(_s: Stall) {}
 }
 
 fn parse_address(raw: &str) -> Option<u64> {
