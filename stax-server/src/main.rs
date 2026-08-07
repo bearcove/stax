@@ -23,16 +23,19 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use parking_lot::{Mutex, RwLock};
 use stax_live::source::SourceResolver;
-use stax_live::{Aggregator, BinaryRegistry, LiveServer};
+use stax_live::{Aggregator, BinaryRegistry, LiveServer, ObservabilityStore};
 use stax_live_proto::{
-    AnnotatedView, CfgUpdate, DiagnosticsSnapshot, FlamegraphUpdate, IntervalListUpdate,
-    NeighborsUpdate, PetSampleListUpdate, Profiler, ProfilerDispatcher, RunConfig, RunControl,
-    RunControlDispatcher, RunControlError, RunId, RunMarker, RunState, RunSummary, RunViewParams,
-    SavedAggregator, SavedArchiveBlob, SavedBinaryRegistry, SavedEventLogEntry, SavedRunArchive,
-    SavedRunArchiveBundle, SavedRunArchiveFiles, SavedRunArchiveManifest,
-    SavedRunArchiveProvenance, ServerStatus, StopReason, TargetIngestDiagnostics,
-    TargetIngestDispatcher, TargetSpanListUpdate, ThreadsUpdate, TimelineParams, TimelineUpdate,
-    TopEntry, TopSort, TopUpdate, ViewParams, WaitCondition, WaitOutcome, WakersUpdate,
+    AnnotatedView, CfgUpdate, ContractListUpdate, ContractQueryParams, CounterQueryParams,
+    CounterSeriesUpdate, DiagnosticsSnapshot, EventListUpdate, EventQueryParams, FlamegraphUpdate,
+    IncidentQueryParams, IncidentUpdate, IntervalListUpdate, NeighborsUpdate,
+    ObservabilityDiagnostics, PetSampleListUpdate, Profiler, ProfilerDispatcher, RunConfig,
+    RunControl, RunControlDispatcher, RunControlError, RunId, RunMarker, RunState, RunSummary,
+    RunViewParams, SavedAggregator, SavedArchiveBlob, SavedBinaryRegistry, SavedEventLogEntry,
+    SavedObservability, SavedRunArchive, SavedRunArchiveBundle, SavedRunArchiveFiles,
+    SavedRunArchiveManifest, SavedRunArchiveProvenance, ServerStatus, StopReason,
+    TargetIngestDiagnostics, TargetIngestDispatcher, TargetSpanListUpdate, ThreadsUpdate,
+    TimelineParams, TimelineUpdate, TopEntry, TopSort, TopUpdate, ViewParams, ViolationListUpdate,
+    ViolationQueryParams, WaitCondition, WaitOutcome, WakersUpdate,
 };
 
 use crate::target_ingest::{TargetIngestService, TargetLaneRegistry};
@@ -41,15 +44,18 @@ use vox::VoxListener;
 const DEFAULT_SOCK_NAME: &str = "stax-server.sock";
 const DEFAULT_WS_BIND: &str = "127.0.0.1:8080";
 const STAX_SERVER_CHANNEL_CAPACITY: u32 = 64;
-const ARCHIVE_FORMAT_VERSION: u32 = 2;
+const ARCHIVE_FORMAT_VERSION: u32 = 3;
+const ARCHIVE_V2_FORMAT_VERSION: u32 = 2;
 const ARCHIVE_V1_FORMAT_VERSION: u32 = 1;
 const ARCHIVE_V1_FILE_NAME: &str = "archive.json";
 const ARCHIVE_MANIFEST_FILE_NAME: &str = "manifest.json";
 const ARCHIVE_AGGREGATOR_FILE_NAME: &str = "aggregator.json";
 const ARCHIVE_BINARIES_FILE_NAME: &str = "binaries.json";
 const ARCHIVE_TARGET_INGEST_FILE_NAME: &str = "target-ingest.json";
+const ARCHIVE_OBSERVABILITY_FILE_NAME: &str = "observability.json";
 const ARCHIVE_EVENTS_FILE_NAME: &str = "events.jsonl";
 const ARCHIVE_BLOBS_DIR_NAME: &str = "blobs";
+
 const ARCHIVE_SINGLE_FILE_EXTENSION: &str = "stax";
 
 #[tokio::main]
@@ -120,7 +126,9 @@ async fn main() -> eyre::Result<()> {
 
 fn build_factory(server: ServerState) -> impl vox::LaneAcceptor + 'static {
     vox::lane_acceptor_fn(
-        move |request: &vox::LaneRequest, lane: vox::PendingLane| -> Result<(), vox::LaneRejection> {
+        move |request: &vox::LaneRequest,
+              lane: vox::PendingLane|
+              -> Result<(), vox::LaneRejection> {
             match request.service() {
                 "RunControl" => {
                     lane.handle_with(RunControlDispatcher::new(server.clone()));
@@ -138,7 +146,9 @@ fn build_factory(server: ServerState) -> impl vox::LaneAcceptor + 'static {
                 }
                 other => {
                     tracing::warn!("stax-server: rejecting unknown service {other:?}");
-                    Err(vox::LaneRejection::new(vox::LaneRejectReason::UnknownService))
+                    Err(vox::LaneRejection::new(
+                        vox::LaneRejectReason::UnknownService,
+                    ))
                 }
             }
         },
@@ -227,6 +237,8 @@ pub(crate) struct ServerState {
     inner: Arc<Mutex<Inner>>,
     aggregator: Arc<RwLock<Aggregator>>,
     binaries: Arc<RwLock<BinaryRegistry>>,
+    observability: Arc<RwLock<ObservabilityStore>>,
+
     revision: Arc<AtomicU64>,
     source: Arc<Mutex<SourceResolver>>,
     paused: Arc<AtomicBool>,
@@ -271,6 +283,8 @@ impl ServerState {
             })),
             aggregator: Arc::new(RwLock::new(Aggregator::default())),
             binaries: Arc::new(RwLock::new(BinaryRegistry::new())),
+            observability: Arc::new(RwLock::new(ObservabilityStore::default())),
+
             revision: Arc::new(AtomicU64::new(1)),
             source: Arc::new(Mutex::new(SourceResolver::new())),
             paused: Arc::new(AtomicBool::new(false)),
@@ -317,6 +331,8 @@ impl ServerState {
         LiveServer {
             aggregator: self.aggregator.clone(),
             binaries: self.binaries.clone(),
+            observability: self.observability.clone(),
+
             revision: self.revision.clone(),
             source: self.source.clone(),
             paused: self.paused.clone(),
@@ -369,10 +385,13 @@ impl ServerState {
         aggregator.replace_from_saved(archive.aggregator);
         let mut binaries = BinaryRegistry::new();
         binaries.replace_from_saved(archive.binaries);
+        let mut observability = ObservabilityStore::default();
+        observability.replace_from_saved(archive.observability);
         Self::attach_local_shared_cache_to_registry(&mut binaries);
         LiveServer {
             aggregator: Arc::new(RwLock::new(aggregator)),
             binaries: Arc::new(RwLock::new(binaries)),
+            observability: Arc::new(RwLock::new(observability)),
             revision: Arc::new(AtomicU64::new(1)),
             source: self.source.clone(),
             paused: Arc::new(AtomicBool::new(false)),
@@ -383,6 +402,8 @@ impl ServerState {
         LiveServer {
             aggregator: Arc::new(RwLock::new(Aggregator::default())),
             binaries: Arc::new(RwLock::new(BinaryRegistry::new())),
+            observability: Arc::new(RwLock::new(ObservabilityStore::default())),
+
             revision: Arc::new(AtomicU64::new(1)),
             source: self.source.clone(),
             paused: Arc::new(AtomicBool::new(false)),
@@ -428,6 +449,9 @@ impl ServerState {
 
     pub(crate) fn binaries(&self) -> &Arc<RwLock<BinaryRegistry>> {
         &self.binaries
+    }
+    pub(crate) fn observability(&self) -> &Arc<RwLock<ObservabilityStore>> {
+        &self.observability
     }
 
     pub(crate) fn bump_revision(&self) {
@@ -518,6 +542,17 @@ impl ServerState {
             })
     }
 
+    /// The wall-clock start of the run currently in query state (or
+    /// the active recording). Used to bridge video timestamps to the
+    /// perf clock: the CLI resolves `--window @HH:MM:SS..` into
+    /// recording-relative ns by subtracting this from the Unix ms the
+    /// user read off the video feed.
+    fn run_started_at_unix_ns(&self) -> u64 {
+        self.queryable_run_summary()
+            .map(|s| s.started_at_unix_ns)
+            .unwrap_or(0)
+    }
+
     fn archive_from_query_state(&self, run: RunSummary) -> SavedRunArchive {
         SavedRunArchive {
             format_version: ARCHIVE_FORMAT_VERSION,
@@ -526,6 +561,7 @@ impl ServerState {
             aggregator: self.aggregator.read().to_saved(),
             binaries: self.binaries.read().to_saved(),
             target_ingest: self.target_lanes.lock().diagnostics(),
+            observability: self.observability.read().to_saved(),
         }
     }
 
@@ -596,6 +632,10 @@ impl ServerState {
         self.binaries
             .write()
             .replace_from_saved(archive.binaries.clone());
+        self.observability
+            .write()
+            .replace_from_saved(archive.observability.clone());
+
         {
             let mut target_lanes = self.target_lanes.lock();
             *target_lanes = TargetLaneRegistry::default();
@@ -719,6 +759,7 @@ impl ServerState {
 
             *self.aggregator.write() = Aggregator::default();
             *self.binaries.write() = BinaryRegistry::new();
+            *self.observability.write() = ObservabilityStore::default();
             *self.target_lanes.lock() = TargetLaneRegistry::default();
             self.bump_revision();
             self.attach_local_shared_cache();
@@ -896,10 +937,13 @@ impl Profiler for ServerProfiler {
     }
 
     async fn timeline(&self, params: TimelineParams) -> TimelineUpdate {
-        self.server
+        let mut update = self
+            .server
             .profiler_for_run(params.run)
             .timeline(params)
-            .await
+            .await;
+        update.started_at_unix_ns = self.server.run_started_at_unix_ns();
+        update
     }
 
     async fn subscribe_timeline(&self, params: TimelineParams, output: vox::Tx<TimelineUpdate>) {
@@ -1041,6 +1085,56 @@ impl Profiler for ServerProfiler {
     async fn set_paused(&self, paused: bool) {
         self.server.current_profiler().set_paused(paused).await;
     }
+    async fn events(&self, params: EventQueryParams) -> EventListUpdate {
+        self.server
+            .profiler_for_run(params.run)
+            .events(params)
+            .await
+    }
+
+    async fn counters(&self, params: CounterQueryParams) -> CounterSeriesUpdate {
+        self.server
+            .profiler_for_run(params.run)
+            .counters(params)
+            .await
+    }
+
+    async fn contracts(&self, params: ContractQueryParams) -> ContractListUpdate {
+        self.server
+            .profiler_for_run(params.run)
+            .contracts(params)
+            .await
+    }
+
+    async fn violations(&self, params: ViolationQueryParams) -> ViolationListUpdate {
+        self.server
+            .profiler_for_run(params.run)
+            .violations(params)
+            .await
+    }
+
+    async fn subscribe_violations(
+        &self,
+        params: ViolationQueryParams,
+        output: vox::Tx<ViolationListUpdate>,
+    ) {
+        if self.server.should_stream_run(params.run) {
+            self.server
+                .profiler_for_run(params.run)
+                .subscribe_violations(params, output)
+                .await;
+        } else {
+            let update = self.violations(params).await;
+            let _ = output.send(update).await;
+        }
+    }
+
+    async fn incident(&self, params: IncidentQueryParams) -> IncidentUpdate {
+        self.server
+            .profiler_for_run(params.run)
+            .incident(params)
+            .await
+    }
 
     async fn is_paused(&self) -> bool {
         self.server.current_profiler().is_paused().await
@@ -1120,6 +1214,31 @@ impl RunControl for ServerState {
                     .unwrap_or(false),
                 WaitCondition::UntilSymbolSeen { needle } => {
                     self.binaries.read().any_symbol_contains(needle)
+                }
+                WaitCondition::UntilViolation { minimum_severity } => {
+                    let agg = self.aggregator.read();
+                    let bins = self.binaries.read();
+                    self.observability
+                        .read()
+                        .violations(&agg, &bins)
+                        .iter()
+                        .any(|violation| {
+                            minimum_severity.is_none_or(|severity| {
+                                match (violation.severity, severity) {
+                                    (stax_live_proto::TargetContractSeverity::Fail, _) => true,
+                                    (
+                                        stax_live_proto::TargetContractSeverity::Warn,
+                                        stax_live_proto::TargetContractSeverity::Info
+                                        | stax_live_proto::TargetContractSeverity::Warn,
+                                    ) => true,
+                                    (
+                                        stax_live_proto::TargetContractSeverity::Info,
+                                        stax_live_proto::TargetContractSeverity::Info,
+                                    ) => true,
+                                    _ => false,
+                                }
+                            })
+                        })
                 }
             };
             if condition_met {
@@ -1217,6 +1336,7 @@ fn write_archive_directory(path: &Path, archive: &SavedRunArchive) -> Result<(),
             aggregator: ARCHIVE_AGGREGATOR_FILE_NAME.to_owned(),
             binaries: ARCHIVE_BINARIES_FILE_NAME.to_owned(),
             target_ingest: ARCHIVE_TARGET_INGEST_FILE_NAME.to_owned(),
+            observability: ARCHIVE_OBSERVABILITY_FILE_NAME.to_owned(),
         },
     };
     write_manifest(path.join(ARCHIVE_MANIFEST_FILE_NAME), &manifest)?;
@@ -1226,6 +1346,11 @@ fn write_archive_directory(path: &Path, archive: &SavedRunArchive) -> Result<(),
         path.join(ARCHIVE_TARGET_INGEST_FILE_NAME),
         &archive.target_ingest,
     )?;
+    write_observability(
+        path.join(ARCHIVE_OBSERVABILITY_FILE_NAME),
+        &archive.observability,
+    )?;
+
     write_archive_blobs(path, &blobs)?;
     write_event_log(path.join(ARCHIVE_EVENTS_FILE_NAME), &archive)
 }
@@ -1246,6 +1371,8 @@ fn write_archive_bundle(path: &Path, archive: &SavedRunArchive) -> Result<(), St
         aggregator: archive.aggregator.clone(),
         binaries: archive.binaries.clone(),
         target_ingest: archive.target_ingest.clone(),
+        observability: archive.observability.clone(),
+
         events: archive_event_log_entries(&archive),
         blobs,
     };
@@ -1362,6 +1489,12 @@ fn write_target_ingest(path: PathBuf, value: &TargetIngestDiagnostics) -> Result
     fs::write(&path, bytes).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
+fn write_observability(path: PathBuf, value: &SavedObservability) -> Result<(), String> {
+    let bytes = facet_json::to_vec_pretty(value)
+        .map_err(|e| format!("serialize {}: {e}", path.display()))?;
+    fs::write(&path, bytes).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
 fn write_event_log(path: PathBuf, archive: &SavedRunArchive) -> Result<(), String> {
     let file = fs::File::create(&path).map_err(|e| format!("create {}: {e}", path.display()))?;
     let mut writer = BufWriter::new(file);
@@ -1406,6 +1539,27 @@ fn archive_event_log_entries(archive: &SavedRunArchive) -> Vec<SavedEventLogEntr
     entries.push(SavedEventLogEntry::TargetIngestDiagnostics {
         diagnostics: archive.target_ingest.clone(),
     });
+    entries.extend(archive.observability.event_kinds.iter().map(|entry| {
+        SavedEventLogEntry::TargetEventKind {
+            source_pid: entry.source_pid,
+            definition: entry.definition.clone(),
+        }
+    }));
+    entries.extend(archive.observability.counter_sets.iter().map(|entry| {
+        SavedEventLogEntry::TargetCounterSet {
+            source_pid: entry.source_pid,
+            definition: entry.definition.clone(),
+        }
+    }));
+    entries.extend(archive.observability.contracts.iter().map(|entry| {
+        SavedEventLogEntry::TargetContract {
+            source_pid: entry.source_pid,
+            definition: entry.definition.clone(),
+        }
+    }));
+    entries.push(SavedEventLogEntry::ObservabilityDiagnostics {
+        diagnostics: archive.observability.diagnostics.clone(),
+    });
 
     let mut timed = Vec::new();
     for thread in &archive.aggregator.threads {
@@ -1442,6 +1596,26 @@ fn archive_event_log_entries(archive: &SavedRunArchive) -> Vec<SavedEventLogEntr
                 },
             ));
         }
+    }
+    for event in &archive.observability.events {
+        timed.push((
+            event.timestamp_ns,
+            3_u8,
+            event.source_pid,
+            SavedEventLogEntry::TargetEvent {
+                event: event.clone(),
+            },
+        ));
+    }
+    for sample in &archive.observability.counter_samples {
+        timed.push((
+            sample.timestamp_ns.unwrap_or(0),
+            4_u8,
+            sample.source_pid,
+            SavedEventLogEntry::TargetCounterSample {
+                sample: sample.clone(),
+            },
+        ));
     }
     timed.sort_by_key(|(timestamp_ns, order, tid, _)| (*timestamp_ns, *order, *tid));
     entries.extend(timed.into_iter().map(|(_, _, _, entry)| entry));
@@ -1493,6 +1667,7 @@ fn read_archive_bundle(bundle_path: &Path) -> Result<SavedRunArchive, String> {
         aggregator: bundle.aggregator,
         binaries: bundle.binaries,
         target_ingest: bundle.target_ingest,
+        observability: bundle.observability,
     };
     restore_bundle_blobs(&mut archive.binaries, &bundle.blobs)?;
     Ok(archive)
@@ -1539,6 +1714,11 @@ fn read_archive_manifest(manifest_path: &Path) -> Result<SavedRunArchive, String
     restore_directory_blobs(base, &mut binaries)?;
     let target_ingest =
         read_target_ingest(archive_member_path(base, &manifest.files.target_ingest)?)?;
+    let observability = if manifest.format_version >= ARCHIVE_FORMAT_VERSION {
+        read_observability(archive_member_path(base, &manifest.files.observability)?)?
+    } else {
+        SavedObservability::default()
+    };
     Ok(SavedRunArchive {
         format_version: manifest.format_version,
         saved_at_unix_ns: manifest.saved_at_unix_ns,
@@ -1546,6 +1726,7 @@ fn read_archive_manifest(manifest_path: &Path) -> Result<SavedRunArchive, String
         aggregator,
         binaries,
         target_ingest,
+        observability,
     })
 }
 
@@ -1560,6 +1741,10 @@ fn read_binaries(path: PathBuf) -> Result<SavedBinaryRegistry, String> {
 }
 
 fn read_target_ingest(path: PathBuf) -> Result<TargetIngestDiagnostics, String> {
+    let bytes = fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    facet_json::from_slice(&bytes).map_err(|e| format!("parse {}: {e}", path.display()))
+}
+fn read_observability(path: PathBuf) -> Result<SavedObservability, String> {
     let bytes = fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     facet_json::from_slice(&bytes).map_err(|e| format!("parse {}: {e}", path.display()))
 }
@@ -1638,9 +1823,11 @@ fn archive_member_path(base: &Path, member: &str) -> Result<PathBuf, String> {
 }
 
 fn is_supported_archive_version(version: u32) -> bool {
-    matches!(version, ARCHIVE_V1_FORMAT_VERSION | ARCHIVE_FORMAT_VERSION)
+    matches!(
+        version,
+        ARCHIVE_V1_FORMAT_VERSION | ARCHIVE_V2_FORMAT_VERSION | ARCHIVE_FORMAT_VERSION
+    )
 }
-
 fn is_single_file_archive_path(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
@@ -1728,6 +1915,7 @@ mod tests {
                 binaries: vec![test_saved_binary()],
             },
             target_ingest: TargetIngestDiagnostics::default(),
+            observability: SavedObservability::default(),
         };
 
         write_archive_directory(&archive_dir, &archive).expect("write directory archive");
@@ -1803,6 +1991,7 @@ mod tests {
                 spans_dropped_queue_full: 9,
                 batches_dropped_worker_disconnected: 1,
                 spans_dropped_worker_disconnected: 4,
+                ..TargetReporterStats::default()
             })
             .await;
 

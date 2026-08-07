@@ -156,6 +156,21 @@ export function Timeline({
         onMouseDown={onMouseDown}
       >
         {areaD && <path className={`timeline-area mode-${displayMode}`} d={areaD} />}
+        {update.violations.map((violation) => {
+          const x = durNs === 0n ? 0 : (Number(violation.start_ns) / Number(durNs)) * 100;
+          const width = durNs === 0n ? 0 : Math.max(0.25, (Number(violation.end_ns - violation.start_ns) / Number(durNs)) * 100);
+          const severity = violation.severity.tag.toLowerCase();
+          return <rect key={violation.violation_id.raw.toString()} className={`timeline-violation severity-${severity}`} x={x} y={0} width={width} height={100} onClick={(event) => { event.stopPropagation(); onRangeChange({ start_ns: violation.start_ns, end_ns: violation.end_ns }); }}><title>{violation.name} · {formatDuration(violation.end_ns - violation.start_ns)}</title></rect>;
+        })}
+        {update.app_events.map((event) => {
+          const x = durNs === 0n ? 0 : (Number(event.timestamp_ns) / Number(durNs)) * 100;
+          return <line key={event.event_kind_id.raw.toString() + ":" + event.timestamp_ns.toString()} className="timeline-app-event" x1={x} x2={x} y1={0} y2={100}><title>{event.name} · t={(Number(event.timestamp_ns) / 1e9).toFixed(6)}s{event.correlation_id === null ? "" : ` · corr ${event.correlation_id}`}</title></line>;
+        })}
+        {update.markers.map((marker, index) => {
+          const x = durNs === 0n ? 0 : (Number(marker.timestamp_ns) / Number(durNs)) * 100;
+          return <line key={marker.label + index} className="timeline-marker" x1={x} x2={x} y1={0} y2={100}><title>{marker.label} · t={(Number(marker.timestamp_ns) / 1e9).toFixed(6)}s</title></line>;
+        })}
+
         {overlay && (
           <rect
             className="timeline-brush"

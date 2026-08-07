@@ -34,7 +34,10 @@ impl WindowArgs {
     ///
     /// Errors with a precise message rather than guessing: a window
     /// that is silently dropped reads as "the filter didn't work."
-    pub fn resolve(&self, recording_duration_ns: u64) -> Result<Option<(u64, Option<u64>)>, String> {
+    pub fn resolve(
+        &self,
+        recording_duration_ns: u64,
+    ) -> Result<Option<(u64, Option<u64>)>, String> {
         let Some(spec) = self.window.as_deref() else {
             return Ok(None);
         };
@@ -176,6 +179,16 @@ pub enum Command {
     /// no manual markers needed. Ranks detected stalls by duration and
     /// prints a ready-to-paste `flame --window` for each.
     Stalls(StallsArgs),
+    /// List application signposts reported on the recording monotonic clock.
+    Events(EventsArgs),
+    /// Summarize or print numeric application counter samples.
+    Counters(CountersArgs),
+    /// List declarative application latency/liveness contracts.
+    Contracts(ContractsArgs),
+    /// List derived contract violations.
+    Violations(ViolationsArgs),
+    /// Print scheduler/PET/application evidence joined to one violation.
+    Incident(IncidentArgs),
 }
 
 #[derive(Facet, Debug)]
@@ -524,6 +537,86 @@ pub struct StallsArgs {
     /// Maximum number of stalls to print, ranked by duration.
     #[facet(args::named, args::short = 'n', default = 10)]
     pub limit: usize,
+
+    /// Re-bucket only this window at a caller-chosen resolution instead of
+    /// the run-wide adaptive bucket. Use with `--bucket-ns` to catch
+    /// sub-second stalls that the coarse default buckets alias away.
+    /// Accepts the same specs as `flame --window` (durations, `@video`
+    /// timestamps, or marker labels).
+    #[facet(flatten, default)]
+    pub window: WindowArgs,
+
+    /// Override the timeline bucket width in ns (e.g. 10_000_000 = 10 ms).
+    /// Without this, the server sizes buckets to ~200 per run (min 50 ms),
+    /// which is too coarse to resolve sub-second stalls on a long run.
+    #[facet(args::named, default)]
+    pub bucket_ns: Option<u64>,
+}
+
+#[derive(Facet, Debug)]
+pub struct EventsArgs {
+    #[facet(args::named, default)]
+    pub run: Option<u64>,
+    #[facet(args::named, default)]
+    pub tid: Option<u32>,
+    #[facet(flatten, default)]
+    pub window: WindowArgs,
+    #[facet(args::named, default)]
+    pub name: Option<String>,
+    #[facet(args::named, args::short = 'n', default = 100)]
+    pub limit: u32,
+    #[facet(args::named, default)]
+    pub json: bool,
+}
+
+#[derive(Facet, Debug)]
+pub struct CountersArgs {
+    #[facet(args::named, default)]
+    pub run: Option<u64>,
+    #[facet(flatten, default)]
+    pub window: WindowArgs,
+    #[facet(args::named, default)]
+    pub name: Option<String>,
+    #[facet(args::named, default)]
+    pub samples: bool,
+    #[facet(args::named, args::short = 'n', default = 100)]
+    pub limit: u32,
+    #[facet(args::named, default)]
+    pub json: bool,
+}
+
+#[derive(Facet, Debug)]
+pub struct ContractsArgs {
+    #[facet(args::named, default)]
+    pub run: Option<u64>,
+    #[facet(args::named, default)]
+    pub json: bool,
+}
+
+#[derive(Facet, Debug)]
+pub struct ViolationsArgs {
+    #[facet(args::named, default)]
+    pub run: Option<u64>,
+    #[facet(flatten, default)]
+    pub window: WindowArgs,
+    #[facet(args::named, default)]
+    pub severity: Option<String>,
+    #[facet(args::named, args::short = 'n', default = 100)]
+    pub limit: u32,
+    #[facet(args::named, default)]
+    pub json: bool,
+}
+
+#[derive(Facet, Debug)]
+pub struct IncidentArgs {
+    #[facet(args::positional)]
+    pub violation_id: u64,
+    #[facet(args::named, default)]
+    pub run: Option<u64>,
+    #[facet(args::named, default)]
+    pub margin_ms: Option<u64>,
+    #[facet(args::named, default)]
+    pub json: bool,
 }
 
 #[cfg(test)]
@@ -578,6 +671,11 @@ mod tests {
     fn rejects_bad_input() {
         assert!(window("bogus").resolve(1_000_000_000).is_err());
         assert!(window("20s..10s").resolve(60_000_000_000).is_err());
-        assert!(WindowArgs { window: None }.resolve(1_000).unwrap().is_none());
+        assert!(
+            WindowArgs { window: None }
+                .resolve(1_000)
+                .unwrap()
+                .is_none()
+        );
     }
 }

@@ -2302,3 +2302,9 @@ button.target-lane-link:hover {
   color: var(--text-tertiary);
   font-style: italic;
 }
+
+.timeline-app-event { stroke: #8bd5ca; stroke-width: .22; vector-effect: non-scaling-stroke; }
+.timeline-marker { stroke: #eed49f; stroke-width: .3; stroke-dasharray: 2 1; vector-effect: non-scaling-stroke; }
+.timeline-violation { fill: color-mix(in srgb, #ed8796 34%, transparent); cursor: pointer; }
+.timeline-violation.severity-warn { fill: color-mix(in srgb, #f5a97f 28%, transparent); }
+.timeline-violation.severity-info { fill: color-mix(in srgb, #8aadf4 24%, transparent); }

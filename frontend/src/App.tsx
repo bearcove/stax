@@ -234,8 +234,9 @@ export function timelineParams(
   tid: number | null,
   runId: bigint | null = null,
 ): TimelineParams {
-  return { run: runId === null ? null : { 0: runId }, tid };
+  return { run: runId === null ? null : { 0: runId }, tid, bucket_ns: null, window: null };
 }
+
 
 function defaultUrl(): string {
   const params = new URLSearchParams(window.location.search);

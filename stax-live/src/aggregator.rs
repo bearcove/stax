@@ -564,6 +564,17 @@ impl Aggregator {
         });
     }
 
+    /// Include accepted cooperative-target timestamps in the recording bounds.
+    /// Target signals arrive asynchronously and may precede the first sampled
+    /// scheduler event even though they were emitted after capture began.
+    pub fn note_external_timestamp_range(&mut self, start_ns: u64, end_ns: u64) {
+        self.note_timestamp(start_ns);
+        self.note_timestamp(end_ns);
+        if let Some(current) = self.session_start_ns {
+            self.session_start_ns = Some(current.min(start_ns));
+        }
+    }
+
     /// Aggregate wakers for a given wakee tid.
     pub fn top_wakers(&self, wakee_tid: u32, limit: usize) -> Vec<RawWakerEntry> {
         let Some(stats) = self.threads.get(&wakee_tid) else {
