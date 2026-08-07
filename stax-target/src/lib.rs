@@ -581,13 +581,39 @@ impl Contract {
         signal: TargetSignalSelector,
         max_ns: u64,
     ) -> Self {
+        Self::max_signal_gap_for_thread(
+            id,
+            name,
+            description,
+            severity,
+            duty,
+            signal,
+            current_thread_id(),
+            max_ns,
+        )
+    }
+
+    pub fn max_signal_gap_for_thread(
+        id: TargetContractId,
+        name: impl Into<String>,
+        description: Option<String>,
+        severity: TargetContractSeverity,
+        duty: TargetContractDuty,
+        signal: TargetSignalSelector,
+        owner_tid: Option<u32>,
+        max_ns: u64,
+    ) -> Self {
         Self::new(TargetContractRecord {
             contract_id: id,
             name: name.into(),
             description,
             severity,
             duty,
-            kind: TargetContractKind::MaxSignalGap { signal, max_ns },
+            kind: TargetContractKind::MaxSignalGap {
+                signal,
+                owner_tid,
+                max_ns,
+            },
         })
     }
 

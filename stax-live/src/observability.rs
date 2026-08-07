@@ -6,15 +6,16 @@ use stax_live_proto::{
     AppEventEntry, AppEventValue, ContractListUpdate, ContractStatusEntry, CounterQueryParams,
     CounterSampleEntry, CounterSeriesEntry, CounterSeriesUpdate, EventListUpdate, EventQueryParams,
     IncidentCounterEvidence, IncidentQueryParams, IncidentSchedulerEvidence, IncidentStackEvidence,
-    IncidentUpdate, ObservabilityDiagnostics, OffCpuReason, SavedObservability,
-    SavedTargetContract, SavedTargetCounterSet, SavedTargetEventKind, SymbolRef,
-    TargetContractDuty, TargetContractId, TargetContractKind, TargetContractRecord,
+    IncidentThreadEvidence, IncidentUpdate, ObservabilityDiagnostics, OffCpuReason,
+    SavedObservability, SavedTargetContract, SavedTargetCounterSet, SavedTargetEventKind,
+    SymbolRef, TargetContractDuty, TargetContractId, TargetContractKind, TargetContractRecord,
     TargetContractSeverity, TargetCounterSamplePoint, TargetCounterSampleRecord,
     TargetCounterScalar, TargetCounterSetId, TargetCounterSetRecord, TargetEventKindId,
     TargetEventKindRecord, TargetEventRecord, TargetSignalBatch, TargetSignalSelector,
     TargetViolation, TargetViolationId, TimeRange, ViolationListUpdate, ViolationQueryParams,
 };
 
+use crate::aggregator::RawInterval;
 use crate::{Aggregator, BinaryRegistry, IntervalKind};
 
 const MAX_EVENTS: usize = 250_000;
@@ -448,9 +449,19 @@ impl ObservabilityStore {
                 } => self.eval_off_cpu(
                     pid, contract, *tid, *max_ns, reasons, duty, aggregator, binaries, run_end,
                 ),
-                TargetContractKind::MaxSignalGap { signal, max_ns } => {
-                    self.eval_signal_gap(pid, contract, signal, *max_ns, duty, session_start)
-                }
+                TargetContractKind::MaxSignalGap {
+                    signal,
+                    owner_tid,
+                    max_ns,
+                } => self.eval_signal_gap(
+                    pid,
+                    contract,
+                    signal,
+                    *owner_tid,
+                    *max_ns,
+                    duty,
+                    session_start,
+                ),
                 TargetContractKind::MaxLatency {
                     start_event,
                     end_event,
@@ -559,40 +570,29 @@ impl ObservabilityStore {
         let session_start = aggregator.session_start_ns().unwrap_or(0);
         let absolute_start = session_start.saturating_add(window.start_ns);
         let absolute_end = session_start.saturating_add(window.end_ns);
-        let scheduler = violation.tid.and_then(|tid| {
-            aggregator
+        let causal_start = session_start.saturating_add(violation.start_ns);
+        let causal_end = session_start.saturating_add(violation.end_ns);
+        let mut scheduler = violation.tid.map_or_else(Vec::new, |tid| {
+            let mut evidence: Vec<_> = aggregator
                 .iter_intervals(Some(tid))
-                .find_map(|(_, interval)| {
-                    let end = if interval.end_ns == 0 {
-                        aggregator.last_event_ns().unwrap_or(interval.start_ns)
-                    } else {
-                        interval.end_ns
-                    };
-                    if interval.start_ns >= absolute_end || end <= absolute_start {
-                        return None;
-                    }
-                    let IntervalKind::OffCpu {
-                        stack,
-                        waker_tid,
-                        waker_user_stack,
-                    } = &interval.kind
-                    else {
-                        return None;
-                    };
-                    Some(IncidentSchedulerEvidence {
+                .filter_map(|(_, interval)| {
+                    scheduler_evidence(
                         tid,
-                        start_ns: interval.start_ns.saturating_sub(session_start),
-                        end_ns: end.saturating_sub(session_start),
-                        reason: classify_stack(stack, binaries),
-                        blocking_stack: resolve_stack(stack, binaries),
-                        waker_tid: *waker_tid,
-                        waker_stack: waker_user_stack
-                            .as_deref()
-                            .map(|stack| resolve_stack(stack, binaries))
-                            .unwrap_or_default(),
-                    })
+                        interval,
+                        causal_start,
+                        causal_end,
+                        session_start,
+                        aggregator.last_event_ns(),
+                        binaries,
+                    )
                 })
+                .collect();
+            evidence.sort_by_key(|entry| {
+                std::cmp::Reverse(entry.end_ns.saturating_sub(entry.start_ns))
+            });
+            evidence
         });
+        scheduler.truncate(32);
         let mut nearest_pet = Vec::new();
         if let Some(tid) = violation.tid {
             for timestamp_ns in [
@@ -614,25 +614,14 @@ impl ObservabilityStore {
                 }
             }
         }
-        let mut other_thread_stacks = Vec::new();
-        for tid in aggregator
-            .iter_threads()
-            .filter(|tid| Some(*tid) != violation.tid)
-            .take(16)
-        {
-            if let Ok(nearest) = aggregator.nearest_pet_stack_with_distance(
-                tid,
-                session_start.saturating_add(violation.start_ns),
-                PET_JOIN_DISTANCE_NS,
-            ) {
-                other_thread_stacks.push(IncidentStackEvidence {
-                    timestamp_ns: violation.start_ns,
-                    tid,
-                    distance_ns: Some(nearest.distance_ns),
-                    frames: resolve_stack(&nearest.stack, binaries),
-                });
-            }
-        }
+        let concurrent_threads = concurrent_thread_evidence(
+            aggregator,
+            binaries,
+            violation.tid,
+            causal_start,
+            causal_end,
+            session_start,
+        );
         let events = self
             .events_update(
                 &EventQueryParams {
@@ -664,7 +653,7 @@ impl ObservabilityStore {
             window: Some(window),
             scheduler,
             nearest_pet,
-            other_thread_stacks,
+            concurrent_threads,
             target_spans: Vec::new(),
             events,
             counters,
@@ -854,6 +843,7 @@ impl ObservabilityStore {
         pid: u32,
         contract: &TargetContractRecord,
         signal: &TargetSignalSelector,
+        owner_tid: Option<u32>,
         max_ns: u64,
         duty: Vec<(u64, u64)>,
         session_start: u64,
@@ -893,7 +883,7 @@ impl ObservabilityStore {
                         point.saturating_sub(session_start),
                         actual,
                         max_ns,
-                        None,
+                        owner_tid,
                         None,
                         false,
                         None,
@@ -910,7 +900,7 @@ impl ObservabilityStore {
                     window_end.saturating_sub(session_start),
                     actual,
                     max_ns,
-                    None,
+                    owner_tid,
                     None,
                     true,
                     None,
@@ -1220,6 +1210,109 @@ fn resolve_stack(stack: &[u64], binaries: &BinaryRegistry) -> Vec<SymbolRef> {
         })
         .collect()
 }
+fn scheduler_evidence(
+    tid: u32,
+    interval: &RawInterval,
+    window_start: u64,
+    window_end: u64,
+    session_start: u64,
+    last_event: Option<u64>,
+    binaries: &BinaryRegistry,
+) -> Option<IncidentSchedulerEvidence> {
+    let end = if interval.end_ns == 0 {
+        last_event.unwrap_or(interval.start_ns)
+    } else {
+        interval.end_ns
+    };
+    if interval.start_ns >= window_end || end <= window_start {
+        return None;
+    }
+    let IntervalKind::OffCpu {
+        stack,
+        waker_tid,
+        waker_user_stack,
+    } = &interval.kind
+    else {
+        return None;
+    };
+    Some(IncidentSchedulerEvidence {
+        tid,
+        start_ns: interval
+            .start_ns
+            .max(window_start)
+            .saturating_sub(session_start),
+        end_ns: end.min(window_end).saturating_sub(session_start),
+        reason: classify_stack(stack, binaries),
+        blocking_stack: resolve_stack(stack, binaries),
+        waker_tid: *waker_tid,
+        waker_stack: waker_user_stack
+            .as_deref()
+            .map(|stack| resolve_stack(stack, binaries))
+            .unwrap_or_default(),
+    })
+}
+
+fn concurrent_thread_evidence(
+    aggregator: &Aggregator,
+    binaries: &BinaryRegistry,
+    owner_tid: Option<u32>,
+    window_start: u64,
+    window_end: u64,
+    session_start: u64,
+) -> Vec<IncidentThreadEvidence> {
+    let mut by_tid: HashMap<u32, (u64, u64, HashMap<Vec<u64>, (u64, u64)>)> = HashMap::new();
+    for (tid, interval) in aggregator.iter_intervals(None) {
+        if Some(tid) == owner_tid || !matches!(interval.kind, IntervalKind::OnCpu) {
+            continue;
+        }
+        let end = if interval.end_ns == 0 {
+            aggregator.last_event_ns().unwrap_or(interval.start_ns)
+        } else {
+            interval.end_ns
+        };
+        let overlap = end
+            .min(window_end)
+            .saturating_sub(interval.start_ns.max(window_start));
+        if overlap > 0 {
+            let entry = by_tid.entry(tid).or_default();
+            entry.0 = entry.0.saturating_add(overlap);
+        }
+    }
+    for (tid, sample) in aggregator.iter_pet_samples(None) {
+        if Some(tid) == owner_tid
+            || sample.timestamp_ns < window_start
+            || sample.timestamp_ns >= window_end
+            || sample.stack.is_empty()
+        {
+            continue;
+        }
+        let entry = by_tid.entry(tid).or_default();
+        entry.1 = entry.1.saturating_add(1);
+        entry
+            .2
+            .entry(sample.stack.to_vec())
+            .and_modify(|group| group.0 += 1)
+            .or_insert((1, sample.timestamp_ns));
+    }
+    let mut evidence: Vec<_> = by_tid
+        .into_iter()
+        .filter_map(|(tid, (on_cpu_ns, sample_count, stacks))| {
+            let (stack, (_, timestamp_ns)) =
+                stacks.into_iter().max_by_key(|(_, (count, _))| *count)?;
+            Some(IncidentThreadEvidence {
+                tid,
+                on_cpu_ns,
+                sample_count,
+                timestamp_ns: timestamp_ns.saturating_sub(session_start),
+                representative_stack: resolve_stack(&stack, binaries),
+            })
+        })
+        .collect();
+    evidence.sort_by_key(|entry| std::cmp::Reverse((entry.on_cpu_ns, entry.sample_count)));
+    evidence.truncate(16);
+    evidence
+}
+
 fn diagnostics_strings(diagnostics: &ObservabilityDiagnostics) -> Vec<String> {
     let mut out = Vec::new();
     if diagnostics.events_dropped_store_full > 0 {
@@ -1438,6 +1531,7 @@ mod tests {
                         signal: TargetSignalSelector::Event {
                             event_kind_id: TargetEventKindId::new(1),
                         },
+                        owner_tid: Some(8),
                         max_ns: 10,
                     },
                 }],
@@ -1453,6 +1547,115 @@ mod tests {
         assert_eq!(violations.len(), 1);
         assert_eq!((violations[0].start_ns, violations[0].end_ns), (0, 100));
         assert_eq!(violations[0].contributing_violations, 2);
+    }
+
+    #[test]
+    fn signal_gap_incident_joins_owner_waits_and_concurrent_stacks() {
+        let mut store = ObservabilityStore::default();
+        store.ingest(
+            TargetSignalBatch {
+                pid: 7,
+                event_kinds: vec![event_kind(1, "tick")],
+                events: vec![
+                    TargetEventRecord {
+                        event_id: TargetEventId::new(1),
+                        event_kind_id: TargetEventKindId::new(1),
+                        timestamp_ns: 100,
+                        source_pid: 7,
+                        tid: Some(8),
+                        correlation_id: None,
+                        values: vec![TargetCounterScalar::U64 { value: 1 }],
+                    },
+                    TargetEventRecord {
+                        event_id: TargetEventId::new(2),
+                        event_kind_id: TargetEventKindId::new(1),
+                        timestamp_ns: 190,
+                        source_pid: 7,
+                        tid: Some(8),
+                        correlation_id: None,
+                        values: vec![TargetCounterScalar::U64 { value: 2 }],
+                    },
+                ],
+                contracts: vec![TargetContractRecord {
+                    contract_id: TargetContractId::new(3),
+                    name: "cadence".to_owned(),
+                    description: None,
+                    severity: TargetContractSeverity::Fail,
+                    duty: TargetContractDuty::EntireRun {
+                        startup_grace_ns: 0,
+                        shutdown_grace_ns: 0,
+                    },
+                    kind: TargetContractKind::MaxSignalGap {
+                        signal: TargetSignalSelector::Event {
+                            event_kind_id: TargetEventKindId::new(1),
+                        },
+                        owner_tid: Some(8),
+                        max_ns: 50,
+                    },
+                }],
+                ..TargetSignalBatch::default()
+            },
+            Some(100),
+            Some(200),
+        );
+        let mut aggregator = Aggregator::default();
+        aggregator.record_pet_sample(8, 100, &[0x10], &[], crate::PmuSample::default());
+        aggregator.record_interval(
+            8,
+            110,
+            150,
+            IntervalKind::OffCpu {
+                stack: vec![0x20].into_boxed_slice(),
+                waker_tid: Some(9),
+                waker_user_stack: Some(vec![0x30].into_boxed_slice()),
+            },
+        );
+        aggregator.record_interval(
+            8,
+            155,
+            180,
+            IntervalKind::OffCpu {
+                stack: vec![0x21].into_boxed_slice(),
+                waker_tid: None,
+                waker_user_stack: None,
+            },
+        );
+        aggregator.record_interval(9, 115, 175, IntervalKind::OnCpu);
+        aggregator.record_pet_sample(9, 120, &[0x40, 0x41], &[], crate::PmuSample::default());
+        aggregator.record_pet_sample(9, 130, &[0x40, 0x41], &[], crate::PmuSample::default());
+        aggregator.record_pet_sample(10, 140, &[0x50], &[], crate::PmuSample::default());
+        aggregator.record_pet_sample(8, 200, &[0x10], &[], crate::PmuSample::default());
+        let violation = store
+            .violations(&aggregator, &BinaryRegistry::new())
+            .into_iter()
+            .find(|violation| violation.start_ns == 0 && violation.end_ns == 90)
+            .expect("cadence violation");
+        assert_eq!(violation.tid, Some(8));
+        let incident = store.incident(
+            &IncidentQueryParams {
+                run: None,
+                violation_id: violation.violation_id,
+                margin_ns: Some(0),
+            },
+            &aggregator,
+            &BinaryRegistry::new(),
+        );
+        assert_eq!(incident.scheduler.len(), 2);
+        assert_eq!(
+            (incident.scheduler[0].start_ns, incident.scheduler[0].end_ns),
+            (10, 50)
+        );
+        assert_eq!(incident.scheduler[0].waker_tid, Some(9));
+        assert_eq!(incident.concurrent_threads.len(), 2);
+        assert_eq!(incident.concurrent_threads[0].tid, 9);
+        assert_eq!(incident.concurrent_threads[0].on_cpu_ns, 60);
+        assert_eq!(incident.concurrent_threads[0].sample_count, 2);
+        assert_eq!(
+            incident.concurrent_threads[0].representative_stack[0]
+                .function_name
+                .as_deref(),
+            Some("0x40")
+        );
     }
 
     #[test]

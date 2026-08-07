@@ -1063,6 +1063,8 @@ pub enum TargetContractKind {
     },
     MaxSignalGap {
         signal: TargetSignalSelector,
+        /// OS thread responsible for producing the signal, when known.
+        owner_tid: Option<u32>,
         max_ns: u64,
     },
     MaxLatency {
@@ -1260,6 +1262,19 @@ pub struct IncidentSchedulerEvidence {
 }
 
 #[derive(Clone, Debug, Facet)]
+pub struct IncidentThreadEvidence {
+    pub tid: u32,
+    /// On-CPU scheduler time overlapping the violation window.
+    pub on_cpu_ns: u64,
+    /// PET samples captured inside the violation window.
+    pub sample_count: u64,
+    /// Timestamp of the representative sample, recording-relative.
+    pub timestamp_ns: u64,
+    /// Most frequently sampled user stack in the violation window.
+    pub representative_stack: Vec<SymbolRef>,
+}
+
+#[derive(Clone, Debug, Facet)]
 pub struct IncidentCounterEvidence {
     pub name: String,
     pub unit: TargetCounterUnit,
@@ -1275,9 +1290,11 @@ pub struct IncidentUpdate {
     pub violation: Option<TargetViolation>,
     pub contract: Option<TargetContractRecord>,
     pub window: Option<TimeRange>,
-    pub scheduler: Option<IncidentSchedulerEvidence>,
+    /// Every owner-thread off-CPU interval overlapping the incident, longest first.
+    pub scheduler: Vec<IncidentSchedulerEvidence>,
     pub nearest_pet: Vec<IncidentStackEvidence>,
-    pub other_thread_stacks: Vec<IncidentStackEvidence>,
+    /// Other threads active in the violation window, ranked by on-CPU time then samples.
+    pub concurrent_threads: Vec<IncidentThreadEvidence>,
     pub target_spans: Vec<TargetSpanEntry>,
     pub events: Vec<AppEventEntry>,
     pub counters: Vec<IncidentCounterEvidence>,

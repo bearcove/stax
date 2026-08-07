@@ -2661,11 +2661,12 @@ async fn run_incident(args: IncidentArgs) -> Result<(), Box<dyn Error>> {
         fmt_ns(violation.actual_ns),
         fmt_ns(violation.threshold_ns)
     );
-    if let Some(scheduler) = update.scheduler {
+    for scheduler in update.scheduler {
         println!(
-            "scheduler tid={} {:?} {:.6}s..{:.6}s",
+            "scheduler tid={} {:?} overlap={} {:.6}s..{:.6}s",
             scheduler.tid,
             scheduler.reason,
+            fmt_ns(scheduler.end_ns.saturating_sub(scheduler.start_ns)),
             scheduler.start_ns as f64 / 1e9,
             scheduler.end_ns as f64 / 1e9
         );
@@ -2676,6 +2677,37 @@ async fn run_incident(args: IncidentArgs) -> Result<(), Box<dyn Error>> {
                     .function_name
                     .unwrap_or_else(|| "<unknown>".to_owned())
             );
+        }
+        if let Some(waker_tid) = scheduler.waker_tid {
+            println!("  waker tid={waker_tid}");
+            for frame in scheduler.waker_stack {
+                println!(
+                    "    {}",
+                    frame
+                        .function_name
+                        .unwrap_or_else(|| "<unknown>".to_owned())
+                );
+            }
+        }
+    }
+    if !update.concurrent_threads.is_empty() {
+        println!("concurrent threads:");
+        for thread in update.concurrent_threads {
+            println!(
+                "  tid={} on-cpu={} samples={} at {:.6}s",
+                thread.tid,
+                fmt_ns(thread.on_cpu_ns),
+                thread.sample_count,
+                thread.timestamp_ns as f64 / 1e9
+            );
+            for frame in thread.representative_stack {
+                println!(
+                    "    {}",
+                    frame
+                        .function_name
+                        .unwrap_or_else(|| "<unknown>".to_owned())
+                );
+            }
         }
     }
     println!("events:");
