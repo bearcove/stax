@@ -44,6 +44,10 @@ target_id_type!(TargetSourceId);
 target_id_type!(TargetAttachmentId);
 target_id_type!(TargetCounterSetId);
 target_id_type!(TargetCounterSampleId);
+target_id_type!(TargetEventKindId);
+target_id_type!(TargetEventId);
+target_id_type!(TargetContractId);
+target_id_type!(TargetViolationId);
 
 /// Off-CPU time at a stack node, broken down by why the thread was
 /// off-CPU. Sum across all fields = total off-CPU time.
@@ -311,6 +315,10 @@ pub struct TimelineBucket {
     pub target_ns: u64,
     /// Off-CPU time, summed across all reasons.
     pub off_cpu_ns: u64,
+    /// Off-CPU time broken down by reason. Lets `stalls` classify a
+    /// stall window as lock / idle / sleep instead of lumping all
+    /// off-CPU together.
+    pub off_cpu_by_reason: OffCpuBreakdown,
 }
 
 /// Per-lane target time for a timeline row. The `buckets` vector has
@@ -332,6 +340,47 @@ pub struct TargetLaneTimeline {
 pub struct TimeRange {
     pub start_ns: u64,
     pub end_ns: u64,
+}
+#[derive(Clone, Debug, Facet)]
+pub struct AppEventTick {
+    pub timestamp_ns: u64,
+    pub source_pid: u32,
+    pub tid: Option<u32>,
+    pub event_kind_id: TargetEventKindId,
+    pub name: String,
+    pub correlation_id: Option<u64>,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct ViolationSpan {
+    pub violation_id: TargetViolationId,
+    pub contract_id: TargetContractId,
+    pub name: String,
+    pub severity: TargetContractSeverity,
+    pub start_ns: u64,
+    pub end_ns: u64,
+    pub open: bool,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct CounterBucket {
+    pub start_ns: u64,
+    pub first: Option<TargetCounterScalar>,
+    pub last: Option<TargetCounterScalar>,
+    pub min: Option<TargetCounterScalar>,
+    pub max: Option<TargetCounterScalar>,
+    pub changes: u64,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct CounterTimeline {
+    pub source_pid: u32,
+    pub counter_set_id: TargetCounterSetId,
+    pub counter_index: u32,
+    pub name: String,
+    pub unit: TargetCounterUnit,
+    pub monotonic: bool,
+    pub buckets: Vec<CounterBucket>,
 }
 
 #[derive(Clone, Debug, Facet)]
@@ -423,13 +472,23 @@ pub struct RunViewParams {
     pub run: Option<RunId>,
 }
 
-#[derive(Clone, Copy, Debug, Facet)]
+#[derive(Clone, Debug, Facet)]
 pub struct TimelineParams {
     /// Optional historical run id to query without changing the server's
     /// selected query state. `None` means the live/current query state.
     pub run: Option<RunId>,
     /// Filter to one thread or synthetic lane; `None` aggregates all lanes.
     pub tid: Option<u32>,
+    /// Override the adaptive bucket width. The server normally picks a
+    /// width so a run stays within ~200 buckets (min 50 ms); a long
+    /// recording therefore gets coarse buckets that alias sub-second
+    /// stalls across a boundary. Pass an explicit width (e.g. 10 ms)
+    /// to re-bucket a window at fine resolution for stall detection.
+    pub bucket_ns: Option<u64>,
+    /// Restrict the timeline to this recording-relative window
+    /// (`start_ns`/`end_ns` in perf-clock ns since session start).
+    /// `None` buckets the whole recording.
+    pub window: Option<TimeRange>,
 }
 
 #[derive(Clone, Debug, Facet)]
@@ -441,6 +500,11 @@ pub struct TimelineUpdate {
     /// Recording duration so the UI can show "Xs elapsed" without
     /// computing it client-side.
     pub recording_duration_ns: u64,
+    /// Wall-clock start of the recording (unix ns), so the CLI can
+    /// resolve video-timestamp windows (`--window @19:42:31..@19:42:32`)
+    /// without a second RPC. `recording_duration_ns` is perf-clock;
+    /// this is the bridge to wall-clock.
+    pub started_at_unix_ns: u64,
     /// Total active time across the timeline.
     pub total_on_cpu_ns: u64,
     /// Portion of `total_on_cpu_ns` contributed by target-reported
@@ -460,6 +524,12 @@ pub struct TimelineUpdate {
     /// (`stax mark freeze`) and later queried (`--window freeze..`)
     /// without converting wall-clock to recording time by hand.
     pub markers: Vec<RunMarker>,
+    /// Application-originated point events on the recording monotonic clock.
+    pub app_events: Vec<AppEventTick>,
+    /// Derived contract failures overlapping the timeline window.
+    pub violations: Vec<ViolationSpan>,
+    /// Bucketed numeric application signals.
+    pub counters: Vec<CounterTimeline>,
 }
 
 /// A named point in recording time, dropped by an agent or user to
@@ -873,14 +943,15 @@ pub enum TargetCounterUnit {
     Other = 7,
 }
 
-#[derive(Clone, Debug, Facet)]
+#[derive(Clone, Debug, PartialEq, Facet)]
 pub struct TargetCounterDefinition {
     pub name: String,
     pub unit: TargetCounterUnit,
     pub description: Option<String>,
+    pub monotonic: bool,
 }
 
-#[derive(Clone, Debug, Facet)]
+#[derive(Clone, Debug, PartialEq, Facet)]
 pub struct TargetCounterSetRecord {
     pub counter_set_id: TargetCounterSetId,
     pub name: String,
@@ -898,9 +969,10 @@ pub enum TargetCounterSamplePoint {
     CommandBufferEnd = 4,
     WaitBegin = 5,
     WaitEnd = 6,
+    TimeSeries = 7,
 }
 
-#[derive(Clone, Debug, Facet)]
+#[derive(Clone, Debug, PartialEq, Facet)]
 #[repr(u8)]
 pub enum TargetCounterScalar {
     U64 { value: u64 },
@@ -908,22 +980,309 @@ pub enum TargetCounterScalar {
     F64 { value: f64 },
 }
 
-#[derive(Clone, Debug, Facet)]
-pub struct TargetCounterValue {
-    pub name: String,
-    pub unit: TargetCounterUnit,
-    pub value: TargetCounterScalar,
-}
-
-#[derive(Clone, Debug, Facet)]
+#[derive(Clone, Debug, PartialEq, Facet)]
 pub struct TargetCounterSampleRecord {
     pub counter_sample_id: TargetCounterSampleId,
     pub counter_set_id: TargetCounterSetId,
     pub dispatch_id: Option<TargetDispatchId>,
     pub command_buffer_id: Option<TargetCommandBufferId>,
     pub sample_point: TargetCounterSamplePoint,
-    pub values: Vec<TargetCounterValue>,
+    pub timestamp_ns: Option<u64>,
+    pub source_pid: u32,
+    pub tid: Option<u32>,
+    pub values: Vec<TargetCounterScalar>,
     pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Facet)]
+pub struct TargetEventFieldDefinition {
+    pub name: String,
+    pub unit: TargetCounterUnit,
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Facet)]
+pub struct TargetEventKindRecord {
+    pub event_kind_id: TargetEventKindId,
+    pub name: String,
+    pub description: Option<String>,
+    pub fields: Vec<TargetEventFieldDefinition>,
+}
+
+#[derive(Clone, Debug, PartialEq, Facet)]
+pub struct TargetEventRecord {
+    pub event_id: TargetEventId,
+    pub event_kind_id: TargetEventKindId,
+    pub timestamp_ns: u64,
+    pub source_pid: u32,
+    pub tid: Option<u32>,
+    pub correlation_id: Option<u64>,
+    pub values: Vec<TargetCounterScalar>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum TargetContractSeverity {
+    Info = 0,
+    Warn = 1,
+    Fail = 2,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum TargetSignalSelector {
+    Event {
+        event_kind_id: TargetEventKindId,
+    },
+    Counter {
+        counter_set_id: TargetCounterSetId,
+        counter_index: u32,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum TargetContractDuty {
+    EntireRun {
+        startup_grace_ns: u64,
+        shutdown_grace_ns: u64,
+    },
+    WhileEventRecent {
+        event_kind_id: TargetEventKindId,
+        within_ns: u64,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum TargetContractKind {
+    MaxOffCpuInterval {
+        tid: u32,
+        max_ns: u64,
+        reasons: Vec<OffCpuReason>,
+    },
+    MaxSignalGap {
+        signal: TargetSignalSelector,
+        max_ns: u64,
+    },
+    MaxLatency {
+        start_event: TargetEventKindId,
+        end_event: TargetEventKindId,
+        max_ns: u64,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Facet)]
+pub struct TargetContractRecord {
+    pub contract_id: TargetContractId,
+    pub name: String,
+    pub description: Option<String>,
+    pub severity: TargetContractSeverity,
+    pub duty: TargetContractDuty,
+    pub kind: TargetContractKind,
+}
+
+#[derive(Clone, Debug, Default, Facet)]
+pub struct TargetSignalBatch {
+    pub pid: u32,
+    pub event_kinds: Vec<TargetEventKindRecord>,
+    pub events: Vec<TargetEventRecord>,
+    pub counter_sets: Vec<TargetCounterSetRecord>,
+    pub counter_samples: Vec<TargetCounterSampleRecord>,
+    pub contracts: Vec<TargetContractRecord>,
+}
+
+impl TargetSignalBatch {
+    pub fn is_empty(&self) -> bool {
+        self.event_kinds.is_empty()
+            && self.events.is_empty()
+            && self.counter_sets.is_empty()
+            && self.counter_samples.is_empty()
+            && self.contracts.is_empty()
+    }
+}
+#[derive(Clone, Debug, Facet)]
+pub struct EventQueryParams {
+    pub run: Option<RunId>,
+    pub tid: Option<u32>,
+    pub window: Option<TimeRange>,
+    pub name_contains: Option<String>,
+    pub limit: u32,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct AppEventValue {
+    pub name: String,
+    pub unit: TargetCounterUnit,
+    pub value: TargetCounterScalar,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct AppEventEntry {
+    pub event_id: TargetEventId,
+    pub event_kind_id: TargetEventKindId,
+    pub timestamp_ns: u64,
+    pub source_pid: u32,
+    pub tid: Option<u32>,
+    pub name: String,
+    pub description: Option<String>,
+    pub correlation_id: Option<u64>,
+    pub values: Vec<AppEventValue>,
+}
+
+#[derive(Clone, Debug, Default, Facet)]
+pub struct EventListUpdate {
+    pub events: Vec<AppEventEntry>,
+    pub total_matching: u64,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct CounterQueryParams {
+    pub run: Option<RunId>,
+    pub window: Option<TimeRange>,
+    pub name_contains: Option<String>,
+    pub include_samples: bool,
+    pub limit: u32,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct CounterSampleEntry {
+    pub counter_sample_id: TargetCounterSampleId,
+    pub timestamp_ns: u64,
+    pub source_pid: u32,
+    pub tid: Option<u32>,
+    pub value: TargetCounterScalar,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct CounterSeriesEntry {
+    pub source_pid: u32,
+    pub counter_set_id: TargetCounterSetId,
+    pub counter_index: u32,
+    pub name: String,
+    pub description: Option<String>,
+    pub unit: TargetCounterUnit,
+    pub monotonic: bool,
+    pub count: u64,
+    pub first: Option<TargetCounterScalar>,
+    pub last: Option<TargetCounterScalar>,
+    pub min: Option<TargetCounterScalar>,
+    pub max: Option<TargetCounterScalar>,
+    pub delta: Option<TargetCounterScalar>,
+    pub last_change_ns: Option<u64>,
+    pub samples: Vec<CounterSampleEntry>,
+}
+
+#[derive(Clone, Debug, Default, Facet)]
+pub struct CounterSeriesUpdate {
+    pub counters: Vec<CounterSeriesEntry>,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct ContractQueryParams {
+    pub run: Option<RunId>,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct ContractStatusEntry {
+    pub source_pid: u32,
+    pub contract: TargetContractRecord,
+    pub evaluations: u64,
+    pub violations: u64,
+    pub currently_violating: bool,
+}
+
+#[derive(Clone, Debug, Default, Facet)]
+pub struct ContractListUpdate {
+    pub contracts: Vec<ContractStatusEntry>,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct ViolationQueryParams {
+    pub run: Option<RunId>,
+    pub window: Option<TimeRange>,
+    pub minimum_severity: Option<TargetContractSeverity>,
+    pub limit: u32,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct TargetViolation {
+    pub violation_id: TargetViolationId,
+    pub source_pid: u32,
+    pub contract_id: TargetContractId,
+    pub contract_name: String,
+    pub severity: TargetContractSeverity,
+    pub start_ns: u64,
+    pub end_ns: u64,
+    pub actual_ns: u64,
+    pub threshold_ns: u64,
+    pub excess_ns: u64,
+    pub tid: Option<u32>,
+    pub correlation_id: Option<u64>,
+    pub open: bool,
+    pub contributing_violations: u64,
+    pub reason: Option<OffCpuReason>,
+}
+
+#[derive(Clone, Debug, Default, Facet)]
+pub struct ViolationListUpdate {
+    pub violations: Vec<TargetViolation>,
+    pub total_matching: u64,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct IncidentQueryParams {
+    pub run: Option<RunId>,
+    pub violation_id: TargetViolationId,
+    pub margin_ns: Option<u64>,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct IncidentStackEvidence {
+    pub timestamp_ns: u64,
+    pub tid: u32,
+    pub distance_ns: Option<u64>,
+    pub frames: Vec<SymbolRef>,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct IncidentSchedulerEvidence {
+    pub tid: u32,
+    pub start_ns: u64,
+    pub end_ns: u64,
+    pub reason: OffCpuReason,
+    pub blocking_stack: Vec<SymbolRef>,
+    pub waker_tid: Option<u32>,
+    pub waker_stack: Vec<SymbolRef>,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct IncidentCounterEvidence {
+    pub name: String,
+    pub unit: TargetCounterUnit,
+    pub monotonic: bool,
+    pub before: Option<CounterSampleEntry>,
+    pub samples: Vec<CounterSampleEntry>,
+    pub after: Option<CounterSampleEntry>,
+    pub unchanged_ns: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Facet)]
+pub struct IncidentUpdate {
+    pub violation: Option<TargetViolation>,
+    pub contract: Option<TargetContractRecord>,
+    pub window: Option<TimeRange>,
+    pub scheduler: Option<IncidentSchedulerEvidence>,
+    pub nearest_pet: Vec<IncidentStackEvidence>,
+    pub other_thread_stacks: Vec<IncidentStackEvidence>,
+    pub target_spans: Vec<TargetSpanEntry>,
+    pub events: Vec<AppEventEntry>,
+    pub counters: Vec<IncidentCounterEvidence>,
+    pub markers: Vec<RunMarker>,
+    pub diagnostics: Vec<String>,
 }
 
 #[derive(Clone, Debug, Facet)]
@@ -955,8 +1314,6 @@ pub struct TargetRecordBatch {
     pub shaders: Vec<TargetShaderRecord>,
     pub sources: Vec<TargetSourceRecord>,
     pub attachments: Vec<TargetAttachmentRecord>,
-    pub counter_sets: Vec<TargetCounterSetRecord>,
-    pub counter_samples: Vec<TargetCounterSampleRecord>,
 }
 
 impl TargetRecordBatch {
@@ -969,8 +1326,6 @@ impl TargetRecordBatch {
             && self.shaders.is_empty()
             && self.sources.is_empty()
             && self.attachments.is_empty()
-            && self.counter_sets.is_empty()
-            && self.counter_samples.is_empty()
     }
 }
 
@@ -1075,6 +1430,7 @@ pub struct TargetSpanBatch {
     pub pid: u32,
     /// Execution lane name, e.g. "GPU tq1s".
     pub lane: String,
+
     pub lane_kind: TargetLaneKind,
     pub spans: Vec<TargetSpan>,
     pub records: TargetRecordBatch,
@@ -1089,6 +1445,10 @@ pub struct TargetReporterStats {
     pub spans_dropped_queue_full: u64,
     pub batches_dropped_worker_disconnected: u64,
     pub spans_dropped_worker_disconnected: u64,
+    pub signal_batches_dropped_queue_full: u64,
+    pub signals_dropped_queue_full: u64,
+    pub signal_batches_dropped_worker_disconnected: u64,
+    pub signals_dropped_worker_disconnected: u64,
 }
 
 /// Target-facing ingest surface: the thing a profiled app latches onto.
@@ -1097,6 +1457,7 @@ pub struct TargetReporterStats {
 #[vox::service]
 pub trait TargetIngest {
     async fn ingest(&self, batch: TargetSpanBatch);
+    async fn ingest_signals(&self, batch: TargetSignalBatch);
 
     /// Snapshot of target-side reporter drops from stax-target's local
     /// bounded queue. Sent by the target worker while capture is active.
@@ -1254,6 +1615,21 @@ pub trait Profiler {
     /// continue to work against the existing (frozen) data.
     async fn set_paused(&self, paused: bool);
     async fn is_paused(&self) -> bool;
+    async fn events(&self, params: EventQueryParams) -> EventListUpdate;
+
+    async fn counters(&self, params: CounterQueryParams) -> CounterSeriesUpdate;
+
+    async fn contracts(&self, params: ContractQueryParams) -> ContractListUpdate;
+
+    async fn violations(&self, params: ViolationQueryParams) -> ViolationListUpdate;
+
+    async fn subscribe_violations(
+        &self,
+        params: ViolationQueryParams,
+        output: vox::Tx<ViolationListUpdate>,
+    );
+
+    async fn incident(&self, params: IncidentQueryParams) -> IncidentUpdate;
 }
 
 /// Stable handle for one run hosted by the server. Returned by
@@ -1409,6 +1785,55 @@ pub struct SavedRunArchive {
     pub aggregator: SavedAggregator,
     pub binaries: SavedBinaryRegistry,
     pub target_ingest: TargetIngestDiagnostics,
+    pub observability: SavedObservability,
+}
+#[derive(Clone, Debug, Default, Facet)]
+pub struct SavedObservability {
+    pub event_kinds: Vec<SavedTargetEventKind>,
+    pub events: Vec<TargetEventRecord>,
+    pub counter_sets: Vec<SavedTargetCounterSet>,
+    pub counter_samples: Vec<TargetCounterSampleRecord>,
+    pub contracts: Vec<SavedTargetContract>,
+    pub diagnostics: ObservabilityDiagnostics,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct SavedTargetEventKind {
+    pub source_pid: u32,
+    pub definition: TargetEventKindRecord,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct SavedTargetCounterSet {
+    pub source_pid: u32,
+    pub definition: TargetCounterSetRecord,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct SavedTargetContract {
+    pub source_pid: u32,
+    pub definition: TargetContractRecord,
+}
+
+#[derive(Clone, Debug, Default, Facet)]
+pub struct ObservabilityDiagnostics {
+    pub signal_batches: u64,
+    pub signal_batches_dropped_no_active_run: u64,
+    pub signals_dropped_no_active_run: u64,
+    pub signal_batches_dropped_wrong_pid: u64,
+    pub signals_dropped_wrong_pid: u64,
+    pub events_received: u64,
+    pub events_recorded: u64,
+    pub counter_samples_received: u64,
+    pub counter_samples_recorded: u64,
+    pub definitions_conflicting: u64,
+    pub samples_unknown_definition: u64,
+    pub samples_bad_value_count: u64,
+    pub samples_invalid_tid: u64,
+    pub samples_bad_timestamp: u64,
+    pub monotonic_regressions: u64,
+    pub events_dropped_store_full: u64,
+    pub counter_samples_dropped_store_full: u64,
 }
 
 impl SavedRunArchive {
@@ -1424,7 +1849,9 @@ impl SavedRunArchive {
             aggregator: SavedAggregator::default(),
             binaries: SavedBinaryRegistry::default(),
             target_ingest: TargetIngestDiagnostics::default(),
+            observability: SavedObservability::default(),
         };
+
         let mut thread_names = BTreeMap::new();
         let mut threads: BTreeMap<u32, SavedThread> = BTreeMap::new();
 
@@ -1485,6 +1912,42 @@ impl SavedRunArchive {
                 SavedEventLogEntry::TargetIngestDiagnostics { diagnostics } => {
                     archive.target_ingest = diagnostics;
                 }
+                SavedEventLogEntry::TargetEventKind {
+                    source_pid,
+                    definition,
+                } => archive
+                    .observability
+                    .event_kinds
+                    .push(SavedTargetEventKind {
+                        source_pid,
+                        definition,
+                    }),
+                SavedEventLogEntry::TargetEvent { event } => {
+                    archive.observability.events.push(event);
+                }
+                SavedEventLogEntry::TargetCounterSet {
+                    source_pid,
+                    definition,
+                } => archive
+                    .observability
+                    .counter_sets
+                    .push(SavedTargetCounterSet {
+                        source_pid,
+                        definition,
+                    }),
+                SavedEventLogEntry::TargetCounterSample { sample } => {
+                    archive.observability.counter_samples.push(sample);
+                }
+                SavedEventLogEntry::TargetContract {
+                    source_pid,
+                    definition,
+                } => archive.observability.contracts.push(SavedTargetContract {
+                    source_pid,
+                    definition,
+                }),
+                SavedEventLogEntry::ObservabilityDiagnostics { diagnostics } => {
+                    archive.observability.diagnostics = diagnostics;
+                }
             }
         }
 
@@ -1506,6 +1969,8 @@ pub struct SavedRunArchiveBundle {
     pub aggregator: SavedAggregator,
     pub binaries: SavedBinaryRegistry,
     pub target_ingest: TargetIngestDiagnostics,
+    pub observability: SavedObservability,
+
     pub events: Vec<SavedEventLogEntry>,
     pub blobs: Vec<SavedArchiveBlob>,
 }
@@ -1538,6 +2003,7 @@ pub struct SavedRunArchiveFiles {
     pub aggregator: String,
     pub binaries: String,
     pub target_ingest: String,
+    pub observability: String,
 }
 
 /// One append-friendly record in `events.jsonl`, the saved-run stream written
@@ -1578,6 +2044,27 @@ pub enum SavedEventLogEntry {
     },
     TargetIngestDiagnostics {
         diagnostics: TargetIngestDiagnostics,
+    },
+    TargetEventKind {
+        source_pid: u32,
+        definition: TargetEventKindRecord,
+    },
+    TargetEvent {
+        event: TargetEventRecord,
+    },
+    TargetCounterSet {
+        source_pid: u32,
+        definition: TargetCounterSetRecord,
+    },
+    TargetCounterSample {
+        sample: TargetCounterSampleRecord,
+    },
+    TargetContract {
+        source_pid: u32,
+        definition: TargetContractRecord,
+    },
+    ObservabilityDiagnostics {
+        diagnostics: ObservabilityDiagnostics,
     },
 }
 
@@ -1700,6 +2187,10 @@ pub enum WaitCondition {
     /// in the binary registry. Useful for "wait until the JIT has
     /// produced the function I want to look at."
     UntilSymbolSeen { needle: String },
+    /// Return as soon as a contract violation reaches the requested severity.
+    UntilViolation {
+        minimum_severity: Option<TargetContractSeverity>,
+    },
 }
 
 /// Outcome of a `wait_active` call.

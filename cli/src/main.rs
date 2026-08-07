@@ -8,21 +8,23 @@ use std::process::exit;
 use facet::Facet;
 use figue as args;
 use stax_core::args::{
-    AnnotateArgs, Cli, Command, CompareArgs, DiagnoseArgs, FlameArgs, MarkArgs, OpenArgs,
-    RecordArgs, SaveArgs, StallsArgs, TargetArgs, TargetCommand, TargetLanesArgs, TargetTopArgs,
-    ThreadsArgs, TopArgs, WaitArgs,
+    AnnotateArgs, Cli, Command, CompareArgs, ContractsArgs, CountersArgs, DiagnoseArgs, EventsArgs,
+    FlameArgs, IncidentArgs, MarkArgs, OpenArgs, RecordArgs, SaveArgs, StallsArgs, TargetArgs,
+    TargetCommand, TargetLanesArgs, TargetTopArgs, ThreadsArgs, TopArgs, ViolationsArgs, WaitArgs,
 };
+
 #[cfg(target_os = "linux")]
 use stax_core::cmd_setup_linux;
 #[cfg(target_os = "macos")]
 use stax_core::cmd_setup_mac;
 use stax_live_proto::{
-    DiagnosticsSnapshot, FlameNode, FlamegraphUpdate, LiveFilter, OffCpuBreakdown, ProfilerClient,
+    ContractQueryParams, CounterQueryParams, DiagnosticsSnapshot, EventQueryParams, FlameNode,
+    FlamegraphUpdate, IncidentQueryParams, LiveFilter, OffCpuBreakdown, ProfilerClient,
     RunControlClient, RunId, RunSummary, RunViewParams, SavedArchiveBlob, SavedEventLogEntry,
     SavedIntervalKind, SavedRunArchive, SavedRunArchiveBundle, SavedRunArchiveManifest,
-    ServerStatus, StopReason, TargetIngestDiagnostics, TargetLaneKind, TargetSpanListUpdate,
-    ThreadsUpdate, TimelineParams, TopEntry, TopSort, TopUpdate, ViewParams, WaitCondition,
-    WaitOutcome,
+    ServerStatus, StopReason, TargetContractSeverity, TargetCounterScalar, TargetIngestDiagnostics,
+    TargetLaneKind, TargetSpanListUpdate, TargetViolationId, ThreadsUpdate, TimelineParams,
+    TopEntry, TopSort, TopUpdate, ViewParams, ViolationQueryParams, WaitCondition, WaitOutcome,
 };
 
 #[cfg(target_os = "macos")]
@@ -86,6 +88,11 @@ fn main_impl() -> Result<(), Box<dyn Error>> {
         Command::Target(args) => block_on_async(async { run_target(args).await })?,
         Command::Mark(args) => block_on_async(async { run_mark(args).await })?,
         Command::Stalls(args) => block_on_async(async { run_stalls(args).await })?,
+        Command::Events(args) => block_on_async(async { run_events(args).await })?,
+        Command::Counters(args) => block_on_async(async { run_counters(args).await })?,
+        Command::Contracts(args) => block_on_async(async { run_contracts(args).await })?,
+        Command::Violations(args) => block_on_async(async { run_violations(args).await })?,
+        Command::Incident(args) => block_on_async(async { run_incident(args).await })?,
     }
     Ok(())
 }
@@ -183,11 +190,7 @@ fn stax_server_endpoint() -> Result<Option<ServerEndpoint>, Box<dyn Error>> {
                 Ok(Some(ServerEndpoint::Local(p)))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(format!(
-                "cannot stat STAX_SERVER_SOCKET={}: {e}",
-                p.display()
-            )
-            .into()),
+            Err(e) => Err(format!("cannot stat STAX_SERVER_SOCKET={}: {e}", p.display()).into()),
         };
     }
     if let Ok(rt) = env::var("XDG_RUNTIME_DIR") {
@@ -873,15 +876,32 @@ async fn resolve_window(
         .timeline(stax_live_proto::TimelineParams {
             run: run.map(RunId),
             tid: None,
+            bucket_ns: None,
+            window: None,
         })
         .await
         .map_err(|e| format!("{e:?}"))?;
+    let recording_start_unix_ns = timeline.started_at_unix_ns;
     let duration_ns = timeline.recording_duration_ns;
+    // Video-timestamp bounds: `@HH:MM:SS.mmm` or `@<unix_seconds>`.
+    // The user reads these off the recorded feed, so they resolve
+    // against the recording's wall-clock start, not the perf clock.
+    if let Some(range) = resolve_video_window(
+        &window.window.as_deref().unwrap_or(""),
+        recording_start_unix_ns,
+        duration_ns,
+    )? {
+        return Ok(Some(range));
+    }
 
     // A bound that isn't a duration is a marker label (`--window
     // freeze..`). Markers arrive session-relative, the same clock the
     // filter uses, so they drop straight into the range.
-    if let Some(range) = resolve_marker_window(&window.window.as_deref().unwrap_or(""), &timeline.markers, duration_ns)? {
+    if let Some(range) = resolve_marker_window(
+        &window.window.as_deref().unwrap_or(""),
+        &timeline.markers,
+        duration_ns,
+    )? {
         return Ok(Some(range));
     }
 
@@ -895,6 +915,117 @@ async fn resolve_window(
         start_ns,
         end_ns: end_ns.unwrap_or(duration_ns),
     }))
+}
+
+/// Resolve a `--window` spec whose bounds carry `@`-prefixed video
+/// timestamps: `@19:42:31`, `@19:42:31.500`, or `@<unix_seconds>`.
+///
+/// The user reads these off the recorded feed's overlay (which shows
+/// wall-clock time), so they live in Unix-epoch space. We convert to
+/// recording-relative ns by subtracting `recording_start_unix_ns` —
+/// the wall-clock start the server stamps on the run. Over a typical
+/// recording (minutes) the wall-clock and perf clocks diverge by
+/// negligible drift, so the recording-relative offset is accurate to
+/// well under a frame.
+///
+/// Returns `Ok(None)` when the spec contains no `@`-bound so the
+/// marker and duration parsers get their turn.
+fn resolve_video_window(
+    spec: &str,
+    recording_start_unix_ns: u64,
+    duration_ns: u64,
+) -> Result<Option<stax_live_proto::TimeRange>, Box<dyn Error>> {
+    let spec = spec.trim();
+    if !spec.contains('@') {
+        return Ok(None);
+    }
+
+    let (a, b) = spec.split_once("..").unwrap_or((spec, ""));
+    let start_ns = if a.is_empty() {
+        0
+    } else {
+        let unix_ns = parse_video_timestamp(a)?;
+        unix_to_relative(unix_ns, recording_start_unix_ns)?
+    };
+    let end_ns = if b.is_empty() {
+        duration_ns
+    } else {
+        let unix_ns = parse_video_timestamp(b)?;
+        unix_to_relative(unix_ns, recording_start_unix_ns)?
+    };
+
+    if end_ns <= start_ns {
+        return Err(format!("window end must be after start (got {spec:?})").into());
+    }
+    Ok(Some(stax_live_proto::TimeRange { start_ns, end_ns }))
+}
+
+/// Parse `@HH:MM:SS`, `@HH:MM:SS.mmm`, or `@<unix_seconds>` into Unix ns.
+fn parse_video_timestamp(s: &str) -> Result<u64, Box<dyn Error>> {
+    let s = s.trim();
+    let ts = s
+        .strip_prefix('@')
+        .ok_or_else(|| format!("video timestamp must start with @ (got {s:?})"))?;
+
+    // Try HH:MM:SS[.mmm] first.
+    if let Some(unix_ns) = parse_hhmmss(ts) {
+        return Ok(unix_ns);
+    }
+
+    // Fall back to a bare unix-seconds number.
+    let secs: f64 = ts.parse().map_err(|_| {
+        format!("invalid video timestamp {s:?} (expected @HH:MM:SS or @<unix_seconds>)")
+    })?;
+    Ok((secs * 1_000_000_000.0) as u64)
+}
+
+/// Parse `HH:MM:SS` or `HH:MM:SS.mmm` into Unix-epoch nanoseconds.
+/// Returns `None` if the format doesn't match. Uses today's date
+/// (the video feed shows time-of-day without a date component, and a
+/// recording is never more than a few hours old).
+fn parse_hhmmss(s: &str) -> Option<u64> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let h: u32 = parts[0].parse().ok()?;
+    let m: u32 = parts[1].parse().ok()?;
+    let (sec_str, frac_ns) = match parts[2].split_once('.') {
+        Some((whole, frac)) => {
+            // Pad/truncate fractional seconds to nanoseconds.
+            let frac_padded = format!("{:0<9}", frac);
+            let frac_trunc = &frac_padded[..9.min(frac_padded.len())];
+            (whole, frac_trunc.parse::<u32>().unwrap_or(0))
+        }
+        None => (parts[2], 0u32),
+    };
+    let s: u32 = sec_str.parse().ok()?;
+
+    // Today's date in UTC, with the time-of-day filled in. The video
+    // overlay uses local time, but `TZ=Europe/Paris` on the panel —
+    // the simplest correct approach is to read the host's local clock
+    // the same way `date` does.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    let secs_today = now.as_secs() % 86_400;
+    let midnight_unix = now.as_secs() - secs_today;
+    let unix_secs = midnight_unix + (h as u64 * 3600) + (m as u64 * 60) + s as u64;
+    Some(unix_secs * 1_000_000_000 + frac_ns as u64)
+}
+
+/// Convert a Unix-epoch nanosecond timestamp to recording-relative ns
+/// (the perf clock the server filters on). Errors if the timestamp is
+/// before the recording started.
+fn unix_to_relative(unix_ns: u64, recording_start_unix_ns: u64) -> Result<u64, Box<dyn Error>> {
+    if unix_ns < recording_start_unix_ns {
+        return Err(format!(
+            "timestamp is before the recording started (video ts {} ns < recording start {} ns)",
+            unix_ns, recording_start_unix_ns,
+        )
+        .into());
+    }
+    Ok(unix_ns - recording_start_unix_ns)
 }
 
 /// Resolve a window whose bounds may be marker labels. Returns `Ok(None)`
@@ -1433,7 +1564,8 @@ fn delta_u64(candidate: u64, baseline: u64) -> i64 {
     }
 }
 
-const ARCHIVE_FORMAT_VERSION: u32 = 2;
+const ARCHIVE_FORMAT_VERSION: u32 = 3;
+const ARCHIVE_V2_FORMAT_VERSION: u32 = 2;
 const ARCHIVE_V1_FORMAT_VERSION: u32 = 1;
 const ARCHIVE_V1_FILE_NAME: &str = "archive.json";
 const ARCHIVE_MANIFEST_FILE_NAME: &str = "manifest.json";
@@ -1446,6 +1578,8 @@ const ARCHIVE_AGGREGATOR_FILE_NAME: &str = "aggregator.json";
 const ARCHIVE_BINARIES_FILE_NAME: &str = "binaries.json";
 #[cfg(test)]
 const ARCHIVE_TARGET_INGEST_FILE_NAME: &str = "target-ingest.json";
+#[cfg(test)]
+const ARCHIVE_OBSERVABILITY_FILE_NAME: &str = "observability.json";
 
 fn read_saved_archive(path: &Path) -> Result<SavedRunArchive, Box<dyn Error>> {
     let archive = if path.is_dir() {
@@ -1510,6 +1644,7 @@ fn read_saved_archive_bundle(bundle_path: &Path) -> Result<SavedRunArchive, Box<
         aggregator: bundle.aggregator,
         binaries: bundle.binaries,
         target_ingest: bundle.target_ingest,
+        observability: bundle.observability,
     };
     restore_bundle_blobs(&mut archive.binaries, &bundle.blobs);
     Ok(archive)
@@ -1555,6 +1690,8 @@ fn read_saved_archive_manifest(manifest_path: &Path) -> Result<SavedRunArchive, 
     let aggregator_path = archive_member_path(base, &manifest.files.aggregator)?;
     let binaries_path = archive_member_path(base, &manifest.files.binaries)?;
     let target_ingest_path = archive_member_path(base, &manifest.files.target_ingest)?;
+    let observability_path = archive_member_path(base, &manifest.files.observability)?;
+
     let aggregator = read_saved_json(&aggregator_path)?;
     let mut binaries: stax_live_proto::SavedBinaryRegistry = read_saved_json(&binaries_path)?;
     restore_directory_blobs(base, &mut binaries)?;
@@ -1565,6 +1702,11 @@ fn read_saved_archive_manifest(manifest_path: &Path) -> Result<SavedRunArchive, 
         aggregator,
         binaries,
         target_ingest: read_saved_json(&target_ingest_path)?,
+        observability: if manifest.format_version >= ARCHIVE_FORMAT_VERSION {
+            read_saved_json(&observability_path)?
+        } else {
+            stax_live_proto::SavedObservability::default()
+        },
     })
 }
 
@@ -1651,7 +1793,10 @@ fn archive_member_path(base: &Path, member: &str) -> Result<PathBuf, Box<dyn Err
 }
 
 fn is_supported_archive_version(version: u32) -> bool {
-    matches!(version, ARCHIVE_V1_FORMAT_VERSION | ARCHIVE_FORMAT_VERSION)
+    matches!(
+        version,
+        ARCHIVE_V1_FORMAT_VERSION | ARCHIVE_V2_FORMAT_VERSION | ARCHIVE_FORMAT_VERSION
+    )
 }
 
 fn is_single_file_archive_path(path: &Path) -> bool {
@@ -1970,7 +2115,10 @@ async fn run_target_top(args: TargetTopArgs) -> Result<(), Box<dyn Error>> {
     let client: ProfilerClient = vox::connect_lane(&url).await?;
     let _debug_registration = register_profiler_client("target-top", &client);
     let update = client
-        .target_spans("cli-target-top".to_owned(), view_params(args.run, args.tid, None))
+        .target_spans(
+            "cli-target-top".to_owned(),
+            view_params(args.run, args.tid, None),
+        )
         .await
         .map_err(|e| format!("{e:?}"))?;
     print_target_top(&update, args.limit, by);
@@ -2318,6 +2466,7 @@ async fn run_flame(args: FlameArgs) -> Result<(), Box<dyn Error>> {
         FlameMode::OnCpu
     };
     print_flame(&update, args.max_depth, args.threshold_pct, mode);
+
     if update.root.children.is_empty() {
         maybe_print_empty_view_hint("flame", &update.total_off_cpu, threads.as_ref(), args.tid);
     }
@@ -2326,6 +2475,261 @@ async fn run_flame(args: FlameArgs) -> Result<(), Box<dyn Error>> {
         flame_mentions_metal_cooperation(&update.root, &update.strings),
     );
     Ok(())
+}
+async fn run_events(args: EventsArgs) -> Result<(), Box<dyn Error>> {
+    let url = require_server_socket()?;
+    ensure_query_run_if_requested(&url, "events --run", args.run).await?;
+    let window = resolve_window(&url, args.run, &args.window).await?;
+    let client: ProfilerClient = vox::connect_lane(&url).await?;
+    let update = client
+        .events(EventQueryParams {
+            run: args.run.map(RunId),
+            tid: args.tid,
+            window,
+            name_contains: args.name,
+            limit: args.limit,
+        })
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+    if args.json {
+        print_json(&update)?;
+        return Ok(());
+    }
+    for event in update.events {
+        let fields = event
+            .values
+            .iter()
+            .map(|value| format!("{}={}", value.name, format_scalar(&value.value)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!(
+            "{:>10.6}s pid={} tid={} {} corr={} {}",
+            event.timestamp_ns as f64 / 1e9,
+            event.source_pid,
+            event
+                .tid
+                .map(|tid| tid.to_string())
+                .unwrap_or_else(|| "-".to_owned()),
+            event.name,
+            event
+                .correlation_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "-".to_owned()),
+            fields
+        );
+    }
+    if update.truncated {
+        eprintln!(
+            "showing {} of {} matching events",
+            args.limit, update.total_matching
+        );
+    }
+    Ok(())
+}
+
+async fn run_counters(args: CountersArgs) -> Result<(), Box<dyn Error>> {
+    let url = require_server_socket()?;
+    ensure_query_run_if_requested(&url, "counters --run", args.run).await?;
+    let window = resolve_window(&url, args.run, &args.window).await?;
+    let client: ProfilerClient = vox::connect_lane(&url).await?;
+    let update = client
+        .counters(CounterQueryParams {
+            run: args.run.map(RunId),
+            window,
+            name_contains: args.name,
+            include_samples: args.samples,
+            limit: args.limit,
+        })
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+    if args.json {
+        print_json(&update)?;
+        return Ok(());
+    }
+    for counter in update.counters {
+        println!(
+            "{} count={} first={} last={} delta={}{}",
+            counter.name,
+            counter.count,
+            format_optional_scalar(counter.first.as_ref()),
+            format_optional_scalar(counter.last.as_ref()),
+            format_optional_scalar(counter.delta.as_ref()),
+            if counter.monotonic { " monotonic" } else { "" }
+        );
+        for sample in counter.samples {
+            println!(
+                "  {:>10.6}s {}",
+                sample.timestamp_ns as f64 / 1e9,
+                format_scalar(&sample.value)
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn run_contracts(args: ContractsArgs) -> Result<(), Box<dyn Error>> {
+    let url = require_server_socket()?;
+    ensure_query_run_if_requested(&url, "contracts --run", args.run).await?;
+    let client: ProfilerClient = vox::connect_lane(&url).await?;
+    let update = client
+        .contracts(ContractQueryParams {
+            run: args.run.map(RunId),
+        })
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+    if args.json {
+        print_json(&update)?;
+        return Ok(());
+    }
+    for status in update.contracts {
+        println!(
+            "{} pid={} severity={:?} evaluations={} violations={}{}",
+            status.contract.name,
+            status.source_pid,
+            status.contract.severity,
+            status.evaluations,
+            status.violations,
+            if status.currently_violating {
+                " OPEN"
+            } else {
+                ""
+            }
+        );
+    }
+    Ok(())
+}
+
+async fn run_violations(args: ViolationsArgs) -> Result<(), Box<dyn Error>> {
+    let url = require_server_socket()?;
+    ensure_query_run_if_requested(&url, "violations --run", args.run).await?;
+    let window = resolve_window(&url, args.run, &args.window).await?;
+    let severity = parse_severity(args.severity.as_deref())?;
+    let client: ProfilerClient = vox::connect_lane(&url).await?;
+    let update = client
+        .violations(ViolationQueryParams {
+            run: args.run.map(RunId),
+            window,
+            minimum_severity: severity,
+            limit: args.limit,
+        })
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+    if args.json {
+        print_json(&update)?;
+        return Ok(());
+    }
+    for violation in update.violations {
+        println!(
+            "{:016x} {:?} {} {} > {} at {:.6}s..{:.6}s{}",
+            violation.violation_id.raw,
+            violation.severity,
+            violation.contract_name,
+            fmt_ns(violation.actual_ns),
+            fmt_ns(violation.threshold_ns),
+            violation.start_ns as f64 / 1e9,
+            violation.end_ns as f64 / 1e9,
+            if violation.open { " OPEN" } else { "" }
+        );
+        println!("  stax incident {}", violation.violation_id.raw);
+    }
+    Ok(())
+}
+
+async fn run_incident(args: IncidentArgs) -> Result<(), Box<dyn Error>> {
+    let url = require_server_socket()?;
+    ensure_query_run_if_requested(&url, "incident --run", args.run).await?;
+    let client: ProfilerClient = vox::connect_lane(&url).await?;
+    let update = client
+        .incident(IncidentQueryParams {
+            run: args.run.map(RunId),
+            violation_id: TargetViolationId::new(args.violation_id),
+            margin_ns: args.margin_ms.map(|ms| ms.saturating_mul(1_000_000)),
+        })
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+    if args.json {
+        print_json(&update)?;
+        return Ok(());
+    }
+    let Some(violation) = update.violation else {
+        return Err(format!("violation {} not found", args.violation_id).into());
+    };
+    println!(
+        "# {:?} {}: {} > {}",
+        violation.severity,
+        violation.contract_name,
+        fmt_ns(violation.actual_ns),
+        fmt_ns(violation.threshold_ns)
+    );
+    if let Some(scheduler) = update.scheduler {
+        println!(
+            "scheduler tid={} {:?} {:.6}s..{:.6}s",
+            scheduler.tid,
+            scheduler.reason,
+            scheduler.start_ns as f64 / 1e9,
+            scheduler.end_ns as f64 / 1e9
+        );
+        for frame in scheduler.blocking_stack {
+            println!(
+                "  {}",
+                frame
+                    .function_name
+                    .unwrap_or_else(|| "<unknown>".to_owned())
+            );
+        }
+    }
+    println!("events:");
+    for event in update.events {
+        println!(
+            "  {:.6}s {} corr={:?}",
+            event.timestamp_ns as f64 / 1e9,
+            event.name,
+            event.correlation_id
+        );
+    }
+    println!("counters:");
+    for counter in update.counters {
+        println!(
+            "  {} unchanged={}",
+            counter.name,
+            counter
+                .unchanged_ns
+                .map(fmt_ns)
+                .unwrap_or_else(|| "no".to_owned())
+        );
+    }
+    for diagnostic in update.diagnostics {
+        eprintln!("warning: {diagnostic}");
+    }
+    Ok(())
+}
+
+fn print_json<T: facet::Facet<'static>>(value: &T) -> Result<(), Box<dyn Error>> {
+    let mut bytes = facet_json::to_vec_pretty(value)?;
+    bytes.push(b'\n');
+    io::stdout().write_all(&bytes)?;
+    Ok(())
+}
+fn parse_severity(value: Option<&str>) -> Result<Option<TargetContractSeverity>, Box<dyn Error>> {
+    Ok(match value {
+        None => None,
+        Some("info") => Some(TargetContractSeverity::Info),
+        Some("warn") => Some(TargetContractSeverity::Warn),
+        Some("fail") => Some(TargetContractSeverity::Fail),
+        Some(other) => {
+            return Err(format!("invalid severity {other:?}; expected info, warn, or fail").into());
+        }
+    })
+}
+fn format_optional_scalar(value: Option<&TargetCounterScalar>) -> String {
+    value.map(format_scalar).unwrap_or_else(|| "-".to_owned())
+}
+fn format_scalar(value: &TargetCounterScalar) -> String {
+    match value {
+        TargetCounterScalar::U64 { value } => value.to_string(),
+        TargetCounterScalar::I64 { value } => value.to_string(),
+        TargetCounterScalar::F64 { value } => format!("{value:.6}"),
+    }
 }
 
 /// A detected stall: a run of consecutive timeline bins whose on-CPU
@@ -2424,10 +2828,14 @@ async fn run_stalls(args: StallsArgs) -> Result<(), Box<dyn Error>> {
     let client: ProfilerClient = vox::connect_lane(&url).await?;
     let _debug_registration = register_profiler_client("stalls", &client);
 
+    let window = resolve_window(&url, args.run, &args.window).await?;
+
     let update = client
         .timeline(TimelineParams {
             run: args.run.map(RunId),
             tid: None,
+            bucket_ns: args.bucket_ns,
+            window,
         })
         .await
         .map_err(|e| format!("{e:?}"))?;
@@ -2478,15 +2886,17 @@ async fn run_stalls(args: StallsArgs) -> Result<(), Box<dyn Error>> {
 
     if stalls.is_empty() {
         println!("No stalls detected at the current threshold.");
-        println!(
-            "Lower the bar: `stax stalls --threshold 0.1` or `--min-duration-ns 50_000_000`."
-        );
+        println!("Lower the bar: `stax stalls --threshold 0.1` or `--min-duration-ns 50_000_000`.");
         return Ok(());
     }
 
     for (rank, s) in stalls.iter().take(args.limit).enumerate() {
-        let start_ns = (s.first_bin as u64) * bucket_ns;
-        let end_ns = ((s.last_bin + 1) as u64) * bucket_ns;
+        // Use the bucket's recorded start_ns (which carries the window
+        // offset when `--window` re-bucketed a region) rather than
+        // recomputing `first_bin * bucket_ns`, which would drop the
+        // offset and land every stall at the start of the recording.
+        let start_ns = buckets[s.first_bin].start_ns;
+        let end_ns = buckets[s.last_bin].start_ns + bucket_ns;
         let dur_ns = end_ns - start_ns;
         let dur_bins = s.last_bin - s.first_bin + 1;
         let median_over_bins = median * dur_bins as u64;
@@ -2496,8 +2906,22 @@ async fn run_stalls(args: StallsArgs) -> Result<(), Box<dyn Error>> {
             0.0
         };
 
+        // Dominant off-CPU reason across the stall's bins, so a stall
+        // reads as "lock contention" vs "idle" vs "sleep" instead of a
+        // bare duration.
+        let mut reason_totals: OffCpuBreakdown = OffCpuBreakdown::default();
+        for b in s.first_bin..=s.last_bin {
+            reason_totals = add_breakdown(reason_totals, &buckets[b].off_cpu_by_reason);
+        }
+        let reason_ns = off_cpu_total_ns(&reason_totals);
+        let reason_label = dominant_off_cpu_reason(&reason_totals);
+
+        // Wall-clock timestamp so the user can cross-reference with
+        // the video feed overlay (which shows time-of-day).
+        let wall = fmt_wall_clock(update.started_at_unix_ns, start_ns);
+
         println!(
-            "  #{}  {} at t={:.3}s",
+            "  #{}  {} at t={:.3}s ({wall})",
             rank + 1,
             fmt_ns(dur_ns),
             start_ns as f64 / 1_000_000_000.0,
@@ -2508,6 +2932,13 @@ async fn run_stalls(args: StallsArgs) -> Result<(), Box<dyn Error>> {
             pct_of_median,
             s.target_ns,
         );
+        if reason_ns > 0 {
+            println!(
+                "       off-CPU {} (dominant reason: {})",
+                fmt_ns(reason_ns),
+                reason_label,
+            );
+        }
         // Ready-to-paste flame command for this exact window.
         println!(
             "       stax flame --window {:.3}..{:.3}",
@@ -2518,6 +2949,21 @@ async fn run_stalls(args: StallsArgs) -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+/// Format `recording_start_unix_ns + offset_ns` as `HH:MM:SS.mmm`,
+/// matching the video feed overlay's time-of-day display so the user
+/// can cross-reference detected stalls with the recorded video.
+fn fmt_wall_clock(recording_start_unix_ns: u64, offset_ns: u64) -> String {
+    if recording_start_unix_ns == 0 {
+        return "(wall-clock unavailable)".to_owned();
+    }
+    let unix_secs = (recording_start_unix_ns + offset_ns) / 1_000_000_000;
+    let h = (unix_secs / 3600) % 24;
+    let m = (unix_secs / 60) % 60;
+    let s = unix_secs % 60;
+    let ms = ((recording_start_unix_ns + offset_ns) / 1_000_000) % 1000;
+    format!("{h:02}:{m:02}:{s:02}.{ms:03}")
 }
 
 fn fmt_ns(ns: u64) -> String {
@@ -2559,12 +3005,7 @@ impl FlameMode {
     }
 }
 
-fn print_flame(
-    update: &FlamegraphUpdate,
-    max_depth: usize,
-    threshold_pct: f64,
-    mode: FlameMode,
-) {
+fn print_flame(update: &FlamegraphUpdate, max_depth: usize, threshold_pct: f64, mode: FlameMode) {
     let total = mode.total_ns(update).max(1) as f64;
     let mode_label = match mode {
         FlameMode::OnCpu => "active",
@@ -2612,6 +3053,23 @@ fn off_cpu_total_ns(b: &OffCpuBreakdown) -> u64 {
         + b.sleep_ns
         + b.connect_ns
         + b.other_ns
+}
+
+/// Element-wise sum of two off-CPU reason breakdowns (stall windows
+/// span multiple timeline buckets).
+fn add_breakdown(a: OffCpuBreakdown, b: &OffCpuBreakdown) -> OffCpuBreakdown {
+    OffCpuBreakdown {
+        idle_ns: a.idle_ns + b.idle_ns,
+        lock_ns: a.lock_ns + b.lock_ns,
+        semaphore_ns: a.semaphore_ns + b.semaphore_ns,
+        ipc_ns: a.ipc_ns + b.ipc_ns,
+        io_read_ns: a.io_read_ns + b.io_read_ns,
+        io_write_ns: a.io_write_ns + b.io_write_ns,
+        readiness_ns: a.readiness_ns + b.readiness_ns,
+        sleep_ns: a.sleep_ns + b.sleep_ns,
+        connect_ns: a.connect_ns + b.connect_ns,
+        other_ns: a.other_ns + b.other_ns,
+    }
 }
 
 fn print_empty_top(
@@ -2787,7 +3245,15 @@ fn print_flame_node(
     let mut children: Vec<&FlameNode> = node.children.iter().collect();
     children.sort_by(|a, b| mode.node_ns(b).cmp(&mode.node_ns(a)));
     for child in children {
-        print_flame_node(child, strings, total_ns, threshold_pct, depth + 1, max_depth, mode);
+        print_flame_node(
+            child,
+            strings,
+            total_ns,
+            threshold_pct,
+            depth + 1,
+            max_depth,
+            mode,
+        );
     }
 }
 
@@ -2863,11 +3329,12 @@ mod tests {
     use super::{
         ARCHIVE_AGGREGATOR_FILE_NAME, ARCHIVE_BINARIES_FILE_NAME, ARCHIVE_BLOBS_DIR_NAME,
         ARCHIVE_EVENTS_FILE_NAME, ARCHIVE_FORMAT_VERSION, ARCHIVE_MANIFEST_FILE_NAME,
-        ARCHIVE_SINGLE_FILE_EXTENSION, ARCHIVE_TARGET_INGEST_FILE_NAME, ARCHIVE_V1_FILE_NAME,
-        ARCHIVE_V1_FORMAT_VERSION, SYNTH_TID_BASE, TargetTopBy, binary_text_blob_member,
-        build_compare_report, empty_view_hint, mentions_metal_cooperation, read_saved_archive,
-        summarize_archive, target_ingest_hints, target_top_rows, thread_kind, write_target_lanes,
-        write_target_top, write_threads,
+        ARCHIVE_OBSERVABILITY_FILE_NAME, ARCHIVE_SINGLE_FILE_EXTENSION,
+        ARCHIVE_TARGET_INGEST_FILE_NAME, ARCHIVE_V1_FILE_NAME, ARCHIVE_V1_FORMAT_VERSION,
+        SYNTH_TID_BASE, TargetTopBy, binary_text_blob_member, build_compare_report,
+        empty_view_hint, mentions_metal_cooperation, read_saved_archive, summarize_archive,
+        target_ingest_hints, target_top_rows, thread_kind, write_target_lanes, write_target_top,
+        write_threads,
     };
     use stax_live_proto::{
         OffCpuBreakdown, SavedAggregator, SavedArchiveBlob, SavedBinaryRegistry,
@@ -3258,6 +3725,7 @@ mod tests {
                     wakeups: Vec::new(),
                 }],
             },
+            observability: stax_live_proto::SavedObservability::default(),
             binaries: SavedBinaryRegistry::default(),
             target_ingest: TargetIngestDiagnostics {
                 spans_dropped_bad_duration: 2,
@@ -3421,6 +3889,7 @@ mod tests {
                 aggregator: ARCHIVE_AGGREGATOR_FILE_NAME.to_owned(),
                 binaries: ARCHIVE_BINARIES_FILE_NAME.to_owned(),
                 target_ingest: ARCHIVE_TARGET_INGEST_FILE_NAME.to_owned(),
+                observability: ARCHIVE_OBSERVABILITY_FILE_NAME.to_owned(),
             },
         };
         write_test_json(&archive_dir.join(ARCHIVE_MANIFEST_FILE_NAME), &manifest);
@@ -3435,6 +3904,10 @@ mod tests {
         write_test_json(
             &archive_dir.join(ARCHIVE_TARGET_INGEST_FILE_NAME),
             &TargetIngestDiagnostics::default(),
+        );
+        write_test_json(
+            &archive_dir.join(ARCHIVE_OBSERVABILITY_FILE_NAME),
+            &stax_live_proto::SavedObservability::default(),
         );
 
         let from_dir = read_saved_archive(&archive_dir).expect("read archive directory");
@@ -3464,6 +3937,7 @@ mod tests {
                 aggregator: ARCHIVE_AGGREGATOR_FILE_NAME.to_owned(),
                 binaries: ARCHIVE_BINARIES_FILE_NAME.to_owned(),
                 target_ingest: ARCHIVE_TARGET_INGEST_FILE_NAME.to_owned(),
+                observability: ARCHIVE_OBSERVABILITY_FILE_NAME.to_owned(),
             },
         };
         write_test_json(&archive_dir.join(ARCHIVE_MANIFEST_FILE_NAME), &manifest);
@@ -3478,6 +3952,10 @@ mod tests {
         write_test_json(
             &archive_dir.join(ARCHIVE_TARGET_INGEST_FILE_NAME),
             &TargetIngestDiagnostics::default(),
+        );
+        write_test_json(
+            &archive_dir.join(ARCHIVE_OBSERVABILITY_FILE_NAME),
+            &stax_live_proto::SavedObservability::default(),
         );
         write_test_event_log(
             &archive_dir.join(ARCHIVE_EVENTS_FILE_NAME),
@@ -3509,6 +3987,7 @@ mod tests {
             aggregator: SavedAggregator::default(),
             binaries: SavedBinaryRegistry::default(),
             target_ingest: TargetIngestDiagnostics::default(),
+            observability: stax_live_proto::SavedObservability::default(),
             events: Vec::new(),
             blobs: Vec::new(),
         };
@@ -3535,6 +4014,7 @@ mod tests {
             aggregator: SavedAggregator::default(),
             binaries: SavedBinaryRegistry::default(),
             target_ingest: TargetIngestDiagnostics::default(),
+            observability: stax_live_proto::SavedObservability::default(),
             events: target_lane_events(987),
             blobs: Vec::new(),
         };
@@ -3566,6 +4046,7 @@ mod tests {
                 aggregator: ARCHIVE_AGGREGATOR_FILE_NAME.to_owned(),
                 binaries: ARCHIVE_BINARIES_FILE_NAME.to_owned(),
                 target_ingest: ARCHIVE_TARGET_INGEST_FILE_NAME.to_owned(),
+                observability: ARCHIVE_OBSERVABILITY_FILE_NAME.to_owned(),
             },
         };
         write_test_json(&archive_dir.join(ARCHIVE_MANIFEST_FILE_NAME), &manifest);
@@ -3582,6 +4063,10 @@ mod tests {
         write_test_json(
             &archive_dir.join(ARCHIVE_TARGET_INGEST_FILE_NAME),
             &TargetIngestDiagnostics::default(),
+        );
+        write_test_json(
+            &archive_dir.join(ARCHIVE_OBSERVABILITY_FILE_NAME),
+            &stax_live_proto::SavedObservability::default(),
         );
         write_test_event_log(
             &archive_dir.join(ARCHIVE_EVENTS_FILE_NAME),
@@ -3614,6 +4099,7 @@ mod tests {
                 binaries: vec![binary.clone()],
             },
             target_ingest: TargetIngestDiagnostics::default(),
+            observability: stax_live_proto::SavedObservability::default(),
             events: vec![SavedEventLogEntry::BinaryLoaded {
                 binary: binary.clone(),
             }],
@@ -3647,6 +4133,7 @@ mod tests {
             aggregator: SavedAggregator::default(),
             binaries: SavedBinaryRegistry::default(),
             target_ingest: TargetIngestDiagnostics::default(),
+            observability: stax_live_proto::SavedObservability::default(),
         };
         write_test_json(&archive_dir.join(ARCHIVE_V1_FILE_NAME), &archive);
 
@@ -3677,6 +4164,7 @@ mod tests {
                 aggregator: "../outside.json".to_owned(),
                 binaries: ARCHIVE_BINARIES_FILE_NAME.to_owned(),
                 target_ingest: ARCHIVE_TARGET_INGEST_FILE_NAME.to_owned(),
+                observability: ARCHIVE_OBSERVABILITY_FILE_NAME.to_owned(),
             },
         };
         write_test_json(&archive_dir.join(ARCHIVE_MANIFEST_FILE_NAME), &manifest);
@@ -3819,7 +4307,7 @@ mod tests {
 
     // ---- stall detection ----
 
-    use super::{detect_stalls, Stall};
+    use super::{Stall, detect_stalls};
     use stax_live_proto::TimelineBucket;
 
     fn bucket(start_ns: u64, on_cpu_ns: u64, target_ns: u64) -> TimelineBucket {
@@ -3828,6 +4316,7 @@ mod tests {
             on_cpu_ns,
             target_ns,
             off_cpu_ns: 0,
+            off_cpu_by_reason: OffCpuBreakdown::default(),
         }
     }
 
@@ -3903,15 +4392,60 @@ mod tests {
 
     #[test]
     fn returns_empty_when_process_never_ran() {
-        let buckets: Vec<TimelineBucket> = (0..5)
-            .map(|i| bucket(i * 50_000_000, 0, 0))
-            .collect();
+        let buckets: Vec<TimelineBucket> = (0..5).map(|i| bucket(i * 50_000_000, 0, 0)).collect();
         let (median, stalls) = detect_stalls(&buckets, 50_000_000, 0.2, 0);
         assert_eq!(median, 0);
         assert!(stalls.is_empty());
     }
 
-    fn _stall_omitted(_s: Stall) {}
+    // ---- video timestamp parsing ----
+
+    use super::{fmt_wall_clock, parse_hhmmss, unix_to_relative};
+
+    #[test]
+    fn parse_hhmmss_round_trip() {
+        // The exact unix ns depends on midnight, but the time-of-day
+        // component is stable: HH*3600 + MM*60 + SS.
+        let ns = parse_hhmmss("19:42:31").expect("parses");
+        let secs_of_day = (ns / 1_000_000_000) % 86_400;
+        assert_eq!(secs_of_day, 19 * 3600 + 42 * 60 + 31);
+    }
+
+    #[test]
+    fn parse_hhmmss_with_milliseconds() {
+        let ns = parse_hhmmss("19:42:31.500").expect("parses");
+        let ms = (ns / 1_000_000) % 1000;
+        assert_eq!(ms, 500);
+    }
+
+    #[test]
+    fn unix_to_relative_subtracts_recording_start() {
+        // Recording started at unix_ns = 1_000_000_000_000.
+        // A video timestamp 5 seconds later should give 5s relative.
+        let rel = unix_to_relative(1_005_000_000_000, 1_000_000_000_000).unwrap();
+        assert_eq!(rel, 5_000_000_000);
+    }
+
+    #[test]
+    fn fmt_wall_clock_shows_time_of_day() {
+        // unix_ns = 1_000_000_000 (1 second from epoch).
+        // Adding 5 seconds → 6 seconds from epoch → 00:00:06.000.
+        let s = fmt_wall_clock(1_000_000_000, 5_000_000_000);
+        assert_eq!(s, "00:00:06.000");
+    }
+
+    #[test]
+    fn fmt_wall_clock_with_milliseconds() {
+        // unix_ns = 1_000_000_000 (1 second), + 1.5s → 2.5s → 00:00:02.500.
+        let s = fmt_wall_clock(1_000_000_000, 1_500_000_000);
+        assert_eq!(s, "00:00:02.500");
+    }
+
+    #[test]
+    fn fmt_wall_clock_unavailable_when_no_start() {
+        let s = fmt_wall_clock(0, 5_000_000_000);
+        assert!(s.contains("unavailable"));
+    }
 }
 
 fn parse_address(raw: &str) -> Option<u64> {

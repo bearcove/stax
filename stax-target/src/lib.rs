@@ -59,9 +59,10 @@
 //! For APIs that already return exact timestamps, use
 //! [`Lane::span_with_captured_origin`] and [`Lane::report_one`].
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::mpsc::{Receiver, Sender, error::TrySendError};
 
@@ -71,13 +72,16 @@ use tokio::sync::mpsc::{Receiver, Sender, error::TrySendError};
 const CALL_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub use stax_live_proto::{
-    TargetAttachmentId, TargetAttachmentKind, TargetAttachmentRecord, TargetCommandBufferId,
-    TargetCommandBufferRecord, TargetCounterDefinition, TargetCounterSampleId,
-    TargetCounterSamplePoint, TargetCounterSampleRecord, TargetCounterScalar, TargetCounterSetId,
-    TargetCounterSetRecord, TargetCounterUnit, TargetCounterValue, TargetDispatchId,
-    TargetDispatchRecord, TargetLaneId, TargetLaneKind, TargetLaneRecord, TargetQueueId,
-    TargetQueueRecord, TargetRecordBatch, TargetRuntimeId, TargetRuntimeRecord, TargetShaderId,
-    TargetShaderRecord, TargetSourceId, TargetSourceRecord, TargetSpan, TargetSpanOrigin,
+    OffCpuReason, TargetAttachmentId, TargetAttachmentKind, TargetAttachmentRecord,
+    TargetCommandBufferId, TargetCommandBufferRecord, TargetContractDuty, TargetContractId,
+    TargetContractKind, TargetContractRecord, TargetContractSeverity, TargetCounterDefinition,
+    TargetCounterSampleId, TargetCounterSamplePoint, TargetCounterSampleRecord,
+    TargetCounterScalar, TargetCounterSetId, TargetCounterSetRecord, TargetCounterUnit,
+    TargetDispatchId, TargetDispatchRecord, TargetEventFieldDefinition, TargetEventId,
+    TargetEventKindId, TargetEventKindRecord, TargetEventRecord, TargetLaneId, TargetLaneKind,
+    TargetLaneRecord, TargetQueueId, TargetQueueRecord, TargetRecordBatch, TargetRuntimeId,
+    TargetRuntimeRecord, TargetShaderId, TargetShaderRecord, TargetSignalBatch,
+    TargetSignalSelector, TargetSourceId, TargetSourceRecord, TargetSpan, TargetSpanOrigin,
 };
 use stax_live_proto::{TargetIngestClient, TargetReporterStats, TargetSpanBatch};
 
@@ -97,6 +101,12 @@ static BATCHES_DROPPED_QUEUE_FULL: AtomicU64 = AtomicU64::new(0);
 static SPANS_DROPPED_QUEUE_FULL: AtomicU64 = AtomicU64::new(0);
 static BATCHES_DROPPED_WORKER_DISCONNECTED: AtomicU64 = AtomicU64::new(0);
 static SPANS_DROPPED_WORKER_DISCONNECTED: AtomicU64 = AtomicU64::new(0);
+static SIGNAL_BATCHES_DROPPED_QUEUE_FULL: AtomicU64 = AtomicU64::new(0);
+static SIGNALS_DROPPED_QUEUE_FULL: AtomicU64 = AtomicU64::new(0);
+static SIGNAL_BATCHES_DROPPED_WORKER_DISCONNECTED: AtomicU64 = AtomicU64::new(0);
+static SIGNALS_DROPPED_WORKER_DISCONNECTED: AtomicU64 = AtomicU64::new(0);
+static NEXT_EVENT_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_COUNTER_SAMPLE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Target-local reporter health snapshot.
 ///
@@ -121,6 +131,10 @@ pub struct ReporterStats {
     /// Spans in batches dropped because the background worker
     /// disconnected.
     pub spans_dropped_worker_disconnected: u64,
+    pub signal_batches_dropped_queue_full: u64,
+    pub signals_dropped_queue_full: u64,
+    pub signal_batches_dropped_worker_disconnected: u64,
+    pub signals_dropped_worker_disconnected: u64,
 }
 
 /// Capture gate: `true` while a stax recording of this process is
@@ -148,6 +162,13 @@ pub fn reporter_stats() -> ReporterStats {
             .load(Ordering::Relaxed),
         spans_dropped_worker_disconnected: SPANS_DROPPED_WORKER_DISCONNECTED
             .load(Ordering::Relaxed),
+        signal_batches_dropped_queue_full: SIGNAL_BATCHES_DROPPED_QUEUE_FULL
+            .load(Ordering::Relaxed),
+        signals_dropped_queue_full: SIGNALS_DROPPED_QUEUE_FULL.load(Ordering::Relaxed),
+        signal_batches_dropped_worker_disconnected: SIGNAL_BATCHES_DROPPED_WORKER_DISCONNECTED
+            .load(Ordering::Relaxed),
+        signals_dropped_worker_disconnected: SIGNALS_DROPPED_WORKER_DISCONNECTED
+            .load(Ordering::Relaxed),
     }
 }
 
@@ -156,6 +177,10 @@ fn reset_reporter_stats() {
     SPANS_DROPPED_QUEUE_FULL.store(0, Ordering::Relaxed);
     BATCHES_DROPPED_WORKER_DISCONNECTED.store(0, Ordering::Relaxed);
     SPANS_DROPPED_WORKER_DISCONNECTED.store(0, Ordering::Relaxed);
+    SIGNAL_BATCHES_DROPPED_QUEUE_FULL.store(0, Ordering::Relaxed);
+    SIGNALS_DROPPED_QUEUE_FULL.store(0, Ordering::Relaxed);
+    SIGNAL_BATCHES_DROPPED_WORKER_DISCONNECTED.store(0, Ordering::Relaxed);
+    SIGNALS_DROPPED_WORKER_DISCONNECTED.store(0, Ordering::Relaxed);
 }
 
 fn reporter_stats_for_pid(pid: u32) -> TargetReporterStats {
@@ -166,6 +191,11 @@ fn reporter_stats_for_pid(pid: u32) -> TargetReporterStats {
         spans_dropped_queue_full: stats.spans_dropped_queue_full,
         batches_dropped_worker_disconnected: stats.batches_dropped_worker_disconnected,
         spans_dropped_worker_disconnected: stats.spans_dropped_worker_disconnected,
+        signal_batches_dropped_queue_full: stats.signal_batches_dropped_queue_full,
+        signals_dropped_queue_full: stats.signals_dropped_queue_full,
+        signal_batches_dropped_worker_disconnected: stats
+            .signal_batches_dropped_worker_disconnected,
+        signals_dropped_worker_disconnected: stats.signals_dropped_worker_disconnected,
     }
 }
 
@@ -178,6 +208,15 @@ fn record_worker_disconnected_drop(spans: u64) {
     BATCHES_DROPPED_WORKER_DISCONNECTED.fetch_add(1, Ordering::Relaxed);
     SPANS_DROPPED_WORKER_DISCONNECTED.fetch_add(spans, Ordering::Relaxed);
 }
+fn record_signal_queue_full_drop(signals: u64) {
+    SIGNAL_BATCHES_DROPPED_QUEUE_FULL.fetch_add(1, Ordering::Relaxed);
+    SIGNALS_DROPPED_QUEUE_FULL.fetch_add(signals, Ordering::Relaxed);
+}
+
+fn record_signal_worker_disconnected_drop(signals: u64) {
+    SIGNAL_BATCHES_DROPPED_WORKER_DISCONNECTED.fetch_add(1, Ordering::Relaxed);
+    SIGNALS_DROPPED_WORKER_DISCONNECTED.fetch_add(signals, Ordering::Relaxed);
+}
 
 /// Current timestamp in the same nanosecond clock domain stax uses for
 /// target spans.
@@ -187,6 +226,20 @@ fn record_worker_disconnected_drop(spans: u64) {
 /// platforms.
 pub fn now_ns() -> Option<u64> {
     clock_now_ns()
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TargetPoint {
+    pub timestamp_ns: u64,
+    pub pid: u32,
+    pub tid: Option<u32>,
+}
+
+pub fn current_point() -> Option<TargetPoint> {
+    Some(TargetPoint {
+        timestamp_ns: now_ns()?,
+        pid: std::process::id(),
+        tid: current_thread_id(),
+    })
 }
 
 /// Capture the current target-side queue/dispatch origin.
@@ -280,8 +333,9 @@ pub fn try_report_batch_with_kind(
         spans,
         records,
     };
-    match sender.try_send(batch) {
+    match sender.try_send(WorkerMessage::Spans(batch)) {
         Ok(()) => Ok(()),
+
         Err(TrySendError::Full(_)) => {
             record_queue_full_drop(span_count);
             tracing::debug!("stax-target queue full; dropping span batch");
@@ -291,6 +345,278 @@ pub fn try_report_batch_with_kind(
             record_worker_disconnected_drop(span_count);
             Err(ReportError::WorkerDisconnected)
         }
+    }
+}
+pub fn report_signals(batch: TargetSignalBatch) {
+    let _ = try_report_signals(batch);
+}
+
+pub fn try_report_signals(mut batch: TargetSignalBatch) -> Result<(), ReportError> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+    batch.pid = std::process::id();
+    let signal_count = (batch.event_kinds.len()
+        + batch.events.len()
+        + batch.counter_sets.len()
+        + batch.counter_samples.len()
+        + batch.contracts.len()) as u64;
+    match worker_sender().try_send(WorkerMessage::Signals(batch)) {
+        Ok(()) => Ok(()),
+        Err(TrySendError::Full(_)) => {
+            record_signal_queue_full_drop(signal_count);
+            Err(ReportError::QueueFull)
+        }
+        Err(TrySendError::Closed(_)) => {
+            record_signal_worker_disconnected_drop(signal_count);
+            Err(ReportError::WorkerDisconnected)
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct SignalDefinitions {
+    event_kinds: HashMap<TargetEventKindId, TargetEventKindRecord>,
+    counter_sets: HashMap<TargetCounterSetId, TargetCounterSetRecord>,
+    contracts: HashMap<TargetContractId, TargetContractRecord>,
+}
+
+fn signal_definitions() -> &'static Mutex<SignalDefinitions> {
+    static DEFINITIONS: OnceLock<Mutex<SignalDefinitions>> = OnceLock::new();
+    DEFINITIONS.get_or_init(|| Mutex::new(SignalDefinitions::default()))
+}
+
+fn definition_snapshot(pid: u32) -> TargetSignalBatch {
+    let definitions = signal_definitions()
+        .lock()
+        .expect("stax signal registry poisoned");
+    TargetSignalBatch {
+        pid,
+        event_kinds: definitions.event_kinds.values().cloned().collect(),
+        events: Vec::new(),
+        counter_sets: definitions.counter_sets.values().cloned().collect(),
+        counter_samples: Vec::new(),
+        contracts: definitions.contracts.values().cloned().collect(),
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct EventKind {
+    definition: TargetEventKindRecord,
+}
+
+impl EventKind {
+    pub fn new(
+        id: TargetEventKindId,
+        name: impl Into<String>,
+        description: Option<String>,
+        fields: Vec<TargetEventFieldDefinition>,
+    ) -> Self {
+        let definition = TargetEventKindRecord {
+            event_kind_id: id,
+            name: name.into(),
+            description,
+            fields,
+        };
+        signal_definitions()
+            .lock()
+            .expect("stax signal registry poisoned")
+            .event_kinds
+            .insert(id, definition.clone());
+        Self { definition }
+    }
+
+    pub fn id(&self) -> TargetEventKindId {
+        self.definition.event_kind_id
+    }
+
+    pub fn emit(&self, correlation_id: Option<u64>, values: Vec<TargetCounterScalar>) {
+        let Some(point) = current_point() else { return };
+        self.emit_at(
+            point.timestamp_ns,
+            point.pid,
+            point.tid,
+            correlation_id,
+            values,
+        );
+    }
+
+    pub fn emit_at(
+        &self,
+        timestamp_ns: u64,
+        source_pid: u32,
+        tid: Option<u32>,
+        correlation_id: Option<u64>,
+        values: Vec<TargetCounterScalar>,
+    ) {
+        if !reporting_active() || (source_pid != std::process::id() && tid.is_some()) {
+            return;
+        }
+        let event = TargetEventRecord {
+            event_id: TargetEventId::new(NEXT_EVENT_ID.fetch_add(1, Ordering::Relaxed)),
+            event_kind_id: self.definition.event_kind_id,
+            timestamp_ns,
+            source_pid,
+            tid,
+            correlation_id,
+            values,
+        };
+        let _ = try_report_signals(TargetSignalBatch {
+            pid: std::process::id(),
+            events: vec![event],
+            ..TargetSignalBatch::default()
+        });
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct CounterSet {
+    definition: TargetCounterSetRecord,
+}
+
+impl CounterSet {
+    pub fn new(
+        id: TargetCounterSetId,
+        name: impl Into<String>,
+        counters: Vec<TargetCounterDefinition>,
+    ) -> Self {
+        let definition = TargetCounterSetRecord {
+            counter_set_id: id,
+            name: name.into(),
+            counters,
+        };
+        signal_definitions()
+            .lock()
+            .expect("stax signal registry poisoned")
+            .counter_sets
+            .insert(id, definition.clone());
+        Self { definition }
+    }
+
+    pub fn id(&self) -> TargetCounterSetId {
+        self.definition.counter_set_id
+    }
+
+    pub fn sample(&self, values: Vec<TargetCounterScalar>) {
+        let Some(point) = current_point() else { return };
+        self.sample_at(point.timestamp_ns, point.pid, point.tid, values);
+    }
+
+    pub fn sample_at(
+        &self,
+        timestamp_ns: u64,
+        source_pid: u32,
+        tid: Option<u32>,
+        values: Vec<TargetCounterScalar>,
+    ) {
+        if !reporting_active() || (source_pid != std::process::id() && tid.is_some()) {
+            return;
+        }
+        let sample = TargetCounterSampleRecord {
+            counter_sample_id: TargetCounterSampleId::new(
+                NEXT_COUNTER_SAMPLE_ID.fetch_add(1, Ordering::Relaxed),
+            ),
+            counter_set_id: self.definition.counter_set_id,
+            dispatch_id: None,
+            command_buffer_id: None,
+            sample_point: TargetCounterSamplePoint::TimeSeries,
+            timestamp_ns: Some(timestamp_ns),
+            source_pid,
+            tid,
+            values,
+            error: None,
+        };
+        let _ = try_report_signals(TargetSignalBatch {
+            pid: std::process::id(),
+            counter_samples: vec![sample],
+            ..TargetSignalBatch::default()
+        });
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Contract {
+    definition: TargetContractRecord,
+}
+
+impl Contract {
+    pub fn new(definition: TargetContractRecord) -> Self {
+        signal_definitions()
+            .lock()
+            .expect("stax signal registry poisoned")
+            .contracts
+            .insert(definition.contract_id, definition.clone());
+        Self { definition }
+    }
+
+    pub fn max_off_cpu_current_thread(
+        id: TargetContractId,
+        name: impl Into<String>,
+        description: Option<String>,
+        severity: TargetContractSeverity,
+        duty: TargetContractDuty,
+        max_ns: u64,
+        reasons: Vec<OffCpuReason>,
+    ) -> Option<Self> {
+        Some(Self::new(TargetContractRecord {
+            contract_id: id,
+            name: name.into(),
+            description,
+            severity,
+            duty,
+            kind: TargetContractKind::MaxOffCpuInterval {
+                tid: current_thread_id()?,
+                max_ns,
+                reasons,
+            },
+        }))
+    }
+
+    pub fn max_signal_gap(
+        id: TargetContractId,
+        name: impl Into<String>,
+        description: Option<String>,
+        severity: TargetContractSeverity,
+        duty: TargetContractDuty,
+        signal: TargetSignalSelector,
+        max_ns: u64,
+    ) -> Self {
+        Self::new(TargetContractRecord {
+            contract_id: id,
+            name: name.into(),
+            description,
+            severity,
+            duty,
+            kind: TargetContractKind::MaxSignalGap { signal, max_ns },
+        })
+    }
+
+    pub fn max_latency(
+        id: TargetContractId,
+        name: impl Into<String>,
+        description: Option<String>,
+        severity: TargetContractSeverity,
+        duty: TargetContractDuty,
+        start_event: TargetEventKindId,
+        end_event: TargetEventKindId,
+        max_ns: u64,
+    ) -> Self {
+        Self::new(TargetContractRecord {
+            contract_id: id,
+            name: name.into(),
+            description,
+            severity,
+            duty,
+            kind: TargetContractKind::MaxLatency {
+                start_event,
+                end_event,
+                max_ns,
+            },
+        })
+    }
+
+    pub fn definition(&self) -> &TargetContractRecord {
+        &self.definition
     }
 }
 
@@ -874,8 +1200,13 @@ impl OpenSpan {
     }
 }
 
-fn worker_sender() -> &'static Sender<TargetSpanBatch> {
-    static SENDER: OnceLock<Sender<TargetSpanBatch>> = OnceLock::new();
+enum WorkerMessage {
+    Spans(TargetSpanBatch),
+    Signals(TargetSignalBatch),
+}
+
+fn worker_sender() -> &'static Sender<WorkerMessage> {
+    static SENDER: OnceLock<Sender<WorkerMessage>> = OnceLock::new();
     SENDER.get_or_init(|| {
         let (tx, rx) = tokio::sync::mpsc::channel(QUEUE_DEPTH);
         std::thread::Builder::new()
@@ -887,7 +1218,7 @@ fn worker_sender() -> &'static Sender<TargetSpanBatch> {
     })
 }
 
-fn worker(rx: Receiver<TargetSpanBatch>) {
+fn worker(rx: Receiver<WorkerMessage>) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -896,33 +1227,34 @@ fn worker(rx: Receiver<TargetSpanBatch>) {
         Err(e) => {
             REPORTING_ACTIVE.store(false, Ordering::Relaxed);
             CONNECTED_TO_SERVER.store(false, Ordering::Relaxed);
-            tracing::warn!("stax-target: no tokio runtime, span reporting disabled: {e}");
+            tracing::warn!("stax-target: no tokio runtime, reporting disabled: {e}");
             return;
         }
     };
     runtime.block_on(worker_loop(rx));
 }
 
-async fn worker_loop(mut rx: Receiver<TargetSpanBatch>) {
+async fn worker_loop(mut rx: Receiver<WorkerMessage>) {
     let pid = std::process::id();
     let mut client: Option<TargetIngestClient> = None;
     let mut next_poll = tokio::time::Instant::now();
     loop {
         tokio::select! {
             biased;
-
             _ = tokio::time::sleep_until(next_poll) => {
                 next_poll = tokio::time::Instant::now() + POLL_INTERVAL;
                 poll_capture_gate(pid, &mut client).await;
             }
-
-            batch = rx.recv() => {
-                let Some(batch) = batch else {
+            message = rx.recv() => {
+                let Some(message) = message else {
                     REPORTING_ACTIVE.store(false, Ordering::Relaxed);
                     CONNECTED_TO_SERVER.store(false, Ordering::Relaxed);
                     return;
                 };
-                ingest_batch(batch, &mut client).await;
+                match message {
+                    WorkerMessage::Spans(batch) => ingest_batch(batch, &mut client).await,
+                    WorkerMessage::Signals(batch) => ingest_signal_batch(batch, &mut client).await,
+                }
             }
         }
     }
@@ -955,6 +1287,10 @@ async fn poll_capture_gate(pid: u32, client: &mut Option<TargetIngestClient>) {
     let was = REPORTING_ACTIVE.swap(active, Ordering::Relaxed);
     if !was && active {
         reset_reporter_stats();
+        let definitions = definition_snapshot(pid);
+        if !definitions.is_empty() {
+            ingest_signal_batch(definitions, client).await;
+        }
     }
     if was != active {
         tracing::debug!(active, "stax-target: capture gate flipped");
@@ -1003,6 +1339,28 @@ async fn ingest_batch(batch: TargetSpanBatch, client: &mut Option<TargetIngestCl
     }
 }
 
+async fn ingest_signal_batch(batch: TargetSignalBatch, client: &mut Option<TargetIngestClient>) {
+    if client.is_none() {
+        *client = connect().await;
+    }
+    let Some(live) = client.as_ref() else {
+        return;
+    };
+    match tokio::time::timeout(CALL_TIMEOUT, live.ingest_signals(batch)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::debug!("stax-target: signal ingest failed, dropping connection: {e}");
+            CONNECTED_TO_SERVER.store(false, Ordering::Relaxed);
+            *client = None;
+        }
+        Err(_) => {
+            tracing::debug!("stax-target: signal ingest timed out, dropping connection");
+            CONNECTED_TO_SERVER.store(false, Ordering::Relaxed);
+            *client = None;
+        }
+    }
+}
+
 async fn connect() -> Option<TargetIngestClient> {
     let Some(socket) = stax_server_socket() else {
         CONNECTED_TO_SERVER.store(false, Ordering::Relaxed);
@@ -1024,8 +1382,7 @@ async fn connect() -> Option<TargetIngestClient> {
 }
 
 /// Same resolution order as the stax CLI: explicit override, XDG
-/// runtime dir, per-uid /tmp fallback. `None` when no socket exists
-/// (server not running) — polling then costs one `stat` per period.
+/// runtime dir, per-uid /tmp fallback. `None` when no socket exists.
 fn stax_server_socket() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("STAX_SERVER_SOCKET") {
         let p = PathBuf::from(p);
@@ -1043,11 +1400,10 @@ fn stax_server_socket() -> Option<PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
-fn current_thread_id() -> Option<u32> {
+pub fn current_thread_id() -> Option<u32> {
     unsafe extern "C" {
         fn pthread_threadid_np(thread: *mut libc::c_void, thread_id: *mut u64) -> libc::c_int;
     }
-
     let mut tid = 0u64;
     let rc = unsafe { pthread_threadid_np(std::ptr::null_mut(), &mut tid) };
     if rc != 0 || tid > u32::MAX as u64 {
@@ -1057,7 +1413,7 @@ fn current_thread_id() -> Option<u32> {
 }
 
 #[cfg(target_os = "linux")]
-fn current_thread_id() -> Option<u32> {
+pub fn current_thread_id() -> Option<u32> {
     let tid = unsafe { libc::syscall(libc::SYS_gettid) };
     if tid <= 0 || tid > u32::MAX as libc::c_long {
         return None;
@@ -1066,7 +1422,7 @@ fn current_thread_id() -> Option<u32> {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn current_thread_id() -> Option<u32> {
+pub fn current_thread_id() -> Option<u32> {
     None
 }
 
@@ -1077,12 +1433,10 @@ fn clock_now_ns() -> Option<u64> {
         numer: u32,
         denom: u32,
     }
-
     unsafe extern "C" {
         fn mach_absolute_time() -> u64;
         fn mach_timebase_info(info: *mut MachTimebaseInfo) -> libc::c_int;
     }
-
     static TIMEBASE: OnceLock<Option<(u64, u64)>> = OnceLock::new();
     let (numer, denom) = (*TIMEBASE.get_or_init(|| {
         let mut info = MachTimebaseInfo { numer: 0, denom: 0 };

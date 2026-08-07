@@ -10,11 +10,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use parking_lot::RwLock;
 
 use stax_live_proto::{
-    AnnotatedLine, AnnotatedView, CfgUpdate, FlameNode, FlamegraphUpdate, IntervalEntry,
-    IntervalListUpdate, LiveFilter, NeighborsUpdate, PetSampleEntry, PetSampleListUpdate, Profiler,
-    RunMarker, RunViewParams, TargetLaneKind, TargetLaneTimeline, TargetSpanEntry, TargetSpanGroup,
-    TargetSpanListUpdate, ThreadInfo, ThreadsUpdate, TimelineBucket, TimelineParams,
-    TimelineUpdate, TopEntry, TopSort, TopUpdate, ViewParams,
+    AnnotatedLine, AnnotatedView, CfgUpdate, ContractListUpdate, ContractQueryParams,
+    CounterQueryParams, CounterSeriesUpdate, EventListUpdate, EventQueryParams, FlameNode,
+    FlamegraphUpdate, IncidentQueryParams, IncidentUpdate, IntervalEntry, IntervalListUpdate,
+    LiveFilter, NeighborsUpdate, PetSampleEntry, PetSampleListUpdate, Profiler, RunMarker,
+    RunViewParams, TargetLaneKind, TargetLaneTimeline, TargetSpanEntry, TargetSpanGroup,
+    TargetSpanListUpdate, ThreadInfo, ThreadsUpdate, TimeRange, TimelineBucket, TimelineParams,
+    TimelineUpdate, TopEntry, TopSort, TopUpdate, ViewParams, ViolationListUpdate,
+    ViolationQueryParams,
 };
 
 use crate::aggregator::{Aggregation, EventCtx, OffCpuBreakdown, PmcAccum, StackNode};
@@ -27,15 +30,20 @@ mod classify;
 mod disassemble;
 mod highlight;
 mod kernel_symbols;
+pub mod observability;
+
 pub mod source;
 
 pub use aggregator::Aggregator;
 pub use binaries::{BinaryRegistry, LiveSymbolOwned, LoadedBinary, ResolvedSymbol};
+pub use observability::ObservabilityStore;
 
 #[derive(Clone)]
 pub struct LiveServer {
     pub aggregator: Arc<RwLock<Aggregator>>,
     pub binaries: Arc<RwLock<BinaryRegistry>>,
+    pub observability: Arc<RwLock<ObservabilityStore>>,
+
     /// Monotonic data version bumped by stax-server when the
     /// aggregator or binary registry changes. Subscription tasks use
     /// this to avoid rebuilding expensive views while the browser is
@@ -369,15 +377,33 @@ impl Profiler for LiveServer {
     }
 
     async fn timeline(&self, params: TimelineParams) -> TimelineUpdate {
-        let TimelineParams { run: _, tid } = params;
-        build_timeline_update(&self.aggregator, &self.binaries, tid)
+        let TimelineParams {
+            run: _,
+            tid,
+            bucket_ns,
+            window,
+        } = params;
+        build_timeline_update(
+            &self.aggregator,
+            &self.binaries,
+            &self.observability,
+            tid,
+            bucket_ns,
+            window,
+        )
     }
 
     async fn subscribe_timeline(&self, params: TimelineParams, output: vox::Tx<TimelineUpdate>) {
-        let TimelineParams { run: _, tid } = params;
+        let TimelineParams {
+            run: _,
+            tid,
+            bucket_ns,
+            window,
+        } = params;
         tracing::info!(?tid, "subscribe_timeline: starting stream");
         let aggregator = self.aggregator.clone();
         let binaries = self.binaries.clone();
+        let observability = self.observability.clone();
         let revision = self.revision.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
@@ -387,7 +413,14 @@ impl Profiler for LiveServer {
                 if !should_publish_revision(&revision, &mut last_seen) {
                     continue;
                 }
-                let update = build_timeline_update(&aggregator, &binaries, tid);
+                let update = build_timeline_update(
+                    &aggregator,
+                    &binaries,
+                    &observability,
+                    tid,
+                    bucket_ns,
+                    window.clone(),
+                );
                 if let Err(e) = output.send(update).await {
                     tracing::info!(?tid, "subscribe_timeline: stream ended: {e:?}");
                     break;
@@ -613,6 +646,68 @@ impl Profiler for LiveServer {
                 }
             }
         });
+    }
+    async fn events(&self, params: EventQueryParams) -> EventListUpdate {
+        let session_start = self.aggregator.read().session_start_ns().unwrap_or(0);
+        self.observability
+            .read()
+            .events_update(&params, session_start)
+    }
+
+    async fn counters(&self, params: CounterQueryParams) -> CounterSeriesUpdate {
+        let session_start = self.aggregator.read().session_start_ns().unwrap_or(0);
+        self.observability
+            .read()
+            .counters_update(&params, session_start)
+    }
+
+    async fn contracts(&self, _params: ContractQueryParams) -> ContractListUpdate {
+        let agg = self.aggregator.read();
+        let bins = self.binaries.read();
+        self.observability.read().contracts_update(&agg, &bins)
+    }
+
+    async fn violations(&self, params: ViolationQueryParams) -> ViolationListUpdate {
+        let agg = self.aggregator.read();
+        let bins = self.binaries.read();
+        self.observability
+            .read()
+            .violations_update(&params, &agg, &bins)
+    }
+
+    async fn subscribe_violations(
+        &self,
+        params: ViolationQueryParams,
+        output: vox::Tx<ViolationListUpdate>,
+    ) {
+        let aggregator = self.aggregator.clone();
+        let binaries = self.binaries.clone();
+        let observability = self.observability.clone();
+        let revision = self.revision.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
+            let mut last_seen = None;
+            loop {
+                tick.tick().await;
+                if !should_publish_revision(&revision, &mut last_seen) {
+                    continue;
+                }
+                let update = {
+                    let agg = aggregator.read();
+                    let bins = binaries.read();
+                    observability.read().violations_update(&params, &agg, &bins)
+                };
+                if output.send(update).await.is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    async fn incident(&self, params: IncidentQueryParams) -> IncidentUpdate {
+        let agg = self.aggregator.read();
+        let bins = self.binaries.read();
+        self.observability.read().incident(&params, &agg, &bins)
     }
 }
 
@@ -1309,19 +1404,14 @@ fn group_top_entries(
     out
 }
 
-/// Build the timeline by walking SCHED-derived intervals (the
-/// authoritative source of "when was a thread doing what"). Each
-/// interval's duration gets distributed across the buckets it
-/// overlaps, split into on-CPU vs off-CPU stacks. PET samples
-/// don't directly drive the timeline -- they're stack-only.
-///
-/// Bucket size is chosen so we stay around `TARGET_BUCKETS`
-/// regardless of recording duration, with a sensible minimum so we
-/// don't over-quantize a 1-second recording.
+/// Build the timeline by walking SCHED-derived intervals.
 fn build_timeline_update(
     aggregator: &Arc<RwLock<Aggregator>>,
     binaries: &Arc<RwLock<BinaryRegistry>>,
+    observability: &Arc<RwLock<ObservabilityStore>>,
     tid: Option<u32>,
+    bucket_ns: Option<u64>,
+    window: Option<TimeRange>,
 ) -> TimelineUpdate {
     const TARGET_BUCKETS: u64 = 200;
     const MIN_BUCKET_NS: u64 = 50_000_000; // 50 ms
@@ -1329,19 +1419,37 @@ fn build_timeline_update(
 
     let agg = aggregator.read();
     let binaries = binaries.read();
-    let start = agg.session_start_ns().unwrap_or(0);
-    let last = agg.last_event_ns().unwrap_or(start);
+    let session_start = agg.session_start_ns().unwrap_or(0);
+    let session_last = agg.last_event_ns().unwrap_or(session_start);
+
+    // A window restricts the bucketed range; both bounds are
+    // recording-relative ns, so add them to the session start.
+    let window_start_rel = window.as_ref().map(|w| w.start_ns).unwrap_or(0);
+    let (start, last) = match window {
+        Some(ref w) => (
+            session_start.saturating_add(w.start_ns),
+            session_start.saturating_add(w.end_ns),
+        ),
+        None => (session_start, session_last),
+    };
     let recording_duration_ns = last.saturating_sub(start);
 
-    let bucket_size_ns = if recording_duration_ns == 0 {
-        MIN_BUCKET_NS
-    } else {
-        (recording_duration_ns / TARGET_BUCKETS).max(MIN_BUCKET_NS)
+    let bucket_size_ns = match bucket_ns {
+        Some(b) => b,
+        None => {
+            if recording_duration_ns == 0 {
+                MIN_BUCKET_NS
+            } else {
+                (recording_duration_ns / TARGET_BUCKETS).max(MIN_BUCKET_NS)
+            }
+        }
     };
     let n_buckets = ((recording_duration_ns / bucket_size_ns) + 1) as usize;
     let mut on_cpu_per_bucket: Vec<u64> = vec![0; n_buckets.max(1)];
     let mut target_per_bucket: Vec<u64> = vec![0; n_buckets.max(1)];
     let mut off_cpu_per_bucket: Vec<u64> = vec![0; n_buckets.max(1)];
+    let mut off_cpu_reason_per_bucket: Vec<OffCpuBreakdown> =
+        vec![OffCpuBreakdown::default(); n_buckets.max(1)];
     let mut target_lanes: HashMap<u32, TargetLaneTimelineAccum> = HashMap::new();
     let mut interner = StringInterner::new();
 
@@ -1373,8 +1481,27 @@ fn build_timeline_update(
         if int_end <= int_start {
             continue;
         }
+        // With a windowed build, clip away intervals that end before the
+        // window opens — `saturating_sub` below would otherwise fold
+        // their on-CPU time into bucket 0.
+        if int_end <= start {
+            continue;
+        }
         let target = target_info.is_some();
         let on_cpu = matches!(interval.kind, IntervalKind::OnCpu) || target;
+        // Classify an off-CPU interval's reason once, from its leaf
+        // stack frame, so the timeline bucket can break off-CPU down
+        // by reason (lock / idle / sleep / …) for stall classification.
+        let off_cpu_reason = match &interval.kind {
+            IntervalKind::OffCpu { stack, .. } => {
+                let leaf = stack
+                    .first()
+                    .and_then(|&addr| binaries.lookup_symbol(addr))
+                    .map(|r| r.function_name);
+                Some(crate::classify::classify_offcpu(leaf.as_deref()))
+            }
+            _ => None,
+        };
         let lane_name = target_info.and_then(|(stack, _, _)| {
             stack
                 .get(1)
@@ -1421,6 +1548,9 @@ fn build_timeline_update(
             } else {
                 off_cpu_per_bucket[b] = off_cpu_per_bucket[b].saturating_add(share);
                 total_off_cpu_ns = total_off_cpu_ns.saturating_add(share);
+                if let Some(reason) = off_cpu_reason {
+                    off_cpu_reason_per_bucket[b].add_reason(reason, share);
+                }
             }
         }
         if target {
@@ -1442,13 +1572,17 @@ fn build_timeline_update(
         .into_iter()
         .zip(target_per_bucket.into_iter())
         .zip(off_cpu_per_bucket.into_iter())
+        .zip(off_cpu_reason_per_bucket.into_iter())
         .enumerate()
-        .map(|(i, ((on_cpu_ns, target_ns), off_cpu_ns))| TimelineBucket {
-            start_ns: i as u64 * bucket_size_ns,
-            on_cpu_ns,
-            target_ns,
-            off_cpu_ns,
-        })
+        .map(
+            |(i, (((on_cpu_ns, target_ns), off_cpu_ns), off_cpu_by_reason))| TimelineBucket {
+                start_ns: i as u64 * bucket_size_ns + window_start_rel,
+                on_cpu_ns,
+                target_ns,
+                off_cpu_ns,
+                off_cpu_by_reason: off_cpu_by_reason.to_proto(),
+            },
+        )
         .collect();
     let mut target_lanes: Vec<TargetLaneTimeline> = target_lanes
         .into_values()
@@ -1466,6 +1600,9 @@ fn build_timeline_update(
         strings: interner.into_strings(),
         bucket_size_ns,
         recording_duration_ns,
+        // Overridden by the server dispatcher (which knows the
+        // RunSummary). 0 here; the live profiler has no wall-clock.
+        started_at_unix_ns: 0,
         total_on_cpu_ns,
         total_target_ns,
         total_off_cpu_ns,
@@ -1475,11 +1612,59 @@ fn build_timeline_update(
         // `TimeRange` are session-relative, so convert on the way out or
         // every `--window <marker>..` anchor lands off by the
         // session-start offset.
+        app_events: observability
+            .read()
+            .events_update(
+                &EventQueryParams {
+                    run: None,
+                    tid,
+                    window: window.clone(),
+                    name_contains: None,
+                    limit: 10_000,
+                },
+                session_start,
+            )
+            .events
+            .into_iter()
+            .map(|event| stax_live_proto::AppEventTick {
+                timestamp_ns: event.timestamp_ns,
+                source_pid: event.source_pid,
+                tid: event.tid,
+                event_kind_id: event.event_kind_id,
+                name: event.name,
+                correlation_id: event.correlation_id,
+            })
+            .collect(),
+        violations: observability
+            .read()
+            .violations_update(
+                &ViolationQueryParams {
+                    run: None,
+                    window: window.clone(),
+                    minimum_severity: None,
+                    limit: 10_000,
+                },
+                &agg,
+                &binaries,
+            )
+            .violations
+            .into_iter()
+            .map(|violation| stax_live_proto::ViolationSpan {
+                violation_id: violation.violation_id,
+                contract_id: violation.contract_id,
+                name: violation.contract_name,
+                severity: violation.severity,
+                start_ns: violation.start_ns,
+                end_ns: violation.end_ns,
+                open: violation.open,
+            })
+            .collect(),
+        counters: Vec::new(),
         markers: agg
             .markers()
             .iter()
             .map(|m| RunMarker {
-                timestamp_ns: m.timestamp_ns.saturating_sub(start),
+                timestamp_ns: m.timestamp_ns.saturating_sub(session_start),
                 label: m.label.clone(),
             })
             .collect(),

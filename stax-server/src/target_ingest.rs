@@ -31,7 +31,7 @@ use std::collections::HashMap;
 use stax_live::{IntervalKind, LiveSymbolOwned, LoadedBinary, NearestPetStackError, PmuSample};
 use stax_live_proto::{
     TargetIngest, TargetIngestDiagnostics, TargetLaneDiagnostics, TargetReporterStats,
-    TargetSpanBatch, TargetSpanOrigin,
+    TargetSignalBatch, TargetSpanBatch, TargetSpanOrigin,
 };
 
 use crate::ServerState;
@@ -454,8 +454,10 @@ impl TargetIngest for TargetIngestService {
         let source_records = batch.records.sources.len() as u64;
         let shader_records = batch.records.shaders.len() as u64;
         let attachment_records = batch.records.attachments.len() as u64;
-        let counter_set_records = batch.records.counter_sets.len() as u64;
-        let counter_sample_records = batch.records.counter_samples.len() as u64;
+
+        let counter_set_records = 0;
+        let counter_sample_records = 0;
+
         let records_received = batch.records.runtimes.len() as u64
             + batch.records.lanes.len() as u64
             + batch.records.queues.len() as u64
@@ -463,9 +465,8 @@ impl TargetIngest for TargetIngestService {
             + dispatch_records
             + source_records
             + shader_records
-            + attachment_records
-            + counter_set_records
-            + counter_sample_records;
+            + attachment_records;
+
         // Only the active run's target may land spans on the timeline.
         let Some(active_pid) = self.server.active_target_pid() else {
             self.server
@@ -616,6 +617,46 @@ impl TargetIngest for TargetIngestService {
             total_duration_ns,
             "target spans ingested"
         );
+    }
+    async fn ingest_signals(&self, batch: TargetSignalBatch) {
+        if batch.is_empty() {
+            return;
+        }
+        let signal_count = (batch.event_kinds.len()
+            + batch.events.len()
+            + batch.counter_sets.len()
+            + batch.counter_samples.len()
+            + batch.contracts.len()) as u64;
+        let Some(active_pid) = self.server.active_target_pid() else {
+            self.server
+                .observability()
+                .write()
+                .record_dropped_no_active_run(signal_count);
+            return;
+        };
+        if active_pid != batch.pid {
+            self.server
+                .observability()
+                .write()
+                .record_dropped_wrong_pid(signal_count);
+            return;
+        }
+        let (session_start, last_event) = {
+            let aggregator = self.server.aggregator().read();
+            (aggregator.session_start_ns(), aggregator.last_event_ns())
+        };
+        if let Some((start_ns, end_ns)) =
+            self.server
+                .observability()
+                .write()
+                .ingest(batch, session_start, last_event)
+        {
+            self.server
+                .aggregator()
+                .write()
+                .note_external_timestamp_range(start_ns, end_ns);
+        }
+        self.server.bump_revision();
     }
 
     async fn reporter_stats(&self, stats: TargetReporterStats) {
@@ -856,6 +897,7 @@ mod tests {
                 spans_dropped_queue_full: 90,
                 batches_dropped_worker_disconnected: 8,
                 spans_dropped_worker_disconnected: 80,
+                ..TargetReporterStats::default()
             })
             .await;
         service
@@ -865,6 +907,7 @@ mod tests {
                 spans_dropped_queue_full: 7,
                 batches_dropped_worker_disconnected: 1,
                 spans_dropped_worker_disconnected: 3,
+                ..TargetReporterStats::default()
             })
             .await;
 
@@ -1242,7 +1285,12 @@ mod tests {
     }
 
     fn timeline_params(run: Option<RunId>, tid: Option<u32>) -> TimelineParams {
-        TimelineParams { run, tid }
+        TimelineParams {
+            run,
+            tid,
+            bucket_ns: None,
+            window: None,
+        }
     }
 
     fn flame_node_name<'a>(node: &FlameNode, strings: &'a [String]) -> Option<&'a str> {
