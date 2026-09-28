@@ -73,6 +73,7 @@ fn main() {
         frequency_hz: 999,
         duration: Some(Duration::from_secs(2)),
         kernel_stacks: true,
+        ..RecordOptions::default()
     };
     let stop = AtomicBool::new(false);
 
@@ -94,13 +95,14 @@ fn main() {
     };
 
     let mut sink = PmuSums::default();
-    let summary = stax_linux_capture::record(&opts, &mut sink, &stop).expect("record");
+    let result = stax_linux_capture::record(&opts, &mut sink, &stop);
 
     if let Some(mut c) = child {
         let _ = c.kill();
         let _ = c.wait();
     }
     stop.store(true, Ordering::Relaxed);
+    let summary = result.expect("record");
 
     println!(
         "samples={} (lost {}), elapsed={}ms",

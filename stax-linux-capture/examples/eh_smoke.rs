@@ -58,10 +58,11 @@ fn run_once(prog: &str, dwarf_unwind: bool, secs: u64) -> eyre::Result<DepthSums
     };
     let stop = AtomicBool::new(false);
     let mut sink = DepthSums::default();
-    let _ = stax_linux_capture::record(&opts, &mut sink, &stop)?;
+    let result = stax_linux_capture::record(&opts, &mut sink, &stop);
 
     let _ = child.kill();
     let _ = child.wait();
+    result?;
     Ok(sink)
 }
 

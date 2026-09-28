@@ -33,6 +33,8 @@ struct WakingSums {
     on_cpu_intervals: u64,
     off_cpu_intervals: u64,
     off_cpu_with_waker: u64,
+    wakee_tids: std::collections::BTreeSet<u32>,
+    off_cpu_tids: std::collections::BTreeSet<u32>,
 }
 
 #[cfg(target_os = "linux")]
@@ -43,14 +45,16 @@ impl SampleSink for WakingSums {
     fn on_binary_loaded(&mut self, _ev: BinaryLoadedEvent<'_>) {}
     fn on_binary_unloaded(&mut self, _ev: BinaryUnloadedEvent<'_>) {}
     fn on_thread_name(&mut self, _ev: ThreadNameEvent<'_>) {}
-    fn on_wakeup(&mut self, _ev: WakeupEvent<'_>) {
+    fn on_wakeup(&mut self, ev: WakeupEvent<'_>) {
         self.wakeups += 1;
+        self.wakee_tids.insert(ev.wakee_tid);
     }
     fn on_cpu_interval(&mut self, ev: CpuIntervalEvent<'_>) {
         match &ev.kind {
             CpuIntervalKind::OnCpu => self.on_cpu_intervals += 1,
             CpuIntervalKind::OffCpu { waker_tid, .. } => {
                 self.off_cpu_intervals += 1;
+                self.off_cpu_tids.insert(ev.tid);
                 if waker_tid.is_some() {
                     self.off_cpu_with_waker += 1;
                 }
@@ -101,6 +105,7 @@ fn main() -> eyre::Result<()> {
         frequency_hz: 999,
         duration: Some(Duration::from_secs(secs)),
         kernel_stacks: true,
+        ..RecordOptions::default()
     };
     let stop = AtomicBool::new(false);
     let mut sink = WakingSums::default();
@@ -108,13 +113,15 @@ fn main() -> eyre::Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    let summary = rt.block_on(stax_linux_capture::record_via_daemon(
+    let result = rt.block_on(stax_linux_capture::record_via_daemon(
         &socket, &opts, &mut sink, &stop,
-    ))?;
+    ));
 
     let _ = child.kill();
     let _ = child.wait();
+    let summary = result?;
 
+    println!("wakee_tids={:?} off_cpu_tids={:?}", sink.wakee_tids, sink.off_cpu_tids);
     println!(
         "samples={} (lost {}) elapsed={}ms",
         summary.samples,

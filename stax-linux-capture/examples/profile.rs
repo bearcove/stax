@@ -135,6 +135,7 @@ pub(super) fn main() {
         frequency_hz: 997,
         duration: Some(Duration::from_secs(2)),
         kernel_stacks: true,
+        ..RecordOptions::default()
     };
     println!(
         "profiling self (pid {}) for 2s @ {}Hz…",
