@@ -1066,6 +1066,7 @@ pub fn run_with_rings(
     let _pmu_siblings = pmu.siblings;
     let pmu_id_to_kind = pmu.id_to_kind;
     let start = Instant::now();
+    let target_exit = crate::proc::TargetExit::new(opts.pid);
 
     // Kernel symbols up front, same as the kperf backend, so the
     // analysis side can resolve kernel_backtrace addresses. We also
@@ -1180,6 +1181,10 @@ pub fn run_with_rings(
 
     loop {
         if should_stop.load(Ordering::Relaxed) {
+            break;
+        }
+        if target_exit.exited() {
+            sess.summary.target_exited = true;
             break;
         }
         if let Some(dl) = deadline {

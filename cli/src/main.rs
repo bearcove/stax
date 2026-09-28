@@ -519,9 +519,7 @@ async fn wait_on_run(
         }
         signal = tokio::signal::ctrl_c() => {
             signal.map_err(|e| format!("waiting for Ctrl-C: {e}"))?;
-            let summary = client.stop_active().await.map_err(|e| format!("{e:?}"))?;
-            println!("stopped:");
-            print_run_one_line(&summary);
+            stop_waited_run(client, run_id).await?;
         }
     }
     Ok(())
@@ -552,17 +550,32 @@ async fn wait_on_run_with_child(
         }
         _ = child_watcher => {
             // Target reaped; stop the recording.
-            let summary = client.stop_active().await.map_err(|e| format!("{e:?}"))?;
-            println!("target exited; stopped:");
-            print_run_one_line(&summary);
-            fail_on_recorder_error(&summary)?;
+            stop_waited_run(client, run_id).await?;
         }
         signal = tokio::signal::ctrl_c() => {
             signal.map_err(|e| format!("waiting for Ctrl-C: {e}"))?;
-            let summary = client.stop_active().await.map_err(|e| format!("{e:?}"))?;
+            stop_waited_run(client, run_id).await?;
+        }
+    }
+    Ok(())
+}
+
+// Automatic target-exit finalization can win the race with Ctrl-C or the
+// child watcher. In that case report the completed run rather than an error.
+async fn stop_waited_run(
+    client: &RunControlClient,
+    run_id: stax_live_proto::RunId,
+) -> Result<(), Box<dyn Error>> {
+    match client.stop_active().await {
+        Ok(summary) => {
             println!("stopped:");
             print_run_one_line(&summary);
+            fail_on_recorder_error(&summary)?;
         }
+        Err(vox::VoxError::User(err)) if matches!(*err, stax_live_proto::RunControlError::NoActiveRun) => {
+            print_finished_run_or_message(client, run_id).await?;
+        }
+        Err(err) => return Err(format!("{err:?}").into()),
     }
     Ok(())
 }

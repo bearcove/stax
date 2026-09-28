@@ -109,6 +109,8 @@ pub struct RecordSummary {
     /// Samples whose DWARF walk was cut short (see `dwarf::splice`).
     pub dwarf_truncated: u64,
     pub session_ns: u64,
+    /// The target exited naturally (as opposed to an explicit stop/deadline).
+    pub target_exited: bool,
 }
 
 /// Open `perf_event_open` against `opts.pid`, drain until the duration

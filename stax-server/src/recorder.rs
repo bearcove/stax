@@ -44,22 +44,25 @@ pub fn spawn_attach(
     server.set_recording_stop_flag(run_id, stop_flag.clone());
 
     let failure_server = server.clone();
-    spawn_on_dedicated_runtime(move || async move {
-        let result = run_attach(
-            server.clone(),
-            run_id,
-            pid,
-            frequency_hz,
-            dwarf_unwind,
-            daemon_socket,
-            time_limit,
-            stop_flag,
-        )
-        .await;
-        finalize(&server, run_id, result);
-    }, move |message| {
-        failure_server.finalize_run(run_id, StopReason::RecorderError { message });
-    });
+    spawn_on_dedicated_runtime(
+        move || async move {
+            let result = run_attach(
+                server.clone(),
+                run_id,
+                pid,
+                frequency_hz,
+                dwarf_unwind,
+                daemon_socket,
+                time_limit,
+                stop_flag,
+            )
+            .await;
+            finalize(&server, run_id, result);
+        },
+        move |message| {
+            failure_server.finalize_run(run_id, StopReason::RecorderError { message });
+        },
+    );
 }
 
 /// Run the recording loop on a dedicated OS thread with its own
@@ -85,7 +88,9 @@ where
                 return;
             }
         };
-        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rt.block_on(make_future()))).is_err() {
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rt.block_on(make_future())))
+            .is_err()
+        {
             on_failure("recorder thread panicked".to_owned());
         }
     });
@@ -171,6 +176,8 @@ async fn run_attach(
     };
 
     #[cfg(target_os = "linux")]
+    let linux_stop_reason;
+    #[cfg(target_os = "linux")]
     let result: eyre::Result<()> = {
         // `dwarf_unwind` arrives already resolved by the `stax` CLI:
         // on by default on x86_64 Linux (the system libc is built
@@ -208,6 +215,13 @@ async fn run_attach(
             // thread whose only job is this recording.
             stax_linux_capture::record(&opts, &mut sink, &stop_flag)?
         };
+        linux_stop_reason = if summary.target_exited {
+            StopReason::TargetExited
+        } else if !stop_flag.load(std::sync::atomic::Ordering::Relaxed) && time_limit.is_some() {
+            StopReason::TimeLimit
+        } else {
+            StopReason::UserStop
+        };
         tracing::info!(
             run_id = run_id.0,
             samples = summary.samples,
@@ -236,7 +250,16 @@ async fn run_attach(
     }
 
     match result {
-        Ok(()) => Ok(StopReason::UserStop),
+        Ok(()) => {
+            #[cfg(target_os = "linux")]
+            {
+                Ok(linux_stop_reason)
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                Ok(StopReason::UserStop)
+            }
+        }
         Err(e) => Ok(StopReason::RecorderError {
             message: format!("{e}"),
         }),

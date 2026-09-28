@@ -89,3 +89,74 @@ pub fn threads(pid: u32) -> Vec<(u32, String)> {
     }
     out
 }
+
+/// Stable process-exit notification, including an unreaped zombie. Unlike
+/// /proc/<pid> existence, a pidfd cannot mistake a reused PID for our target.
+pub(crate) struct TargetExit {
+    fd: Option<std::os::fd::OwnedFd>,
+    pid: u32,
+    already_exited: bool,
+}
+
+impl TargetExit {
+    pub(crate) fn new(pid: u32) -> Self {
+        use std::os::fd::FromRawFd;
+        // SAFETY: pidfd_open has no pointer arguments. Own a successful fd.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+        let already_exited =
+            fd < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        Self {
+            fd: if fd >= 0 {
+                Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) })
+            } else {
+                None
+            },
+            pid,
+            already_exited,
+        }
+    }
+
+    pub(crate) fn exited(&self) -> bool {
+        use std::os::fd::AsRawFd;
+        if self.already_exited {
+            return true;
+        }
+        if let Some(fd) = &self.fd {
+            let mut pfd = libc::pollfd {
+                fd: fd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one live pollfd, no blocking.
+            return unsafe { libc::poll(&mut pfd, 1, 0) } > 0
+                && pfd.revents & (libc::POLLIN | libc::POLLHUP) != 0;
+        }
+        // Older kernels or restricted pidfd_open: only treat ENOENT as exit;
+        // permission/transient read errors are not evidence of target death.
+        matches!(std::fs::metadata(format!("/proc/{}", self.pid)), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+    }
+}
+
+#[cfg(test)]
+mod exit_tests {
+    use super::*;
+
+    #[test]
+    fn pidfd_detects_exit_before_reaping() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let target = TargetExit::new(child.id());
+        assert!(!target.exited());
+        child.kill().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !target.exited() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let exited_before_reap = target.exited();
+        child.wait().unwrap();
+        assert!(exited_before_reap, "pidfd must detect unreaped target exit");
+        assert!(target.exited());
+    }
+}
