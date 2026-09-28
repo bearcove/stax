@@ -296,18 +296,12 @@ impl Session<'_> {
                 if let (Some(stack), Some(uw)) = (stack, self.dwarf.as_mut()) {
                     let filled = dyn_size.min(stack.len());
                     if filled >= 16 && ip != 0 && sp != 0 {
-                        let unwound = uw.unwind(ip, sp, bp, sp, &stack[..filled]);
-                        // Trust framehop only when it produced more
-                        // frames than the kernel's FP walk did — that's
-                        // the regime where we beat the fallback. For
-                        // FP-built binaries (Fedora glibc, Apple-style
-                        // Rust builds with `force-frame-pointers`) the
-                        // kernel walk and DWARF agree, and we keep
-                        // either; the test is just a robustness check
-                        // so a no-op DWARF run can't shorten a stack.
-                        if unwound.len() > user.len() {
-                            user = unwound;
+                        let (unwound, truncated) = uw.unwind(ip, sp, bp, sp, &stack[..filled]);
+                        if truncated {
+                            self.summary.dwarf_truncated =
+                                self.summary.dwarf_truncated.saturating_add(1);
                         }
+                        user = crate::dwarf::splice(unwound, truncated, &user);
                     }
                 }
             } else if abi != 0 {
@@ -1139,6 +1133,7 @@ pub fn run_with_rings(
         binaries = summary.binaries,
         intervals = summary.intervals,
         off_cpu_intervals = summary.off_cpu_intervals,
+        dwarf_truncated = summary.dwarf_truncated,
         lost = summary.lost_records,
         elapsed_ms = start.elapsed().as_millis() as u64,
         "linux perf capture finished"

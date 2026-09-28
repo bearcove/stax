@@ -106,6 +106,8 @@ pub struct RecordSummary {
     pub intervals: u64,
     /// Off-CPU intervals emitted from context-switch records.
     pub off_cpu_intervals: u64,
+    /// Samples whose DWARF walk was cut short (see `dwarf::splice`).
+    pub dwarf_truncated: u64,
     pub session_ns: u64,
 }
 

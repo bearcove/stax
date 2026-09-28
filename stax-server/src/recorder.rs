@@ -208,6 +208,7 @@ async fn run_attach(
             binaries = summary.binaries,
             intervals = summary.intervals,
             off_cpu_intervals = summary.off_cpu_intervals,
+            dwarf_truncated = summary.dwarf_truncated,
             lost = summary.lost_records,
             "linux perf capture finished"
         );

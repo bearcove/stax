@@ -98,9 +98,11 @@ impl DwarfUnwinder {
     /// addresses out of the captured `stack_bytes`. `stack_base_addr`
     /// is the SP at capture (the lowest address in `stack_bytes`);
     /// `stack_bytes.len()` is what perf actually filled (`dyn_size`).
-    /// Returns a flat `Vec<u64>` of IPs: the instruction pointer
-    /// first, then each return address. Empty on hard failure (which
-    /// the caller treats as "fall back to the kernel CALLCHAIN").
+    /// Returns the IPs (the instruction pointer first, then each
+    /// return address) and whether the walk was cut short (no CFI for
+    /// a frame, or the stack snapshot ran out) rather than reaching
+    /// the end of the stack. A cut-short walk is a head to splice onto
+    /// the kernel's frame-pointer chain: see [`splice`].
     pub fn unwind(
         &mut self,
         ip: u64,
@@ -108,7 +110,7 @@ impl DwarfUnwinder {
         bp: u64,
         stack_base_addr: u64,
         stack_bytes: &[u8],
-    ) -> Vec<u64> {
+    ) -> (Vec<u64>, bool) {
         let regs = UnwindRegsX86_64::new(ip, sp, bp);
         let mut read_stack = |addr: u64| -> Result<u64, ()> {
             if addr < stack_base_addr {
@@ -132,7 +134,7 @@ impl DwarfUnwinder {
         // the next return address, stack snapshot ran out, …). A
         // truncated unwind still yields useful prefix frames — keep
         // what we got and stop.
-        loop {
+        let truncated = loop {
             match iter.next() {
                 Ok(Some(frame)) => {
                     let pc = match frame {
@@ -141,12 +143,84 @@ impl DwarfUnwinder {
                     };
                     frames.push(pc);
                     if frames.len() > 256 {
-                        break; // defensive runaway guard on corrupt CFI
+                        break true; // defensive runaway guard on corrupt CFI
                     }
                 }
-                Ok(None) | Err(_) => break,
+                Ok(None) => break false,
+                Err(_) => break true,
             }
+        };
+        (frames, truncated)
+    }
+}
+
+/// The user stack of one sample, from a DWARF walk and the kernel's
+/// frame-pointer chain (`fp`, leaf first).
+///
+/// - A complete DWARF walk is the stack.
+/// - A cut-short one (the snapshot is a fixed number of bytes; big
+///   frames exhaust it) is the exact head: it goes on with the FP
+///   chain from the first return address both have. The FP chain
+///   alone misses frames — a leaf without a frame pointer (libc's
+///   `memcpy`) hides its caller — but past the snapshot it is all
+///   there is.
+/// - With no address in common, the longer of the two.
+pub fn splice(dwarf: Vec<u64>, truncated: bool, fp: &[u64]) -> Vec<u64> {
+    if !truncated {
+        return if dwarf.len() >= fp.len() {
+            dwarf
+        } else {
+            fp.to_vec()
+        };
+    }
+    // Skip index 0 on both sides: the sampled IP, not a return address.
+    for (i, &pc) in dwarf.iter().enumerate().skip(1) {
+        if let Some(j) = fp.iter().skip(1).position(|&f| f == pc) {
+            let mut out = dwarf[..i].to_vec();
+            out.extend_from_slice(&fp[j + 1..]);
+            return out;
         }
-        frames
+    }
+    if dwarf.len() >= fp.len() {
+        dwarf
+    } else {
+        fp.to_vec()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::splice;
+
+    #[test]
+    fn a_cut_short_walk_goes_on_along_the_frame_pointers() {
+        // memcpy (no FP) hides `caller` (0x20) from the FP chain.
+        let fp = [0x10, 0x30, 0x40, 0x50, 0x60];
+        let dwarf = vec![0x10, 0x20, 0x30];
+        assert_eq!(
+            splice(dwarf, true, &fp),
+            vec![0x10, 0x20, 0x30, 0x40, 0x50, 0x60]
+        );
+    }
+
+    #[test]
+    fn a_complete_walk_is_kept() {
+        let fp = [0x10, 0x30];
+        assert_eq!(
+            splice(vec![0x10, 0x20, 0x30], false, &fp),
+            vec![0x10, 0x20, 0x30]
+        );
+    }
+
+    #[test]
+    fn nothing_in_common_keeps_the_longer() {
+        assert_eq!(
+            splice(vec![0x10, 0x20], true, &[0x10, 0x70, 0x80]),
+            vec![0x10, 0x70, 0x80]
+        );
+        assert_eq!(
+            splice(vec![0x10, 0x20, 0x21, 0x22], true, &[0x10, 0x70]),
+            vec![0x10, 0x20, 0x21, 0x22]
+        );
     }
 }
