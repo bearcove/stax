@@ -16,9 +16,9 @@ use tracing::{debug, info, warn};
 #[cfg(target_arch = "x86_64")]
 use crate::sys::PERF_SAMPLE_REGS_ABI_64;
 use crate::sys::{
-    online_cpus, open_cpu, open_cpu_pmu_siblings, open_cpu_switch, open_cpu_waking,
-    read_sched_waking_tracepoint, PerfRing, PerfRingKind, PmuGroup, PmuKind, PERF_CONTEXT_KERNEL,
-    PERF_CONTEXT_MAX, PERF_CONTEXT_USER,
+    PERF_CONTEXT_KERNEL, PERF_CONTEXT_MAX, PERF_CONTEXT_USER, PerfRing, PerfRingKind, PmuGroup,
+    PmuKind, online_cpus, open_cpu, open_cpu_pmu_siblings, open_cpu_switch, open_cpu_waking,
+    read_sched_waking_tracepoint,
 };
 use crate::{RecordOptions, RecordSummary};
 
@@ -767,18 +767,8 @@ impl Session<'_> {
             );
             0
         });
-        // Detached debug info: distro libraries (libc, libstdc++,
-        // ld-linux, …) ship stripped. Two-step lookup:
-        //   1. `/usr/lib/debug/.build-id/XX/YYY...YY.debug` —
-        //      installed by the matching `*-dbg`/`*-debuginfo`
-        //      package. Cheap when missing (one stat).
-        //   2. debuginfod HTTPS GET (if configured) — covers hosts
-        //      where the dbg package isn't installed but the network
-        //      can reach `https://debuginfod.debian.net/` etc.
-        //      Disk-cached on hit + negative-cached on miss so the
-        //      second session is instant.
-        // Whichever path returns first wins; both produce a sorted
-        // symbol list we merge + dedup into the primary image's set.
+        // Only local detached debug files and warm debuginfod cache entries
+        // are safe here: network fetches stall draining and overflow perf rings.
         let mut debug_added = 0usize;
         let mut debug_source: Option<&'static str> = None;
         if !img.build_id_full.is_empty() {
@@ -787,8 +777,8 @@ impl Session<'_> {
                 .or_else(|| {
                     self.debuginfod
                         .as_ref()
-                        .and_then(|cfg| crate::elf::debuginfod_fetch(cfg, &img.build_id_full))
-                        .map(|s| ("debuginfod", s))
+                        .and_then(|cfg| crate::elf::debuginfod_cached(cfg, &img.build_id_full))
+                        .map(|s| ("debuginfod-cache", s))
                 });
             if let Some((src, extra)) = extra {
                 let before = img.symbols.len();
@@ -1159,7 +1149,7 @@ pub fn run_with_rings(
             urls = cfg.urls.len(),
             cache = %cfg.cache_dir.display(),
             timeout_ms = cfg.timeout.as_millis() as u64,
-            "debuginfod lookup enabled"
+            "debuginfod cache-only lookup enabled"
         );
     }
 

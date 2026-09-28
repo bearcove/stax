@@ -270,32 +270,37 @@ pub struct DebuginfodConfig {
     /// drop a zero-byte `.miss` sentinel so we don't re-fetch each
     /// session.
     pub cache_dir: std::path::PathBuf,
-    /// Per-request HTTP timeout. Image-loaded events fire on the
-    /// drain thread, so this directly caps how long a stripped image
-    /// can pause sampling. The first session pays the latency; the
-    /// disk cache makes every subsequent session instant.
+    /// Per-request HTTP timeout for explicit, off-capture fetches.
     pub timeout: std::time::Duration,
 }
 
 impl DebuginfodConfig {
     /// Read the standard debuginfod configuration sources, returning
     /// `None` when there is nothing to query (no env, no Debian-style
-    /// `/etc/debuginfod/*.urls`). Sources, in order:
+    /// `/etc/debuginfod/*.urls`). An explicit environment value overrides
+    /// system defaults; an empty value disables debuginfod. Sources:
     ///   1. `DEBUGINFOD_URLS` env var (space/semicolon-separated).
     ///   2. Every `*.urls` file under `/etc/debuginfod/` — one URL
     ///      per non-comment line. The Debian `libdebuginfod-common`
     ///      package drops `elfutils.urls` here.
     pub fn from_env() -> Option<Self> {
+        Self::from_sources(
+            std::env::var_os("DEBUGINFOD_URLS"),
+            std::path::Path::new("/etc/debuginfod"),
+        )
+    }
+
+    fn from_sources(env: Option<std::ffi::OsString>, system_dir: &std::path::Path) -> Option<Self> {
         let mut urls: Vec<String> = Vec::new();
-        if let Ok(s) = std::env::var("DEBUGINFOD_URLS") {
+        if let Some(s) = env {
+            let s = s.to_string_lossy();
             for url in s.split([' ', ';', '\t']) {
                 let url = url.trim();
                 if !url.is_empty() {
                     urls.push(url.to_string());
                 }
             }
-        }
-        if let Ok(entries) = std::fs::read_dir("/etc/debuginfod") {
+        } else if let Ok(entries) = std::fs::read_dir(system_dir) {
             for ent in entries.flatten() {
                 let p = ent.path();
                 if p.extension().and_then(|e| e.to_str()) != Some("urls") {
@@ -348,6 +353,17 @@ impl DebuginfodConfig {
     }
 }
 
+/// Read an already downloaded debug image without performing network I/O.
+/// A cold or invalid cache entry simply leaves the primary ELF symbols intact.
+pub fn debuginfod_cached(cfg: &DebuginfodConfig, build_id_full: &[u8]) -> Option<Vec<MachOSymbol>> {
+    if cfg.urls.is_empty() || build_id_full.len() < 2 {
+        return None;
+    }
+    let bytes = std::fs::read(cfg.cache_path(&hex_lower(build_id_full), ".debug")).ok()?;
+    let file: ElfFile64 = ElfFile64::parse(&*bytes).ok()?;
+    Some(extract_symbols(&file))
+}
+
 /// Look up `build_id_full` against the configured debuginfod servers
 /// (or the local on-disk cache), returning the parsed symbols on hit.
 ///
@@ -357,11 +373,8 @@ impl DebuginfodConfig {
 /// next session sees it and short-circuits without re-trying the
 /// servers. (Cache-busting: delete the `<XX>/` subdir.)
 ///
-/// Synchronous, blocking — image-load events come from the drain
-/// thread, and the natural unit of work is "one image, one HTTPS GET".
-/// Per-request timeout comes from [`DebuginfodConfig::timeout`]; on
-/// most programs the per-process image loads happen at process start
-/// so the latency is paid once, up front.
+/// Synchronous, blocking: only use outside the capture/drain path.
+/// Live capture uses [`debuginfod_cached`] instead.
 pub fn debuginfod_fetch(cfg: &DebuginfodConfig, build_id_full: &[u8]) -> Option<Vec<MachOSymbol>> {
     if cfg.urls.is_empty() || build_id_full.len() < 2 {
         return None;
@@ -437,4 +450,40 @@ pub fn debuginfod_fetch(cfg: &DebuginfodConfig, build_id_full: &[u8]) -> Option<
     }
     let _ = std::fs::write(&miss_path, b"");
     None
+}
+
+#[cfg(test)]
+mod debuginfod_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_environment_overrides_system_urls_including_empty() {
+        let dir =
+            std::env::temp_dir().join(format!("stax-debuginfod-config-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("test.urls"), "https://system.invalid\n").unwrap();
+        assert!(DebuginfodConfig::from_sources(Some(" ; \t".into()), &dir).is_none());
+        let cfg =
+            DebuginfodConfig::from_sources(Some("https://explicit.invalid".into()), &dir).unwrap();
+        assert_eq!(cfg.urls, ["https://explicit.invalid"]);
+        let cfg = DebuginfodConfig::from_sources(None, &dir).unwrap();
+        assert_eq!(cfg.urls, ["https://system.invalid"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cold_capture_lookup_never_contacts_server() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let cfg = DebuginfodConfig {
+            urls: vec![format!("http://{}", listener.local_addr().unwrap())],
+            cache_dir: std::env::temp_dir().join(format!("stax-cold-cache-{}", std::process::id())),
+            timeout: std::time::Duration::from_secs(5),
+        };
+        assert!(debuginfod_cached(&cfg, &[0x12, 0x34]).is_none());
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
 }
