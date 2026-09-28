@@ -43,6 +43,7 @@ pub fn spawn_attach(
     let stop_flag = Arc::new(AtomicBool::new(false));
     server.set_recording_stop_flag(run_id, stop_flag.clone());
 
+    let failure_server = server.clone();
     spawn_on_dedicated_runtime(move || async move {
         let result = run_attach(
             server.clone(),
@@ -56,6 +57,8 @@ pub fn spawn_attach(
         )
         .await;
         finalize(&server, run_id, result);
+    }, move |message| {
+        failure_server.finalize_run(run_id, StopReason::RecorderError { message });
     });
 }
 
@@ -65,10 +68,11 @@ pub fn spawn_attach(
 /// can't `tokio::spawn` it onto the multi-thread runtime that's
 /// hosting the vox handlers; a current-thread runtime sidesteps the
 /// `Send` requirement entirely.
-fn spawn_on_dedicated_runtime<F, Fut>(make_future: F)
+fn spawn_on_dedicated_runtime<F, Fut, E>(make_future: F, on_failure: E)
 where
     F: FnOnce() -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()>,
+    E: FnOnce(String) + Send + 'static,
 {
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()
@@ -77,11 +81,13 @@ where
         {
             Ok(rt) => rt,
             Err(e) => {
-                tracing::error!("recorder: build runtime failed: {e}");
+                on_failure(format!("recorder: build runtime failed: {e}"));
                 return;
             }
         };
-        rt.block_on(make_future());
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rt.block_on(make_future()))).is_err() {
+            on_failure("recorder thread panicked".to_owned());
+        }
     });
 }
 

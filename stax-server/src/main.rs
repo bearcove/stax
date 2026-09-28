@@ -779,33 +779,35 @@ impl ServerState {
     /// (cleanly or with an error). Moves the active run into
     /// history with the given `stop_reason`.
     pub(crate) fn finalize_run(&self, run_id: RunId, default_reason: StopReason) {
-        let summary = {
-            let mut inner = self.inner.lock();
-            let Some(active) = inner.active.as_ref() else {
+        // Keep the active run Recording until its snapshot is ready. Otherwise
+        // begin_run/select_run can replace shared query state during final drain.
+        let mut summary = {
+            let inner = self.inner.lock();
+            let Some(active) = inner.active.as_ref().filter(|active| active.id == run_id) else {
                 return;
             };
-            if active.id != run_id {
+            active.clone()
+        };
+        summary.state = RunState::Stopped;
+        summary.stop_reason = Some(default_reason);
+        summary.stopped_at_unix_ns = Some(now_unix_ns());
+        let snapshot = self.snapshot_from_query_state(summary.clone());
+        {
+            let mut inner = self.inner.lock();
+            if inner.active.as_ref().map(|active| active.id) != Some(run_id) {
                 return;
             }
-            let mut summary = inner.active.take().expect("checked above");
-            // `stop_active` may have already set state + reason +
-            // timestamp; only fill in defaults when the recorder
-            // finished on its own.
-            if summary.state != RunState::Stopped {
-                summary.state = RunState::Stopped;
-                summary.stop_reason = Some(default_reason);
-                summary.stopped_at_unix_ns = Some(now_unix_ns());
-            }
+            Self::upsert_history_snapshot(&mut inner, snapshot);
+            inner.selected = Some(summary.clone());
             inner.recording_stop = None;
-            summary
-        };
+            inner.active = None;
+        }
         tracing::info!(
             "stax-server: run {} stopped after {} samples / {} intervals",
             summary.id.0,
             summary.pet_samples,
             summary.off_cpu_intervals
         );
-        self.store_current_query_snapshot(summary);
     }
 }
 
@@ -1254,23 +1256,28 @@ impl RunControl for ServerState {
     }
 
     async fn stop_active(&self) -> Result<RunSummary, RunControlError> {
-        let (snapshot, stop_flag) = {
-            let mut inner = self.inner.lock();
-            let snapshot = match inner.active.as_mut() {
-                Some(summary) => {
-                    summary.state = RunState::Stopped;
-                    summary.stop_reason = Some(StopReason::UserStop);
-                    summary.stopped_at_unix_ns = Some(now_unix_ns());
-                    summary.clone()
-                }
-                None => return Err(RunControlError::NoActiveRun),
-            };
-            (snapshot, inner.recording_stop.clone())
+        let run_id = {
+            let inner = self.inner.lock();
+            let active = inner.active.as_ref().ok_or(RunControlError::NoActiveRun)?;
+            if let Some(flag) = &inner.recording_stop {
+                flag.store(true, Ordering::Relaxed);
+            }
+            active.id
         };
-        if let Some(flag) = stop_flag {
-            flag.store(true, Ordering::Relaxed);
+        // A stop request is not completion: the recorder must disable perf,
+        // drain buffered events, close intervals and publish its final snapshot.
+        // Poll by ID so another client starting a subsequent run cannot change
+        // which summary this request returns. No mutex is held across await.
+        loop {
+            if let Some(summary) = {
+                let inner = self.inner.lock();
+                inner.history.iter().find(|snapshot| snapshot.summary.id == run_id)
+                    .map(|snapshot| snapshot.summary.clone())
+            } {
+                return Ok(summary);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        Ok(snapshot)
     }
 
     async fn save_current(&self, path: String) -> Result<(), RunControlError> {
@@ -1886,6 +1893,33 @@ mod tests {
     use super::*;
 
     const SYNTH_TID_BASE: u32 = 0xFFF0_0000;
+
+    #[tokio::test]
+    async fn stop_waits_for_final_drain_and_snapshot() {
+        let server = ServerState::new_for_tests();
+        let id = server.begin_run(test_run_config("draining")).unwrap();
+        let flag = Arc::new(AtomicBool::new(false));
+        server.set_recording_stop_flag(id, flag.clone());
+        let stop = server.stop_active();
+        tokio::pin!(stop);
+        assert!(tokio::time::timeout(Duration::from_millis(30), &mut stop).await.is_err());
+        assert!(flag.load(Ordering::Relaxed));
+        assert!(server.begin_run(test_run_config("too-early")).is_err());
+        assert!(server.select_run_archive(id).is_err());
+        assert_eq!(server.inner.lock().active.as_ref().unwrap().state, RunState::Recording);
+        // Buffered tail events arrive after the stop signal.
+        server.note_sample(id);
+        server.note_off_cpu(id);
+        server.finalize_run(id, StopReason::UserStop);
+        let next = server.begin_run(test_run_config("next")).unwrap();
+        let summary = tokio::time::timeout(Duration::from_secs(1), stop).await.unwrap().unwrap();
+        assert_eq!(summary.id, id);
+        assert_eq!(summary.pet_samples, 1);
+        assert_eq!(summary.off_cpu_intervals, 1);
+        assert_eq!(summary.state, RunState::Stopped);
+        assert_eq!(server.inner.lock().history[0].archive.runs[0].pet_samples, 1);
+        server.finalize_run(next, StopReason::TargetExited);
+    }
 
     #[test]
     fn archive_member_path_rejects_paths_outside_archive() {
