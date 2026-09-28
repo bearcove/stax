@@ -119,6 +119,9 @@ struct Session<'s> {
     /// (voluntary switch-out) this is its "parked" stack, credited to
     /// the off-CPU interval — same model as the macOS backend.
     last_user_stack: HashMap<u32, Box<[u64]>>,
+    /// Per tid, the user stack of its latest context-switch sample
+    /// (switch ring), taken by the SWITCH_OUT record that follows it.
+    switch_stack: HashMap<u32, Box<[u64]>>,
     /// Threads currently off-CPU: tid -> (switch-out ns, parked stack).
     /// Closed into an off-CPU interval on the matching switch-in.
     off_start: HashMap<u32, (u64, Box<[u64]>)>,
@@ -174,8 +177,7 @@ impl Session<'_> {
                 // tracepoint ring has CALLCHAIN + PERF_SAMPLE_RAW.
                 PerfRingKind::Sampling => self.on_sample(body),
                 PerfRingKind::Waking => self.on_sample_from_waking(body),
-                // Switch rings (SW_DUMMY) don't emit SAMPLE.
-                PerfRingKind::Switch => {}
+                PerfRingKind::Switch => self.on_switch_sample(body),
             },
             PERF_RECORD_MMAP2 => self.on_mmap2(misc, body),
             PERF_RECORD_MMAP => self.on_mmap(body),
@@ -189,6 +191,37 @@ impl Session<'_> {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// A context-switch sample from the switch ring: TID, TIME, CPU,
+    /// CALLCHAIN (user half only). Kept for the SWITCH_OUT record that
+    /// follows it in the same ring.
+    fn on_switch_sample(&mut self, body: &[u8]) {
+        let mut c = Cur::new(body);
+        let (Some(pid), Some(tid)) = (c.u32(), c.u32()) else {
+            return;
+        };
+        if pid != self.opts.pid {
+            return;
+        }
+        let _time = c.u64();
+        let _cpu = c.u32();
+        let _res = c.u32();
+        let Some(nr) = c.u64() else {
+            return;
+        };
+        let mut user = Vec::with_capacity(nr.min(256) as usize);
+        for _ in 0..nr {
+            let Some(ip) = c.u64() else {
+                break;
+            };
+            if ip < PERF_CONTEXT_MAX {
+                user.push(ip);
+            }
+        }
+        if !user.is_empty() {
+            self.switch_stack.insert(tid, user.into_boxed_slice());
         }
     }
 
@@ -398,6 +431,7 @@ impl Session<'_> {
             // blocking off-CPU we attribute (it's CPU contention, and
             // counting it would double-book against on-CPU).
             if misc & PERF_RECORD_MISC_SWITCH_OUT_PREEMPT != 0 {
+                self.switch_stack.remove(&sid_tid);
                 return;
             }
             // Lead the off-CPU stack with the kernel wait site (from
@@ -405,7 +439,10 @@ impl Session<'_> {
             // off-CPU flame shows `<wait fn> -> <user call path>`.
             // Falls back to just the parked user stack when wchan
             // isn't resolvable.
-            let parked = self.last_user_stack.get(&sid_tid);
+            // The stack it blocked in (the switch sample just before),
+            // else its last timer sample.
+            let blocked_in = self.switch_stack.remove(&sid_tid);
+            let parked = blocked_in.as_ref().or_else(|| self.last_user_stack.get(&sid_tid));
             let stack: Box<[u64]> = match wchan_addr(self.opts.pid, sid_tid, &self.kallsyms) {
                 Some(waddr) => {
                     let mut v = Vec::with_capacity(1 + parked.map_or(0, |s| s.len()));
@@ -1039,6 +1076,7 @@ pub fn run_with_rings(
         // declaring the thread was off-CPU for the gap.
         max_on_cpu_gap_ns: nominal_period_ns.saturating_mul(4),
         last_user_stack: HashMap::new(),
+        switch_stack: HashMap::new(),
         off_start: HashMap::new(),
         kallsyms,
         last_ts: 0,

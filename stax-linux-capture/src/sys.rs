@@ -66,9 +66,10 @@ pub enum PerfRingKind {
     /// `PERF_TYPE_SOFTWARE`/`SW_CPU_CLOCK` PET sampler. Drives the
     /// flamegraph; the SAMPLE_READ block carries the PMU group.
     Sampling,
-    /// `PERF_TYPE_SOFTWARE`/`SW_DUMMY` + `context_switch=1`. Emits
-    /// `PERF_RECORD_SWITCH_CPU_WIDE` for off-CPU attribution; no
-    /// samples.
+    /// `PERF_TYPE_SOFTWARE`/`SW_CONTEXT_SWITCHES` (period 1) +
+    /// `context_switch=1`. Emits `PERF_RECORD_SWITCH_CPU_WIDE` for
+    /// off-CPU attribution, each preceded by a sample carrying the
+    /// switching thread's callchain.
     Switch,
     /// `PERF_TYPE_TRACEPOINT` on `sched:sched_waking`. Each sample
     /// names a waker (the TID field), its stack (CALLCHAIN), and the
@@ -187,10 +188,20 @@ fn switch_attr() -> pe::bindings::perf_event_attr {
     let mut attr: pe::bindings::perf_event_attr = unsafe { mem::zeroed() };
     attr.type_ = pe::bindings::PERF_TYPE_SOFTWARE;
     attr.size = mem::size_of::<pe::bindings::perf_event_attr>() as u32;
-    attr.config = pe::bindings::PERF_COUNT_SW_DUMMY as u64;
+    // Not DUMMY: sampling every context switch (period 1) with its
+    // callchain gives the stack a thread *blocked* in, written just
+    // before its SWITCH_OUT record in this same ring. Without it the
+    // off-CPU stack is the thread's last timer sample, which can be a
+    // millisecond (and several calls) earlier.
+    attr.config = pe::bindings::PERF_COUNT_SW_CONTEXT_SWITCHES as u64;
+    attr.__bindgen_anon_1.sample_period = 1;
     attr.sample_type = (pe::bindings::PERF_SAMPLE_TID
         | pe::bindings::PERF_SAMPLE_TIME
-        | pe::bindings::PERF_SAMPLE_CPU) as u64;
+        | pe::bindings::PERF_SAMPLE_CPU
+        | pe::bindings::PERF_SAMPLE_CALLCHAIN) as u64;
+    // The user half is what we want; the kernel half is always
+    // `schedule()` (the wait site comes from wchan).
+    attr.set_exclude_callchain_kernel(1);
     attr.set_disabled(1);
     attr.set_context_switch(1);
     // Append the sample_type trailer to the SWITCH records.
