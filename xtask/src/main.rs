@@ -98,15 +98,47 @@ fn install() -> Result<(), Box<dyn Error>> {
     println!();
     println!(":: Installed binaries to {}.", cargo_bin.display());
     println!();
-    println!(":: Two install steps remain:");
-    println!();
-    println!("     sudo stax setup       # installs staxd as a LaunchDaemon (root)");
-    println!();
-    println!(":: stax-server (the unprivileged daemon agents talk to)");
-    println!(":: was just bootstrapped under your user via launchctl.");
-    println!(":: Logs:");
-    println!("::   log stream --predicate 'subsystem == \"eu.bearcove.stax-server\"'");
+    println!("{}", installed_guidance());
     Ok(())
+}
+
+fn installed_guidance() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        r#":: Privileged setup remains:
+
+     sudo stax setup       # installs staxd as a LaunchDaemon (root)
+
+:: stax-server was bootstrapped under your user via launchctl.
+:: Logs: log stream --predicate 'subsystem == "eu.bearcove.stax-server"'"#
+    }
+    #[cfg(target_os = "linux")]
+    {
+        ":: Privileged setup remains:
+
+     sudo stax setup       # installs staxd as a systemd service (root)
+
+:: stax-server was NOT started or restarted by this install.
+:: Start stax-server manually, or restart your existing user service.
+:: staxd logs: journalctl -u eu.bearcove.staxd"
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        ":: Automatic service setup is unavailable on this platform."
+    }
+}
+
+#[cfg(test)]
+mod install_tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_guidance_does_not_claim_launchctl_started_a_service() {
+        let guidance = super::installed_guidance();
+        assert!(guidance.contains("systemd"));
+        assert!(guidance.contains("NOT started or restarted"));
+        assert!(!guidance.contains("launchctl"));
+        assert!(!guidance.contains("LaunchDaemon"));
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -281,20 +313,25 @@ fn build_daemon() -> Result<(), Box<dyn Error>> {
         .join("target")
         .join("release")
         .join(DAEMON_BIN);
-    let plist = workspace_root
-        .join(DAEMON_BIN)
-        .join("launchd")
-        .join("eu.bearcove.staxd.plist");
     println!();
     println!(":: Built {}", binary.display());
-    println!();
-    println!(":: To install (one-time, requires sudo):");
-    println!("     sudo cp {} /usr/local/bin/", binary.display());
-    println!("     sudo cp {} /Library/LaunchDaemons/", plist.display());
-    println!("     sudo launchctl load /Library/LaunchDaemons/eu.bearcove.staxd.plist");
-    println!();
-    println!(":: After install, the daemon listens on /var/run/staxd.sock.");
-    println!(":: Logs at /var/log/staxd.log.");
+    #[cfg(target_os = "macos")]
+    {
+        let plist = workspace_root.join(DAEMON_BIN).join("launchd").join("eu.bearcove.staxd.plist");
+        println!(":: To install (one-time, requires sudo):");
+        println!("     sudo cp {} /usr/local/bin/", binary.display());
+        println!("     sudo cp {} /Library/LaunchDaemons/", plist.display());
+        println!("     sudo launchctl load /Library/LaunchDaemons/eu.bearcove.staxd.plist");
+        println!(":: After install, the daemon listens on /var/run/staxd.sock.");
+        println!(":: Logs at /var/log/staxd.log.");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        println!(":: Run sudo {} setup to install staxd as a systemd service.",
+            workspace_root.join("target/release/stax").display());
+        println!(":: After install, the daemon listens on /run/staxd.sock.");
+        println!(":: Logs: journalctl -u eu.bearcove.staxd");
+    }
     Ok(())
 }
 
