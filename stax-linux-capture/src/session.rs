@@ -2,7 +2,7 @@
 //! `PERF_RECORD_*`, and drive the `SampleSink` with the same event
 //! sequence the macOS backend emits.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
@@ -26,6 +26,7 @@ use crate::{RecordOptions, RecordSummary};
 const PERF_RECORD_MMAP: u32 = 1;
 const PERF_RECORD_LOST: u32 = 2;
 const PERF_RECORD_COMM: u32 = 3;
+const PERF_RECORD_FORK: u32 = 7;
 const PERF_RECORD_SAMPLE: u32 = 9;
 const PERF_RECORD_MMAP2: u32 = 10;
 /// Context-switch record emitted by a cpu-wide event with
@@ -51,13 +52,13 @@ impl<'a> Cur<'a> {
         Self { b, p: 0 }
     }
     fn u32(&mut self) -> Option<u32> {
-        let e = self.p + 4;
+        let e = self.p.checked_add(4)?;
         let v = u32::from_le_bytes(self.b.get(self.p..e)?.try_into().ok()?);
         self.p = e;
         Some(v)
     }
     fn u64(&mut self) -> Option<u64> {
-        let e = self.p + 8;
+        let e = self.p.checked_add(8)?;
         let v = u64::from_le_bytes(self.b.get(self.p..e)?.try_into().ok()?);
         self.p = e;
         Some(v)
@@ -71,7 +72,7 @@ impl<'a> Cur<'a> {
         &rest[..end]
     }
     fn bytes(&mut self, n: usize) -> Option<&'a [u8]> {
-        let e = self.p + n;
+        let e = self.p.checked_add(n)?;
         let s = self.b.get(self.p..e)?;
         self.p = e;
         Some(s)
@@ -105,6 +106,11 @@ struct Session<'s> {
     sink: &'s mut dyn SampleSink,
     images: ImageRegistry,
     thread_names: HashMap<u32, String>,
+    /// TIDs whose TGID was established by /proc or a perf record. Waking
+    /// tracepoints are system-wide and carry only the wakee's TID, not its
+    /// TGID: unrelated wakees must never be published as target threads.
+    /// Retain exited threads to recognize records buffered on other CPUs.
+    target_tids: HashSet<u32>,
     /// Last sample timestamp seen per tid. Each new sample closes an
     /// on-CPU interval `[prev, now)` for that thread (see `on_sample`).
     last_sample_ts: HashMap<u32, u64>,
@@ -167,7 +173,33 @@ struct Session<'s> {
     summary: RecordSummary,
 }
 
+/// perf_event_pid_type returns u32(-1) after a task's PID is detached at
+/// exit. That is a sentinel, not a thread (nor a synthetic target lane).
+fn valid_tid(tid: u32) -> bool {
+    tid != 0 && tid <= i32::MAX as u32
+}
+
 impl Session<'_> {
+    fn observe_thread(&mut self, pid: u32, tid: u32) -> bool {
+        if pid != self.opts.pid || !valid_tid(tid) {
+            return false;
+        }
+        self.target_tids.insert(tid);
+        true
+    }
+
+    fn on_fork(&mut self, body: &[u8]) {
+        // pid/ppid are TGIDs, tid/ptid are thread IDs. Follow newly created
+        // target threads, not subprocesses which merely have our parent PID.
+        let mut c = Cur::new(body);
+        let (Some(pid), Some(_ppid), Some(tid), Some(_ptid), Some(_time)) =
+            (c.u32(), c.u32(), c.u32(), c.u32(), c.u64())
+        else {
+            return;
+        };
+        self.observe_thread(pid, tid);
+    }
+
     fn handle(&mut self, ty: u32, misc: u16, body: &[u8], kind: PerfRingKind) {
         match ty {
             PERF_RECORD_SAMPLE => match kind {
@@ -182,6 +214,7 @@ impl Session<'_> {
             PERF_RECORD_MMAP2 => self.on_mmap2(misc, body),
             PERF_RECORD_MMAP => self.on_mmap(body),
             PERF_RECORD_COMM => self.on_comm(body),
+            PERF_RECORD_FORK => self.on_fork(body),
             PERF_RECORD_SWITCH_CPU_WIDE => self.on_switch(misc, body),
             PERF_RECORD_LOST => {
                 let mut c = Cur::new(body);
@@ -202,7 +235,7 @@ impl Session<'_> {
         let (Some(pid), Some(tid)) = (c.u32(), c.u32()) else {
             return;
         };
-        if pid != self.opts.pid {
+        if !self.observe_thread(pid, tid) {
             return;
         }
         let _time = c.u64();
@@ -237,13 +270,13 @@ impl Session<'_> {
             Some(v) => v,
             None => return,
         };
-        let tid = c.u32().unwrap_or(0);
-        if pid != self.opts.pid {
-            return; // system-wide ring; keep only the target.
+        let (Some(tid), Some(time), Some(cpu), Some(_res)) = (c.u32(), c.u64(), c.u32(), c.u32())
+        else {
+            return;
+        };
+        if !self.observe_thread(pid, tid) {
+            return; // system-wide ring; keep only live target TIDs.
         }
-        let time = c.u64().unwrap_or(0);
-        let cpu = c.u32().unwrap_or(0);
-        let _res = c.u32();
 
         // PERF_SAMPLE_READ block with PERF_FORMAT_GROUP | PERF_FORMAT_ID:
         // u64 nr_values; { u64 value; u64 id }[nr_values]
@@ -413,18 +446,34 @@ impl Session<'_> {
     /// outgoing task on switch-out, the incoming one on switch-in).
     fn on_switch(&mut self, misc: u16, body: &[u8]) {
         let mut c = Cur::new(body);
-        // CPU_WIDE body: next_prev_pid/tid (the *other* side) ...
-        let _next_prev_pid = c.u32();
-        let _next_prev_tid = c.u32();
-        // ... then the sample_id trailer in sample_type order.
-        let sid_pid = c.u32().unwrap_or(0);
-        let sid_tid = c.u32().unwrap_or(0);
-        let time = c.u64().unwrap_or(0);
+        // CPU_WIDE body: next_prev_pid/tid (the *other* side), then
+        // sample_id TID, TIME, CPU. CALLCHAIN is sample-only: it does
+        // not appear in this trailer even when enabled on the event.
+        let (
+            Some(_next_pid),
+            Some(_next_tid),
+            Some(sid_pid),
+            Some(sid_tid),
+            Some(time),
+            Some(_cpu),
+            Some(_reserved),
+        ) = (
+            c.u32(),
+            c.u32(),
+            c.u32(),
+            c.u32(),
+            c.u64(),
+            c.u32(),
+            c.u32(),
+        )
+        else {
+            return;
+        };
+        if !self.observe_thread(sid_pid, sid_tid) {
+            return;
+        }
         if time != 0 {
             self.last_ts = self.last_ts.max(time);
-        }
-        if sid_pid != self.opts.pid {
-            return; // system-wide ring; keep only the target.
         }
         if misc & PERF_RECORD_MISC_SWITCH_OUT != 0 {
             // Preemption leaves the thread runnable — that's not the
@@ -442,7 +491,9 @@ impl Session<'_> {
             // The stack it blocked in (the switch sample just before),
             // else its last timer sample.
             let blocked_in = self.switch_stack.remove(&sid_tid);
-            let parked = blocked_in.as_ref().or_else(|| self.last_user_stack.get(&sid_tid));
+            let parked = blocked_in
+                .as_ref()
+                .or_else(|| self.last_user_stack.get(&sid_tid));
             let stack: Box<[u64]> = match wchan_addr(self.opts.pid, sid_tid, &self.kallsyms) {
                 Some(waddr) => {
                     let mut v = Vec::with_capacity(1 + parked.map_or(0, |s| s.len()));
@@ -555,6 +606,15 @@ impl Session<'_> {
             8 => u64::from_le_bytes(raw[off..off + 8].try_into().unwrap()) as u32,
             _ => return,
         };
+        // A system-wide waking ring reports all processes. The wakee must
+        // belong to our target; the waker need not (timers, other processes,
+        // and the idle thread can legitimately wake the target).
+        if !valid_tid(wakee_tid)
+            || !self.target_tids.contains(&wakee_tid)
+            || waker_tid > i32::MAX as u32
+        {
+            return;
+        }
         if time != 0 {
             self.last_ts = self.last_ts.max(time);
         }
@@ -807,7 +867,7 @@ impl Session<'_> {
         let mut c = Cur::new(body);
         let pid = c.u32().unwrap_or(0);
         let tid = c.u32().unwrap_or(0);
-        if pid != self.opts.pid {
+        if !self.observe_thread(pid, tid) {
             return;
         }
         let name = String::from_utf8_lossy(c.cstr()).into_owned();
@@ -1071,6 +1131,7 @@ pub fn run_with_rings(
         sink,
         images: ImageRegistry::default(),
         thread_names: HashMap::new(),
+        target_tids: HashSet::new(),
         last_sample_ts: HashMap::new(),
         // Allow a few missed samples (jitter, brief preemption) before
         // declaring the thread was off-CPU for the gap.
@@ -1105,6 +1166,9 @@ pub fn run_with_rings(
     // Synthesize the pre-existing state the kernel won't replay: every
     // executable mapping and thread name that predates our attach.
     for (tid, name) in crate::proc::threads(opts.pid) {
+        if !sess.observe_thread(opts.pid, tid) {
+            continue;
+        }
         if sess.thread_names.get(&tid).map(|s| s.as_str()) != Some(name.as_str()) {
             sess.thread_names.insert(tid, name.clone());
             sess.sink.on_thread_name(ThreadNameEvent {
@@ -1177,4 +1241,206 @@ pub fn run_with_rings(
         "linux perf capture finished"
     );
     Ok(summary)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stax_mac_capture::BinaryUnloadedEvent;
+
+    #[derive(Default)]
+    struct Sink {
+        samples: Vec<(u32, u64, Vec<u64>)>,
+        wakeups: Vec<(u32, u32, u64)>,
+        intervals: Vec<(u32, u64, u64)>,
+    }
+    impl SampleSink for Sink {
+        fn on_sample(&mut self, ev: SampleEvent<'_>) {
+            self.samples
+                .push((ev.tid, ev.timestamp_ns, ev.backtrace.to_vec()));
+        }
+        fn on_binary_loaded(&mut self, _: BinaryLoadedEvent<'_>) {}
+        fn on_binary_unloaded(&mut self, _: BinaryUnloadedEvent<'_>) {}
+        fn on_thread_name(&mut self, _: ThreadNameEvent<'_>) {}
+        fn on_wakeup(&mut self, ev: WakeupEvent<'_>) {
+            self.wakeups
+                .push((ev.waker_tid, ev.wakee_tid, ev.timestamp_ns));
+        }
+        fn on_cpu_interval(&mut self, ev: CpuIntervalEvent<'_>) {
+            self.intervals.push((ev.tid, ev.start_ns, ev.end_ns));
+        }
+    }
+
+    fn session(sink: &mut Sink) -> Session<'_> {
+        Session {
+            opts: RecordOptions {
+                pid: 123,
+                ..RecordOptions::default()
+            },
+            sink,
+            images: ImageRegistry::default(),
+            thread_names: HashMap::new(),
+            target_tids: HashSet::new(),
+            last_sample_ts: HashMap::new(),
+            max_on_cpu_gap_ns: 4_000_000,
+            last_user_stack: HashMap::new(),
+            switch_stack: HashMap::new(),
+            off_start: HashMap::new(),
+            kallsyms: HashMap::new(),
+            last_ts: 0,
+            pmu_id_to_kind: HashMap::new(),
+            prev_pmu_per_cpu: HashMap::new(),
+            waking_offsets: Some(WakingFieldOffsets {
+                wakee_pid_offset: 24,
+                wakee_pid_size: 4,
+            }),
+            recent_waking: HashMap::new(),
+            debuginfod: None,
+            #[cfg(target_arch = "x86_64")]
+            dwarf: None,
+            summary: RecordSummary::default(),
+        }
+    }
+
+    fn u32s(bytes: &mut Vec<u8>, values: &[u32]) {
+        for v in values {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    fn u64s(bytes: &mut Vec<u8>, values: &[u64]) {
+        for v in values {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    fn prefix(pid: u32, tid: u32, time: u64) -> Vec<u8> {
+        let mut b = Vec::new();
+        u32s(&mut b, &[pid, tid]);
+        u64s(&mut b, &[time]);
+        u32s(&mut b, &[4, 0]); // cpu, reserved
+        b
+    }
+    fn switch(tid: u32, time: u64) -> Vec<u8> {
+        let mut b = Vec::new();
+        u32s(&mut b, &[456, 457]); // the other task, not our identity
+        b.extend(prefix(123, tid, time));
+        b
+    }
+    fn waking(waker_pid: u32, waker: u32, wakee: u32, time: u64) -> Vec<u8> {
+        let mut b = prefix(waker_pid, waker, time);
+        u64s(&mut b, &[2, PERF_CONTEXT_USER, 0x1234]);
+        u32s(&mut b, &[32]); // RAW size
+        b.extend_from_slice(&[0; 24]); // tracepoint common fields and comm
+        u32s(&mut b, &[wakee, 120]); // pid, prio
+        b
+    }
+
+    #[test]
+    fn waking_only_publishes_target_wakees_but_allows_external_wakers() {
+        let mut sink = Sink::default();
+        let mut s = session(&mut sink);
+        // Target thread creation, then an unrelated subprocess whose ppid
+        // happens to be our target. Only the former is a target thread.
+        let mut fork = Vec::new();
+        u32s(&mut fork, &[123, 123, 124, 123]);
+        u64s(&mut fork, &[50]);
+        s.handle(PERF_RECORD_FORK, 0, &fork, PerfRingKind::Sampling);
+        fork[..4].copy_from_slice(&456u32.to_le_bytes());
+        fork[8..12].copy_from_slice(&457u32.to_le_bytes());
+        s.handle(PERF_RECORD_FORK, 0, &fork, PerfRingKind::Sampling);
+        for tid in [1, 14, 15, 18, 457, u32::MAX] {
+            s.handle(
+                PERF_RECORD_SAMPLE,
+                0,
+                &waking(123, 123, tid, 100),
+                PerfRingKind::Waking,
+            );
+        }
+        let valid = waking(456, 457, 124, 200);
+        for len in 0..valid.len() {
+            s.handle(PERF_RECORD_SAMPLE, 0, &valid[..len], PerfRingKind::Waking);
+        }
+        assert!(s.recent_waking.is_empty());
+        s.handle(PERF_RECORD_SAMPLE, 0, &valid, PerfRingKind::Waking);
+        // A timer interrupt on idle (tid 0) is also a legitimate waker.
+        s.handle(
+            PERF_RECORD_SAMPLE,
+            0,
+            &waking(0, 0, 124, 300),
+            PerfRingKind::Waking,
+        );
+        assert_eq!(s.recent_waking.len(), 1);
+        assert_eq!(s.last_ts, 300);
+        drop(s);
+        assert_eq!(sink.wakeups, vec![(457, 124, 200), (0, 124, 300)]);
+    }
+
+    #[test]
+    fn switch_trailer_rejects_dead_task_sentinel_and_truncation() {
+        let mut sink = Sink::default();
+        let mut s = session(&mut sink);
+        for tid in [0, u32::MAX] {
+            s.handle(
+                PERF_RECORD_SWITCH_CPU_WIDE,
+                PERF_RECORD_MISC_SWITCH_OUT,
+                &switch(tid, 100),
+                PerfRingKind::Switch,
+            );
+        }
+        let valid = switch(124, 200);
+        for len in 0..valid.len() {
+            s.handle(
+                PERF_RECORD_SWITCH_CPU_WIDE,
+                PERF_RECORD_MISC_SWITCH_OUT,
+                &valid[..len],
+                PerfRingKind::Switch,
+            );
+        }
+        assert!(s.off_start.is_empty());
+        assert!(s.target_tids.is_empty());
+        assert_eq!(s.last_ts, 0);
+        s.handle(
+            PERF_RECORD_SWITCH_CPU_WIDE,
+            PERF_RECORD_MISC_SWITCH_OUT,
+            &valid,
+            PerfRingKind::Switch,
+        );
+        s.handle(
+            PERF_RECORD_SWITCH_CPU_WIDE,
+            0,
+            &switch(124, 500),
+            PerfRingKind::Switch,
+        );
+        // Unrelated system-wide events must not extend teardown's time bound.
+        let mut unrelated = switch(457, 1_000_000);
+        unrelated[8..12].copy_from_slice(&456u32.to_le_bytes());
+        s.handle(
+            PERF_RECORD_SWITCH_CPU_WIDE,
+            0,
+            &unrelated,
+            PerfRingKind::Switch,
+        );
+        s.flush_off_cpu();
+        assert_eq!(s.last_ts, 500);
+        drop(s);
+        assert_eq!(sink.intervals, vec![(124, 200, 500)]);
+    }
+
+    #[test]
+    fn sampling_read_block_and_switch_callchain_use_different_layouts() {
+        let mut sink = Sink::default();
+        let mut s = session(&mut sink);
+        let mut sample = prefix(123, 124, 100);
+        u64s(&mut sample, &[1, 99, 7]); // PERF_FORMAT_GROUP | ID
+        u64s(&mut sample, &[2, PERF_CONTEXT_USER, 0x1234]);
+        s.handle(PERF_RECORD_SAMPLE, 0, &sample, PerfRingKind::Sampling);
+        sample[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        s.handle(PERF_RECORD_SAMPLE, 0, &sample, PerfRingKind::Sampling);
+        let mut switch_sample = prefix(123, 124, 200);
+        u64s(&mut switch_sample, &[2, PERF_CONTEXT_USER, 0x5678]);
+        s.handle(PERF_RECORD_SAMPLE, 0, &switch_sample, PerfRingKind::Switch);
+        assert_eq!(s.switch_stack[&124].as_ref(), &[0x5678]);
+        assert!(!s.target_tids.contains(&u32::MAX));
+        drop(s);
+        assert_eq!(sink.samples, vec![(124, 100, vec![0x1234])]);
+    }
 }
