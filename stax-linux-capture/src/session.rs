@@ -170,6 +170,10 @@ struct Session<'s> {
     /// kernel paired REGS_USER + STACK_USER with each sample.
     #[cfg(target_arch = "x86_64")]
     dwarf: Option<crate::dwarf::DwarfUnwinder>,
+    /// Anonymous executable mappings + the JIT symbols naming them
+    /// (`/tmp/perf-<pid>.map`, `/tmp/jit-<pid>.dump`), published as
+    /// synthetic `[jit]` images.
+    jit: crate::jit::JitTracker,
     summary: RecordSummary,
 }
 
@@ -700,8 +704,14 @@ impl Session<'_> {
             Ok(p) => p,
             Err(_) => return,
         };
-        if path.is_empty() || path.starts_with('[') || path == "//anon" {
-            return; // anonymous / JIT / vdso: no on-disk ELF.
+        if crate::jit::is_jit_mapping(path) {
+            // Anonymous / memfd executable memory: JIT code. No ELF to
+            // read; named later from the perf map / jitdump.
+            self.jit_mapping(addr, len);
+            return;
+        }
+        if path.starts_with('[') {
+            return; // [vdso] / [vsyscall]: no on-disk ELF.
         }
         if self.images.seen.contains_key(&addr) {
             return;
@@ -730,7 +740,11 @@ impl Session<'_> {
             Ok(p) => p,
             Err(_) => return,
         };
-        if path.is_empty() || path.starts_with('[') {
+        if crate::jit::is_jit_mapping(path) {
+            self.jit_mapping(addr, len);
+            return;
+        }
+        if path.starts_with('[') {
             return;
         }
         if self.images.seen.contains_key(&addr) {
@@ -851,6 +865,60 @@ impl Session<'_> {
             symbols: &img.symbols,
             text_bytes: None,
         });
+    }
+
+    /// An executable mapping with no on-disk ELF (JIT code).
+    fn jit_mapping(&mut self, start: u64, len: u64) {
+        if self
+            .jit
+            .images
+            .add_mapping(start, start.saturating_add(len))
+            > 0
+        {
+            debug!(
+                start = format_args!("{start:#x}"),
+                len = format_args!("{len:#x}"),
+                "anonymous executable mapping (JIT region)"
+            );
+        }
+        self.publish_jit();
+    }
+
+    /// Pick up new JIT symbols (rate-limited unless `force`) and publish
+    /// whatever regions they landed in.
+    fn poll_jit(&mut self, force: bool) {
+        if self.jit.poll(force) {
+            // Symbols for code whose mapping we never saw: look again
+            // in /proc, then give the rest regions of their own.
+            for (start, end) in crate::proc::jit_maps(self.opts.pid) {
+                self.jit.images.add_mapping(start, end);
+            }
+            self.jit.images.adopt_orphans();
+        }
+        self.publish_jit();
+    }
+
+    fn publish_jit(&mut self) {
+        for img in self.jit.images.take_dirty() {
+            self.sink.on_binary_loaded(BinaryLoadedEvent {
+                pid: self.opts.pid,
+                base_avma: img.start,
+                vmsize: img.end - img.start,
+                // JIT code has no link-time layout: SVMA == AVMA.
+                text_svma: img.start,
+                path: crate::jit::JIT_IMAGE_PATH,
+                uuid: None,
+                arch: if cfg!(target_arch = "aarch64") {
+                    Some("aarch64")
+                } else {
+                    Some("x86_64")
+                },
+                is_executable: false,
+                symbols: &img.symbols,
+                text_bytes: None,
+            });
+        }
+        self.summary.jit_symbols = self.jit.images.symbol_count() as u64;
     }
 
     fn on_comm(&mut self, body: &[u8]) {
@@ -1143,6 +1211,7 @@ pub fn run_with_rings(
         } else {
             None
         },
+        jit: crate::jit::JitTracker::new(opts.pid),
         summary: RecordSummary::default(),
     };
     if let Some(cfg) = &sess.debuginfod {
@@ -1175,6 +1244,10 @@ pub fn run_with_rings(
             sess.emit_image(m.base_avma, m.vmsize, m.pgoff, &m.path);
         }
     }
+    for (start, end) in crate::proc::jit_maps(opts.pid) {
+        sess.jit.images.add_mapping(start, end);
+    }
+    sess.poll_jit(true);
 
     let deadline = opts.duration.map(|d| start + d);
     let mut scratch: Vec<u8> = Vec::with_capacity(1 << 16);
@@ -1203,6 +1276,7 @@ pub fn run_with_rings(
         {
             drain_dispatch(r, &mut scratch, &mut sess);
         }
+        sess.poll_jit(false);
     }
 
     for r in rings
@@ -1222,6 +1296,9 @@ pub fn run_with_rings(
     }
     // Close out threads still parked at stop time.
     sess.flush_off_cpu();
+    // Symbols the JIT wrote after the last poll (the perf map outlives
+    // the target, so this works after it exited too).
+    sess.poll_jit(true);
 
     sess.summary.session_ns = start.elapsed().as_nanos().min(u64::MAX as u128) as u64;
     let summary = sess.summary;
@@ -1231,6 +1308,7 @@ pub fn run_with_rings(
         intervals = summary.intervals,
         off_cpu_intervals = summary.off_cpu_intervals,
         dwarf_truncated = summary.dwarf_truncated,
+        jit_symbols = summary.jit_symbols,
         lost = summary.lost_records,
         elapsed_ms = start.elapsed().as_millis() as u64,
         "linux perf capture finished"
@@ -1293,6 +1371,7 @@ mod tests {
             debuginfod: None,
             #[cfg(target_arch = "x86_64")]
             dwarf: None,
+            jit: crate::jit::JitTracker::new(u32::MAX),
             summary: RecordSummary::default(),
         }
     }

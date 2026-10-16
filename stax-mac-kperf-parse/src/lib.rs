@@ -17,7 +17,9 @@
 #![cfg(target_os = "macos")]
 
 pub mod image_scan;
-pub mod jitdump_tail;
+/// Moved to `stax-mac-capture` (OS-neutral) so the Linux backend can
+/// share it; re-exported so existing `crate::jitdump_tail` paths work.
+pub use stax_mac_capture::jitdump_tail;
 pub mod kernel_symbols;
 pub mod libproc;
 pub mod offcpu;

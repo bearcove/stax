@@ -7,6 +7,9 @@
 //! addresses post-hoc, but the live UI saw only `(no binary)` for
 //! every JIT'd function.
 //!
+//! Shared by the macOS pipeline (`stax-mac-kperf-parse`) and the Linux
+//! capture (`stax-linux-capture`); it is pure std, no OS APIs.
+//!
 //! This tailer opens the file once it appears, parses the global
 //! header, then on each `tick()` reads everything appended since
 //! the last call and returns the new `CodeLoad` records. The
@@ -117,7 +120,7 @@ impl JitdumpTailer {
             }
             if id == JIT_CODE_LOAD {
                 if let Some(rec) = parse_code_load(&buf[cursor + 16..cursor + total_size]) {
-                    log::warn!(
+                    log::debug!(
                         "jitdump_tail: CodeLoad name={:?} avma={:#x} size={:#x} (range {:#x}..{:#x})",
                         rec.name,
                         rec.avma,
@@ -128,13 +131,13 @@ impl JitdumpTailer {
                     out.push(rec);
                 }
             } else {
-                log::warn!("jitdump_tail: skipping record id={id} size={total_size}");
+                log::debug!("jitdump_tail: skipping record id={id} size={total_size}");
             }
             cursor += total_size;
         }
 
         self.offset += cursor as u64;
-        log::warn!(
+        log::debug!(
             "jitdump_tail tick: read {to_read}B (offset {prev_offset} -> {} of {len}), \
              produced {} CodeLoad records",
             self.offset,

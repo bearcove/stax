@@ -10,6 +10,7 @@
 // drives the same `SampleSink`). Renaming the crate to `stax-capture`
 // is a deferred cleanup (it would ripple imports across the workspace).
 
+pub mod jitdump_tail;
 pub mod proc_maps;
 pub mod recorder;
 pub mod sample_sink;

@@ -2458,6 +2458,9 @@ dependencies = [
 [[package]]
 name = "stax-mac-capture"
 version = "0.1.0"
+dependencies = [
+ "log",
+]
 
 [[package]]
 name = "stax-mac-kperf-parse"

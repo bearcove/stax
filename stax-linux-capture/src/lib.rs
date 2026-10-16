@@ -31,6 +31,7 @@ mod daemon;
 #[cfg(target_arch = "x86_64")]
 mod dwarf;
 mod elf;
+mod jit;
 mod proc;
 mod session;
 mod sys;
@@ -108,6 +109,8 @@ pub struct RecordSummary {
     pub off_cpu_intervals: u64,
     /// Samples whose DWARF walk was cut short (see `dwarf::splice`).
     pub dwarf_truncated: u64,
+    /// JIT symbols read from `/tmp/perf-<pid>.map` / `/tmp/jit-<pid>.dump`.
+    pub jit_symbols: u64,
     pub session_ns: u64,
     /// The target exited naturally (as opposed to an explicit stop/deadline).
     pub target_exited: bool,

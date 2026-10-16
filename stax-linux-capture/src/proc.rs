@@ -16,8 +16,9 @@ pub struct MapRegion {
     pub path: String,
 }
 
-/// Executable file-backed regions of `pid`, oldest mapping first.
-pub fn maps(pid: u32) -> Vec<MapRegion> {
+/// Every executable mapping of `pid` as `(start, end, pgoff, path)`,
+/// lowest address first. `path` is empty for anonymous memory.
+fn exec_mappings(pid: u32) -> Vec<(u64, u64, u64, String)> {
     let text = match std::fs::read_to_string(format!("/proc/{pid}/maps")) {
         Ok(t) => t,
         Err(_) => return Vec::new(),
@@ -41,29 +42,48 @@ pub fn maps(pid: u32) -> Vec<MapRegion> {
         let _dev = it.next();
         let _inode = it.next();
         let path = it.collect::<Vec<_>>().join(" ");
-        if path.is_empty() || path.starts_with('[') || path == "//anon" {
-            continue; // anon / [vdso] / [heap] etc. — no on-disk ELF
-        }
         let (s, e) = match range.split_once('-') {
             Some((s, e)) => (s, e),
             None => continue,
         };
-        let (start, end, pgoff) = match (
+        match (
             u64::from_str_radix(s, 16),
             u64::from_str_radix(e, 16),
             u64::from_str_radix(offset, 16),
         ) {
-            (Ok(a), Ok(b), Ok(o)) if b > a => (a, b, o),
+            (Ok(a), Ok(b), Ok(o)) if b > a => out.push((a, b, o, path)),
             _ => continue,
-        };
-        out.push(MapRegion {
+        }
+    }
+    out
+}
+
+/// Executable file-backed regions of `pid`, oldest mapping first.
+pub fn maps(pid: u32) -> Vec<MapRegion> {
+    exec_mappings(pid)
+        .into_iter()
+        .filter(|(_, _, _, path)| {
+            // anon / [vdso] / [heap] etc. — no on-disk ELF
+            !(path.is_empty() || path.starts_with('[') || path == "//anon")
+                && !crate::jit::is_jit_mapping(path)
+        })
+        .map(|(start, end, pgoff, path)| MapRegion {
             base_avma: start,
             vmsize: end - start,
             pgoff,
             path,
-        });
-    }
-    out
+        })
+        .collect()
+}
+
+/// Executable mappings of `pid` with no on-disk ELF behind them — where
+/// JIT'd code lives — as `[start, end)` ranges.
+pub fn jit_maps(pid: u32) -> Vec<(u64, u64)> {
+    exec_mappings(pid)
+        .into_iter()
+        .filter(|(_, _, _, path)| crate::jit::is_jit_mapping(path))
+        .map(|(start, end, _, _)| (start, end))
+        .collect()
 }
 
 /// `(tid, comm)` for every thread of `pid`.
