@@ -2,8 +2,8 @@
 //! No graph records are evicted. Limits reject the import rather than truncate its graph.
 use serde_json::Value;
 pub use stax_live_proto::{
-    GraphAttribute, GraphCallable, GraphCallablePage, GraphEdge, GraphExecution, GraphNeighborhood,
-    GraphNode, GraphNodePage, GraphSite, GraphSummary,
+    GraphAttribute, GraphCallable, GraphCallablePage, GraphCounts, GraphEdge, GraphExecution,
+    GraphNeighborhood, GraphNode, GraphNodePage, GraphSite, GraphSummary,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader, Read};
@@ -39,9 +39,38 @@ pub struct Graph {
     nodes: BTreeMap<String, GraphNode>,
     sites: BTreeMap<SiteKey, GraphSite>,
     modules: BTreeSet<u64>,
-    counts: BTreeMap<SiteKey, u64>,
+    counts: BTreeMap<SiteKey, GraphCounts>,
+    count_executions: BTreeMap<u64, CountExecution>,
     edges: BTreeMap<EdgeKey, GraphEdge>,
     adjacency: BTreeMap<String, Vec<EdgeKey>>,
+}
+
+struct CountExecution {
+    module: u64,
+    workers: u64,
+    terminal: bool,
+    sites: BTreeSet<u64>,
+}
+
+/// Never wrap. The overflow flag makes saturated aggregates explicitly lower bounds.
+fn add_counts(to: &mut GraphCounts, from: &GraphCounts) {
+    macro_rules! add {
+        ($($field:ident),*) => {$(
+            to.$field = match to.$field.checked_add(from.$field) {
+                Some(n) => n,
+                None => { to.overflow = true; u64::MAX }
+            };
+        )*};
+    }
+    add!(
+        body_starts,
+        force_requests,
+        created,
+        cache_compute,
+        cache_hit,
+        cache_wait
+    );
+    to.overflow |= from.overflow;
 }
 
 fn num(v: &Value, key: &str) -> Result<u64, String> {
@@ -121,6 +150,7 @@ impl Graph {
                 capture_id,
                 path,
                 semantics: "lazy-dataflow".into(),
+                capture_mode: "detail".into(),
                 scope: "Recorded instrumented body starts and within-body force requests; not a complete call tree or per-call timing".into(),
                 ..Default::default()
             },
@@ -128,6 +158,7 @@ impl Graph {
             sites: BTreeMap::new(),
             modules: BTreeSet::new(),
             counts: BTreeMap::new(),
+            count_executions: BTreeMap::new(),
             edges: BTreeMap::new(),
             adjacency: BTreeMap::new(),
         };
@@ -174,9 +205,25 @@ impl Graph {
                 if text(&v, "event")? != "header"
                     || text(&v, "format")? != "vix-eval-graph"
                     || num(&v, "version")? != 1
-                    || text(&v, "semantics")? != "lazy-dataflow"
+                    || !matches!(text(&v, "semantics")?, "lazy-dataflow" | "source-counts")
                 {
-                    return Err("expected vix-eval-graph version 1 lazy-dataflow header".into());
+                    return Err(
+                        "expected vix-eval-graph version 1 lazy-dataflow or source-counts header"
+                            .into(),
+                    );
+                }
+                graph.summary.semantics = text(&v, "semantics")?.into();
+                if graph.summary.semantics == "source-counts" {
+                    if text(&v, "capture_mode")? != "counts" {
+                        return Err("source-counts header requires capture_mode=counts".into());
+                    }
+                    graph.summary.capture_mode = "counts".into();
+                    graph.summary.counts = Some(GraphCounts::default());
+                    graph.summary.scope = "Selected source-site totals across executions; no invocation/argument detail, nodes, edges or timings".into();
+                } else if v.get("capture_mode").is_some() && text(&v, "capture_mode")? != "detail" {
+                    return Err(
+                        "lazy-dataflow header requires capture_mode=detail when present".into(),
+                    );
                 }
                 if v.get("scope").is_some() {
                     graph.summary.scope = text(&v, "scope")?.into();
@@ -242,6 +289,7 @@ impl Graph {
                 || graph.edges.len() > limits.relations
                 || graph.sites.len() > limits.nodes
                 || graph.modules.len() > limits.nodes
+                || graph.counts.len() > limits.nodes
                 || graph.summary.executions.len() > limits.executions
             {
                 return Err("graph exceeds node/site/module/relation/execution limit; no partial import retained".into());
@@ -255,6 +303,8 @@ impl Graph {
         }
         graph.finish();
         graph.summary.complete = footer && graph.summary.diagnostic_count == 0;
+        graph.summary.counts_exact =
+            graph.summary.complete && !graph.summary.counts.as_ref().is_some_and(|c| c.overflow);
         Ok(graph)
     }
 
@@ -301,7 +351,15 @@ impl Graph {
         }
     }
     fn record(&mut self, v: &Value, seq: u64, ts: u64) -> Result<(), String> {
-        match text(v, "event")? {
+        let event = text(v, "event")?;
+        if self.summary.capture_mode == "counts"
+            && !matches!(event, "header" | "module" | "site" | "counts" | "execution")
+        {
+            return Err(format!(
+                "{event} detail event is unsupported in counts mode"
+            ));
+        }
+        match event {
             "header" if seq == 1 => {}
             "header" => return Err("unexpected header".into()),
             "module" => {
@@ -399,7 +457,7 @@ impl Graph {
                 };
                 attr(&mut node, "arity", arity);
                 if self.define(node) {
-                    *self.counts.entry(key).or_default() += 1;
+                    self.counts.entry(key).or_default().body_starts += 1;
                     self.summary.invocations += 1;
                 }
             }
@@ -497,19 +555,133 @@ impl Graph {
                     + 1;
                 attr(node, name, n);
             }
+            "counts" => {
+                if self.summary.capture_mode != "counts" {
+                    return Err("counts event requires source-counts mode".into());
+                }
+                let execution = id(v, "execution")?;
+                let key = (id(v, "module")?, id(v, "site")?);
+                // Validate the entire row before changing any aggregate.
+                let counts = GraphCounts {
+                    body_starts: num(v, "body_starts")?,
+                    force_requests: num(v, "force_requests")?,
+                    created: num(v, "created")?,
+                    cache_compute: num(v, "cache_compute")?,
+                    cache_hit: num(v, "cache_hit")?,
+                    cache_wait: num(v, "cache_wait")?,
+                    overflow: v
+                        .get("overflow")
+                        .and_then(Value::as_bool)
+                        .ok_or("overflow must be boolean")?,
+                };
+                if !self.sites.contains_key(&key) {
+                    return Err(format!(
+                        "counts row references missing site {}:{}",
+                        key.0, key.1
+                    ));
+                }
+                let run = self
+                    .count_executions
+                    .get_mut(&execution)
+                    .ok_or("counts row has no execution start")?;
+                if run.module != key.0 || run.terminal {
+                    return Err(
+                        "counts row module mismatch or row after terminal execution status".into(),
+                    );
+                }
+                if !run.sites.insert(key.1) {
+                    return Err(format!(
+                        "duplicate counts row for execution {execution} site {}:{}",
+                        key.0, key.1
+                    ));
+                }
+                add_counts(self.counts.entry(key).or_default(), &counts);
+                add_counts(self.summary.counts.as_mut().unwrap(), &counts);
+            }
             "execution" => {
-                self.summary.executions.push(GraphExecution {
+                let mut execution = GraphExecution {
                     seq,
                     ts_ns: ts,
                     workers: num(v, "workers")?,
                     status: text(v, "status")?.into(),
-                });
+                    ..Default::default()
+                };
+                if self.summary.capture_mode == "counts" {
+                    let run_id = id(v, "execution")?;
+                    let module = id(v, "module")?;
+                    execution.execution = Some(run_id);
+                    execution.module = Some(module);
+                    match execution.status.as_str() {
+                        "start" => {
+                            if self.count_executions.contains_key(&run_id) {
+                                return Err(format!("duplicate execution start {run_id}"));
+                            }
+                            self.count_executions.insert(
+                                run_id,
+                                CountExecution {
+                                    module,
+                                    workers: execution.workers,
+                                    terminal: false,
+                                    sites: BTreeSet::new(),
+                                },
+                            );
+                        }
+                        "done" | "poison" | "out_of_fuel" | "resource_pending" => {
+                            let run = self
+                                .count_executions
+                                .get_mut(&run_id)
+                                .ok_or("terminal execution status has no start")?;
+                            if run.terminal
+                                || run.module != module
+                                || run.workers != execution.workers
+                            {
+                                return Err("duplicate terminal execution status or module/workers mismatch".into());
+                            }
+                            run.terminal = true;
+                        }
+                        _ => return Err("unknown counts execution status".into()),
+                    }
+                }
+                self.summary.executions.push(execution);
             }
             other => return Err(format!("unknown event {other:?}")),
         }
         Ok(())
     }
     fn finish(&mut self) {
+        if self.summary.capture_mode == "counts" {
+            let mut diagnostics = Vec::new();
+            let mut expected = BTreeMap::<u64, usize>::new();
+            for &(module, _) in self.sites.keys() {
+                *expected.entry(module).or_default() += 1;
+            }
+            for (&execution, run) in &self.count_executions {
+                if !run.terminal {
+                    diagnostics.push(format!(
+                        "execution {execution} has no terminal status / flushed counts"
+                    ));
+                }
+                if !self.modules.contains(&run.module) {
+                    diagnostics.push(format!(
+                        "execution {execution} references missing module {}",
+                        run.module
+                    ));
+                }
+                let expected = expected.get(&run.module).copied().unwrap_or(0);
+                if run.sites.len() != expected {
+                    diagnostics.push(format!("execution {execution} missing counts rows: expected {expected}, received {}", run.sites.len()));
+                }
+            }
+            for diagnostic in diagnostics {
+                self.diagnostic(diagnostic);
+            }
+            let counts = self.summary.counts.as_ref().unwrap();
+            self.summary.invocations = counts.body_starts;
+            self.summary.force_requests = counts.force_requests;
+            self.summary.cache_computes = counts.cache_compute;
+            self.summary.cache_hits = counts.cache_hit;
+            self.summary.cache_waits = counts.cache_wait;
+        }
         let missing_modules: Vec<_> = self
             .sites
             .keys()
@@ -580,7 +752,15 @@ impl Graph {
         }
         node
     }
+    fn require_detail(&self) -> Result<(), String> {
+        if self.summary.capture_mode == "counts" {
+            Err("Unsupported in counts mode: no invocation/argument detail, nodes or edges were captured; use callable counts".into())
+        } else {
+            Ok(())
+        }
+    }
     pub fn inspect(&self, node: &str) -> Result<GraphNode, String> {
+        self.require_detail()?;
         self.nodes
             .get(node)
             .map(|n| self.decorated(n))
@@ -593,6 +773,7 @@ impl Graph {
         offset: u64,
         limit: u32,
     ) -> Result<GraphNodePage, String> {
+        self.require_detail()?;
         if !matches!(kind, "" | "all" | "invocation" | "thunk" | "unresolved") {
             return Err("invalid node kind".into());
         }
@@ -631,14 +812,15 @@ impl Graph {
         let mut rows: Vec<_> = self
             .counts
             .iter()
-            .map(|(&(m, s), &count)| GraphCallable {
+            .map(|(&(m, s), counts)| GraphCallable {
                 site: self.sites.get(&(m, s)).cloned().unwrap_or(GraphSite {
                     module: m,
                     id: s,
                     name: format!("missing site {m}:{s}"),
                     ..Default::default()
                 }),
-                invocations: count,
+                invocations: counts.body_starts,
+                counts: (self.summary.capture_mode == "counts").then(|| counts.clone()),
             })
             .filter(|c| {
                 format!(
@@ -667,6 +849,7 @@ impl Graph {
         offset: u64,
         limit: u32,
     ) -> Result<GraphNodePage, String> {
+        self.require_detail()?;
         let (skip, take) = page(offset, limit)?;
         let rows = self.nodes.values().filter(|n| {
             n.kind == "invocation"
@@ -691,6 +874,7 @@ impl Graph {
         offset: u64,
         limit: u32,
     ) -> Result<GraphNeighborhood, String> {
+        self.require_detail()?;
         let (skip, take) = page(offset, limit)?;
         if !matches!(direction, "both" | "incoming" | "outgoing") {
             return Err("invalid direction".into());

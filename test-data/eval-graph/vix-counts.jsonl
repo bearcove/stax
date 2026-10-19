@@ -1,0 +1,25 @@
+{"event":"header","seq":1,"ts_ns":3717,"format":"vix-eval-graph","version":1,"semantics":"source-counts","capture_mode":"counts","scope":"exact selected source/runtime-thunk body counters unless overflow or partial capture; no invocation/argument detail, dynamic graph, per-call timing or allocation identities; force requests exclude eq/deep/scheduler/stub paths","records":1,"max_bytes":268435456,"include":null}
+{"event":"module","seq":2,"ts_ns":65182,"module":1}
+{"event":"site","seq":3,"ts_ns":67666,"module":1,"site":83,"kind":"function","name":"vix::main","file":"main","start":42,"end":95,"line":1,"column":43,"params":[]}
+{"event":"site","seq":4,"ts_ns":72856,"module":1,"site":84,"kind":"function","name":"vix::item","file":"main","start":0,"end":41,"line":1,"column":1,"params":["n"]}
+{"event":"site","seq":5,"ts_ns":75601,"module":1,"site":85,"kind":"thunk","name":"vix::main::thunk@main:1:65","file":"main","start":64,"end":72,"line":1,"column":65,"params":["$thunk"]}
+{"event":"site","seq":6,"ts_ns":78627,"module":1,"site":86,"kind":"thunk","name":"vix::main::thunk@main:1:75","file":"main","start":74,"end":82,"line":1,"column":75,"params":["$thunk"]}
+{"event":"site","seq":7,"ts_ns":81582,"module":1,"site":87,"kind":"thunk","name":"vix::main::thunk@main:1:85","file":"main","start":84,"end":92,"line":1,"column":85,"params":["$thunk"]}
+{"event":"site","seq":8,"ts_ns":84267,"module":1,"site":78,"kind":"runtime-thunk","name":"vix::rt::apply_thunk","file":"<runtime>","start":0,"end":0,"line":0,"column":0,"params":["$thunk","item"]}
+{"event":"site","seq":9,"ts_ns":87573,"module":1,"site":79,"kind":"runtime-thunk","name":"vix::rt::apply_step_thunk","file":"<runtime>","start":0,"end":0,"line":0,"column":0,"params":["$thunk","step","acc","item"]}
+{"event":"site","seq":10,"ts_ns":91340,"module":1,"site":80,"kind":"runtime-thunk","name":"vix::rt::apply_step_ref_thunk","file":"<runtime>","start":0,"end":0,"line":0,"column":0,"params":["$thunk","step","acc","item"]}
+{"event":"site","seq":11,"ts_ns":95137,"module":1,"site":81,"kind":"runtime-thunk","name":"vix::rt::knot_make","file":"<runtime>","start":0,"end":0,"line":0,"column":0,"params":["$thunk","key","value","children"]}
+{"event":"site","seq":12,"ts_ns":98754,"module":1,"site":82,"kind":"runtime-thunk","name":"vix::rt::knot_make_ref","file":"<runtime>","start":0,"end":0,"line":0,"column":0,"params":["$thunk","key","value","children"]}
+{"event":"execution","seq":13,"ts_ns":103243,"execution":1,"module":1,"workers":4,"status":"start"}
+{"event":"counts","seq":14,"ts_ns":34227705,"execution":1,"module":1,"site":83,"body_starts":1,"force_requests":0,"created":3,"cache_compute":0,"cache_hit":0,"cache_wait":0,"overflow":false}
+{"event":"counts","seq":15,"ts_ns":34237152,"execution":1,"module":1,"site":84,"body_starts":3,"force_requests":6,"created":0,"cache_compute":2,"cache_hit":0,"cache_wait":1,"overflow":false}
+{"event":"counts","seq":16,"ts_ns":34239286,"execution":1,"module":1,"site":85,"body_starts":1,"force_requests":0,"created":1,"cache_compute":0,"cache_hit":0,"cache_wait":0,"overflow":false}
+{"event":"counts","seq":17,"ts_ns":34241000,"execution":1,"module":1,"site":86,"body_starts":1,"force_requests":0,"created":1,"cache_compute":0,"cache_hit":0,"cache_wait":0,"overflow":false}
+{"event":"counts","seq":18,"ts_ns":34242603,"execution":1,"module":1,"site":87,"body_starts":1,"force_requests":0,"created":1,"cache_compute":0,"cache_hit":0,"cache_wait":0,"overflow":false}
+{"event":"counts","seq":19,"ts_ns":34244115,"execution":1,"module":1,"site":78,"body_starts":0,"force_requests":0,"created":0,"cache_compute":0,"cache_hit":0,"cache_wait":0,"overflow":false}
+{"event":"counts","seq":20,"ts_ns":34245678,"execution":1,"module":1,"site":79,"body_starts":0,"force_requests":0,"created":0,"cache_compute":0,"cache_hit":0,"cache_wait":0,"overflow":false}
+{"event":"counts","seq":21,"ts_ns":34247151,"execution":1,"module":1,"site":80,"body_starts":0,"force_requests":0,"created":0,"cache_compute":0,"cache_hit":0,"cache_wait":0,"overflow":false}
+{"event":"counts","seq":22,"ts_ns":34248644,"execution":1,"module":1,"site":81,"body_starts":0,"force_requests":0,"created":0,"cache_compute":0,"cache_hit":0,"cache_wait":0,"overflow":false}
+{"event":"counts","seq":23,"ts_ns":34250117,"execution":1,"module":1,"site":82,"body_starts":0,"force_requests":0,"created":0,"cache_compute":0,"cache_hit":0,"cache_wait":0,"overflow":false}
+{"event":"execution","seq":24,"ts_ns":34251659,"execution":1,"module":1,"workers":4,"status":"done"}
+{"event":"footer","seq":25,"ts_ns":34310228,"complete":true,"records":25}

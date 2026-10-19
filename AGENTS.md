@@ -872,7 +872,12 @@ daemon or a profiler run. Default output is a JSON summary with explicit
 complete/partial diagnostics. Use `--view callables`, `invocations`, `search`,
 `inspect`, or `neighborhood` for bounded queries. The UI **eval dataflow** tab imports
 server-local paths into a separate immutable, explicitly closed capture registry.
-These are lazy dataflow identities/recorded body starts, not per-call timings or
-a complete temporal call tree. Keep the source JSONL to reopen after restarting;
+Legacy captures contain lazy dataflow identities/recorded body starts, not per-call
+timings or a complete temporal call tree. Counts-only v1 captures use
+`semantics:"source-counts", capture_mode:"counts"`: callable rankings sum source
+counters across executions, with **no invocation/argument detail or graph**.
+Read `counts_exact` and `counts.overflow` alongside stream `complete`; saturated
+counters are lower bounds, and execution outcomes are separate from stream
+completeness. Keep the source JSONL to reopen after restarting;
 graphs are not embedded into sampler archives. See [evaluation graph imports](docs/eval-graph.md)
 for commands, validation, resource limits and semantic caveats.

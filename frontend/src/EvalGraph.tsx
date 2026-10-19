@@ -78,7 +78,7 @@ export function EvalGraphPanel({ url }: { url: string }) {
   const connection = useQuery(() => connectEvalGraph(url), [url, retry]);
   return <div className="eval-graph">
     <header className="eg-heading">
-      <div><h2>Lazy dataflow explorer</h2><p>Recorded dependencies and identities — not a temporal call tree or a time profile.</p></div>
+      <div><h2>Evaluation capture explorer</h2><p>Source counts or recorded lazy dataflow — not a temporal call tree or a time profile.</p></div>
       <span className="eg-badge">DATAFLOW</span>
     </header>
     <QueryNotice {...connection} />
@@ -137,10 +137,10 @@ function CaptureBrowser({ client }: { client: EvalGraphClient }) {
       <QueryNotice {...captures} />
       {captures.data?.length === 0 && <p className="eg-muted">No captures imported. Import a server-local JSONL file above; no active recording is required.</p>}
       {captures.data && captures.data.length > 0 && <div className="eg-table-wrap eg-captures"><table>
-        <thead><tr><th>Capture / source path</th><th>Stream</th><th>Nodes</th><th>Diagnostics</th><th>Actions</th></tr></thead>
+        <thead><tr><th>Capture / source path</th><th>Mode / stream</th><th>Nodes</th><th>Diagnostics</th><th>Actions</th></tr></thead>
         <tbody>{captures.data.map((capture) => <tr key={String(capture.capture_id)} className={active?.capture_id === capture.capture_id ? "eg-selected" : ""}>
           <td><button className="eg-link" aria-pressed={active?.capture_id === capture.capture_id} onClick={() => setActive(capture)}>#{String(capture.capture_id)} · {capture.path}</button></td>
-          <td><span className={`eg-badge ${capture.complete ? "" : "eg-warning"}`}>{capture.complete ? "complete" : "partial"}</span></td>
+          <td>{capture.capture_mode} · <span className={`eg-badge ${capture.complete ? "" : "eg-warning"}`}>{capture.complete ? "complete" : "partial"}</span></td>
           <td>{count(capture.nodes)}</td><td>{count(capture.diagnostic_count)}</td>
           <td><div className="eg-actions"><button disabled={busy} title="Read the source path again as a new immutable capture" onClick={() => void importPath(capture.path)}>Reimport path</button><button disabled={busy} aria-label={`Close capture ${capture.capture_id}`} onClick={() => void closeCapture(capture)}>Close</button></div></td>
         </tr>)}</tbody>
@@ -151,7 +151,12 @@ function CaptureBrowser({ client }: { client: EvalGraphClient }) {
 }
 
 function CaptureSummary({ summary: s }: { summary: GraphSummary }) {
-  const stats: [string, bigint][] = [
+  const stats: [string, bigint][] = s.counts ? [
+    ["records", s.records], ["body starts", s.counts.body_starts],
+    ["force requests", s.counts.force_requests], ["created", s.counts.created],
+    ["cache compute/miss outcomes", s.counts.cache_compute], ["cache hits", s.counts.cache_hit],
+    ["cache waits", s.counts.cache_wait], ["diagnostics", s.diagnostic_count],
+  ] : [
     ["records", s.records], ["unique nodes", s.nodes], ["aggregated relations", s.relations],
     ["recorded body starts / invocations", s.invocations], ["force requests", s.force_requests],
     ["cache compute/miss outcomes", s.cache_computes], ["cache hits", s.cache_hits],
@@ -160,7 +165,11 @@ function CaptureSummary({ summary: s }: { summary: GraphSummary }) {
   return <section className="eg-section">
     <div className="eg-toolbar"><h3>Capture #{String(s.capture_id)}</h3><span className={`eg-badge ${s.complete ? "" : "eg-warning"}`}>{s.complete ? "Complete stream" : "Partial stream"}</span></div>
     <p className="eg-path">{s.path}</p>
-    <p><strong>Semantics:</strong> {s.semantics}</p>
+    <p><strong>Semantics:</strong> {s.semantics} · <strong>Capture mode:</strong> {s.capture_mode}</p>
+    {s.capture_mode === "counts" && <>
+      <p><strong>No invocation/argument detail.</strong> This capture contains only source-site counters and metadata: no nodes, edges, bindings, previews or per-call timings.</p>
+      <p className={s.counts_exact ? "eg-muted" : "eg-warning"}><strong>{s.counts_exact ? "Exact aggregate counts for the selected stream." : s.counts?.overflow ? "Overflow: saturated counters are lower bounds, not exact totals." : "Incomplete counts: row coverage or stream validation is partial; totals are not exact complete counts."}</strong> Counts sum all recorded executions by module/site. Stream completeness does not imply successful execution.</p>
+    </>}
     <p><strong>Scope:</strong> {s.scope}</p>
     <p><strong>Recorded selection:</strong> {s.selection === null ? "No selector metadata recorded" : <code>{s.selection}</code>}</p>
     <p><strong>Recorded byte budget:</strong> {s.max_bytes === null ? "No byte budget metadata recorded" : `${count(s.max_bytes)} bytes`}</p>
@@ -174,7 +183,7 @@ function CaptureSummary({ summary: s }: { summary: GraphSummary }) {
     </details>
     <details className="eg-details" open>
       <summary>Recorded execution statuses · {s.executions.length}</summary>
-      {s.executions.length ? <div className="eg-table-wrap eg-status-table"><table><thead><tr><th>Status (verbatim)</th><th>Workers</th><th>Sequence</th><th>Observed ts_ns</th></tr></thead><tbody>{s.executions.map((execution, index) => <tr key={index}><td><code>{execution.status}</code></td><td>{count(execution.workers)}</td><td>{String(execution.seq)}</td><td>{String(execution.ts_ns)}</td></tr>)}</tbody></table></div> : <p className="eg-muted">No execution status records.</p>}
+      {s.executions.length ? <div className="eg-table-wrap eg-status-table"><table><thead><tr><th>Status (verbatim)</th><th>Execution / module</th><th>Workers</th><th>Sequence</th><th>Observed ts_ns</th></tr></thead><tbody>{s.executions.map((execution, index) => <tr key={index}><td><code>{execution.status}</code></td><td>{execution.execution === null ? "—" : String(execution.execution)} / {execution.module === null ? "—" : String(execution.module)}</td><td>{count(execution.workers)}</td><td>{String(execution.seq)}</td><td>{String(execution.ts_ns)}</td></tr>)}</tbody></table></div> : <p className="eg-muted">No execution status records.</p>}
     </details>
   </section>;
 }
@@ -194,6 +203,19 @@ function CaptureExplorer({ client, summary }: { client: EvalGraphClient; summary
     const previous = history[history.length - 1];
     if (previous) { setSelected(previous); setHistory((items) => items.slice(0, -1)); }
   }
+  if (summary.capture_mode === "counts") return <>
+    <CaptureSummary summary={summary} />
+    <div className="eg-workspace">
+      <section className="eg-section eg-browser" aria-label="Source counts">
+        <CallableList client={client} summary={summary} onSelect={setCallable} />
+      </section>
+      <section className="eg-section eg-inspector" aria-label="Source metadata">
+        <h3>Source metadata only</h3>
+        <p className="eg-muted">No invocation/argument detail was captured. Node search, invocation inspection and graph neighborhoods are unsupported in counts mode.</p>
+        {callable ? <SourceMetadata site={callable} /> : <p className="eg-empty">Select a callable to inspect its recorded source metadata. This never constructs graph nodes or edges.</p>}
+      </section>
+    </div>
+  </>;
   return <>
     <CaptureSummary summary={summary} />
     <div className="eg-workspace">
@@ -201,7 +223,7 @@ function CaptureExplorer({ client, summary }: { client: EvalGraphClient; summary
         <div className="eg-tabs" role="tablist" aria-label="Graph entities">
           {([ ["callables", "Callable counts"], ["invocations", "Invocations"], ["nodes", "All nodes"] ] as const).map(([value, label]) => <button key={value} role="tab" aria-selected={tab === value} onClick={() => setTab(value)}>{label}</button>)}
         </div>
-        {tab === "callables" ? <CallableList client={client} captureId={summary.capture_id} onSelect={(site) => { setCallable(site); setTab("invocations"); }} /> : tab === "invocations" ? <InvocationList key={callable ? siteId(callable) : "all"} client={client} captureId={summary.capture_id} site={callable} selected={selected} onSelect={selectNode} clearSite={() => setCallable(null)} /> : <NodeList client={client} captureId={summary.capture_id} selected={selected} onSelect={selectNode} />}
+        {tab === "callables" ? <CallableList client={client} summary={summary} onSelect={(site) => { setCallable(site); setTab("invocations"); }} /> : tab === "invocations" ? <InvocationList key={callable ? siteId(callable) : "all"} client={client} captureId={summary.capture_id} site={callable} selected={selected} onSelect={selectNode} clearSite={() => setCallable(null)} /> : <NodeList client={client} captureId={summary.capture_id} selected={selected} onSelect={selectNode} />}
       </section>
       <section className="eg-section eg-inspector" aria-label="Node inspector">
         <div className="eg-toolbar"><h3>Node inspector</h3><button disabled={!history.length} onClick={back}>Back to previous node</button></div>
@@ -219,17 +241,19 @@ function SearchBox({ placeholder, onSearch, children }: { placeholder: string; o
   </form>;
 }
 
-function CallableList({ client, captureId, onSelect }: { client: EvalGraphClient; captureId: bigint; onSelect: (site: GraphSite) => void }) {
+function CallableList({ client, summary, onSelect }: { client: EvalGraphClient; summary: GraphSummary; onSelect: (site: GraphSite) => void }) {
+  const captureId = summary.capture_id;
+  const countsMode = summary.capture_mode === "counts";
   const [query, setQuery] = useState("");
   const [offset, setOffset] = useState(0n);
   const result = useQuery(async () => unwrap(await client.callables(captureId, query, offset, PAGE_SIZE)), [client, captureId, query, offset]);
   return <>
-    <h3>Exact recorded callable counts</h3>
-    <p className="eg-muted">Ranked by recorded body starts (descending), grouped by source site module:ID. Not samples, timings, distinct inputs or estimated evaluations. Choose a row for individual invocations.</p>
+    <h3>{summary.counts_exact ? "Exact recorded callable counts" : "Recorded callable counts · not exact complete totals"}</h3>
+    <p className="eg-muted">Ranked by recorded body-start totals (descending; saturated on overflow), grouped by source site module:ID. Not samples, timings, distinct inputs or estimated evaluations. {countsMode ? "Choose a row for source metadata only; no invocation/argument detail." : "Choose a row for individual invocations."}</p>
     <SearchBox placeholder="Search callable name, source or site" onSearch={(text) => { setQuery(text); setOffset(0n); }} />
     <QueryNotice {...result} />
     {result.data && <>
-      <div className="eg-table-wrap"><table><thead><tr><th>Rank</th><th>Callable / exact site</th><th>Recorded body starts</th></tr></thead><tbody>{result.data.callables.map((callable, index) => <tr key={siteId(callable.site)}><td>{String(offset + BigInt(index) + 1n)}</td><td><button className="eg-link" onClick={() => onSelect(callable.site)}>{callable.site.name || "(unnamed callable)"}<small>{siteId(callable.site)} · {callable.site.kind}{!callable.site.defined && " · missing definition"}</small><small>{callable.site.file || "No source metadata"}</small></button></td><td>{count(callable.invocations)}</td></tr>)}</tbody></table></div>
+      <div className="eg-table-wrap"><table><thead><tr><th>Rank</th><th>Callable / exact site</th><th>Recorded body starts</th>{countsMode && <><th>Force requests</th><th>Created</th><th>Cache compute</th><th>Cache hit</th><th>Cache wait</th><th>Counter status</th></>}</tr></thead><tbody>{result.data.callables.map((callable, index) => <tr key={siteId(callable.site)}><td>{String(offset + BigInt(index) + 1n)}</td><td><button className="eg-link" onClick={() => onSelect(callable.site)}>{callable.site.name || "(unnamed callable)"}<small>{siteId(callable.site)} · {callable.site.kind}{!callable.site.defined && " · missing definition"}</small><small>{callable.site.file || "No source metadata"}</small></button></td><td>{count(callable.invocations)}</td>{countsMode && <><td>{callable.counts ? count(callable.counts.force_requests) : "—"}</td><td>{callable.counts ? count(callable.counts.created) : "—"}</td><td>{callable.counts ? count(callable.counts.cache_compute) : "—"}</td><td>{callable.counts ? count(callable.counts.cache_hit) : "—"}</td><td>{callable.counts ? count(callable.counts.cache_wait) : "—"}</td><td className={callable.counts?.overflow || !summary.complete ? "eg-warning" : "eg-muted"}>{callable.counts?.overflow ? "Overflow · lower bounds" : summary.complete ? "Exact selected site" : "Incomplete stream / totals"}</td></>}</tr>)}</tbody></table></div>
       {!result.data.callables.length && <p className="eg-empty">No recorded callables match.</p>}
       <Pagination offset={result.data.offset} total={result.data.total} length={result.data.callables.length} size={PAGE_SIZE} loading={result.loading} onChange={setOffset} noun="callables" />
     </>}

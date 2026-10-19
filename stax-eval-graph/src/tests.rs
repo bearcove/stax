@@ -333,3 +333,311 @@ fn allocation_ids_can_gap_and_emit_out_of_order_with_full_u128_birth() {
         u128::MAX.to_string()
     );
 }
+
+fn counts_capture(events: Vec<Value>, footer: bool) -> String {
+    capture(events, footer).replace(
+        "\"semantics\":\"lazy-dataflow\"",
+        "\"semantics\":\"source-counts\",\"capture_mode\":\"counts\"",
+    )
+}
+fn execution(execution: u64, status: &str) -> Value {
+    json!({"event":"execution","execution":execution,"module":1,"workers":4,"status":status})
+}
+fn counts(execution: u64, site: u64, n: u64) -> Value {
+    json!({"event":"counts","execution":execution,"module":1,"site":site,"body_starts":n,"force_requests":n,"created":n,"cache_compute":n,"cache_hit":n,"cache_wait":n,"overflow":false})
+}
+fn complete_counts(n: u64) -> Vec<Value> {
+    let mut e = site();
+    e.extend([execution(1, "start"), counts(1, 1, n), execution(1, "done")]);
+    e
+}
+
+#[test]
+fn counts_nested_executions_sum_all_metrics_without_graph_identities() {
+    let mut e = site();
+    let mut zero_site = e[1].clone();
+    zero_site["site"] = json!(2);
+    zero_site["name"] = json!("unused");
+    e.push(zero_site);
+    e.extend([
+        execution(10, "start"),
+        execution(11, "start"),
+        counts(11, 1, 3),
+        counts(11, 2, 0),
+        execution(11, "poison"),
+        counts(10, 1, 7),
+        counts(10, 2, 0),
+        execution(10, "out_of_fuel"),
+    ]);
+    let g = graph(&counts_capture(e, true));
+    assert!(g.summary.complete, "{:?}", g.summary.diagnostics);
+    assert!(g.summary.counts_exact);
+    assert_eq!(g.summary.capture_mode, "counts");
+    assert_eq!(g.summary.semantics, "source-counts");
+    assert_eq!((g.summary.nodes, g.summary.relations), (0, 0));
+    assert!(g.nodes.is_empty() && g.edges.is_empty());
+    let totals = g.summary.counts.as_ref().unwrap();
+    assert_eq!(
+        (totals.body_starts, totals.force_requests, totals.created),
+        (10, 10, 10)
+    );
+    assert_eq!(
+        (totals.cache_compute, totals.cache_hit, totals.cache_wait),
+        (10, 10, 10)
+    );
+    assert_eq!((g.summary.invocations, g.summary.cache_computes), (10, 10));
+    let page = g.callables("", 0, 1).unwrap();
+    assert_eq!(page.total, 2);
+    assert_eq!(page.callables[0].invocations, 10);
+    assert_eq!(page.callables[0].counts.as_ref().unwrap().body_starts, 10);
+    assert_eq!(
+        g.callables("unused", 0, 10).unwrap().callables[0].invocations,
+        0
+    );
+    assert_eq!(g.callables("", 1, 1).unwrap().callables[0].site.id, 2);
+    assert_eq!(g.summary.executions[1].execution, Some(11));
+    assert_eq!(g.summary.executions[1].module, Some(1));
+    for result in [
+        g.inspect("invocation:1").map(|_| ()),
+        g.search("", "all", 0, 10).map(|_| ()),
+        g.invocations(1, 1, 0, 10).map(|_| ()),
+        g.neighborhood("thunk:1", "both", 0, 10).map(|_| ()),
+    ] {
+        assert!(
+            result
+                .unwrap_err()
+                .contains("no invocation/argument detail")
+        );
+    }
+}
+
+#[test]
+fn counts_overflow_is_lower_bound_even_when_stream_footer_is_complete() {
+    let mut e = complete_counts(u64::MAX);
+    e.extend([execution(2, "start"), counts(2, 1, 1), execution(2, "done")]);
+    let g = graph(&counts_capture(e, true));
+    assert!(g.summary.complete, "overflow is not a stream truncation");
+    assert!(!g.summary.counts_exact);
+    let c = &g.callables("", 0, 10).unwrap().callables[0];
+    assert_eq!(c.invocations, u64::MAX);
+    assert!(c.counts.as_ref().unwrap().overflow);
+    assert!(g.summary.counts.as_ref().unwrap().overflow);
+    assert_eq!(g.summary.counts.as_ref().unwrap().created, u64::MAX);
+
+    let mut e = complete_counts(5);
+    e[3]["overflow"] = json!(true);
+    let g = graph(&counts_capture(e, true));
+    assert!(g.summary.complete);
+    assert!(!g.summary.counts_exact);
+    assert!(
+        g.callables("", 0, 10).unwrap().callables[0]
+            .counts
+            .as_ref()
+            .unwrap()
+            .overflow
+    );
+}
+
+#[test]
+fn counts_global_overflow_across_distinct_sites_does_not_mark_each_site_overflowed() {
+    let mut e = site();
+    let mut second = e[1].clone();
+    second["site"] = json!(2);
+    e.push(second);
+    e.extend([
+        execution(1, "start"),
+        counts(1, 1, u64::MAX),
+        counts(1, 2, 1),
+        execution(1, "done"),
+    ]);
+    let g = graph(&counts_capture(e, true));
+    assert!(!g.summary.counts_exact);
+    assert!(g.summary.counts.as_ref().unwrap().overflow);
+    assert!(
+        g.callables("", 0, 10).unwrap().callables.iter().all(|c| !c
+            .counts
+            .as_ref()
+            .unwrap()
+            .overflow)
+    );
+}
+
+#[test]
+fn counts_truncation_missing_rows_and_malformed_rows_never_claim_exactness() {
+    let text = counts_capture(complete_counts(2), false);
+    let g = graph(&text);
+    assert!(!g.summary.complete && !g.summary.counts_exact);
+    let g = graph(&(text + "{\"event\":\"counts\""));
+    assert!(!g.summary.complete && !g.summary.counts_exact);
+    assert_eq!(g.summary.invocations, 2);
+
+    let mut e = site();
+    e.extend([execution(1, "start"), execution(1, "done")]);
+    let g = graph(&counts_capture(e, true));
+    assert!(!g.summary.complete && !g.summary.counts_exact);
+    assert!(
+        g.summary
+            .diagnostics
+            .iter()
+            .any(|d| d.contains("missing counts rows"))
+    );
+
+    for field in [
+        "body_starts",
+        "force_requests",
+        "created",
+        "cache_compute",
+        "cache_hit",
+        "cache_wait",
+        "overflow",
+        "execution",
+    ] {
+        let mut e = complete_counts(9);
+        e[3].as_object_mut().unwrap().remove(field);
+        let g = graph(&counts_capture(e, true));
+        assert!(!g.summary.complete && !g.summary.counts_exact, "{field}");
+        assert_eq!(
+            g.summary.invocations, 0,
+            "malformed row partially applied: {field}"
+        );
+    }
+    let mut e = complete_counts(4);
+    e[3]["created"] = json!(-1);
+    assert!(!graph(&counts_capture(e, true)).summary.counts_exact);
+}
+
+#[test]
+fn counts_lifecycle_duplicate_rows_and_detail_events_are_diagnosed_not_synthesized() {
+    let valid = complete_counts(3);
+    for (index, event) in [
+        (4, counts(1, 1, 99)),      // duplicate row
+        (5, counts(1, 1, 99)),      // row after terminal
+        (2, counts(1, 1, 99)),      // row before start
+        (3, execution(1, "start")), // duplicate start
+        (5, execution(1, "done")),  // duplicate terminal
+        (3, execution(7, "done")),  // no start
+        (3, alloc(1)),
+        (3, inv(1)),
+        (3, argument(1, 1)),
+        (3, force(1)),
+        (
+            3,
+            json!({"event":"created","invocation":1,"thunk":{"id":1,"identity":"allocated"}}),
+        ),
+        (3, json!({"event":"cache","invocation":1,"result":1})),
+    ] {
+        let mut e = valid.clone();
+        e.insert(index, event);
+        let g = graph(&counts_capture(e, true));
+        assert!(
+            !g.summary.complete && !g.summary.counts_exact,
+            "{:?}",
+            g.summary.diagnostics
+        );
+        assert_eq!(g.summary.invocations, 3);
+        assert_eq!((g.summary.nodes, g.summary.relations), (0, 0));
+    }
+    let mut e = complete_counts(3);
+    e.pop();
+    let g = graph(&counts_capture(e, true));
+    assert!(!g.summary.counts_exact);
+    assert!(
+        g.summary
+            .diagnostics
+            .iter()
+            .any(|d| d.contains("no terminal status"))
+    );
+    for (field, value) in [
+        ("workers", json!(2)),
+        ("module", json!(2)),
+        ("execution", json!(0)),
+        ("status", json!("unknown")),
+    ] {
+        let mut e = valid.clone();
+        e[4][field] = value;
+        assert!(!graph(&counts_capture(e, true)).summary.counts_exact);
+    }
+}
+
+#[test]
+fn counts_empty_selection_is_valid_and_modes_cannot_be_mixed() {
+    let e = vec![
+        json!({"event":"module","module":1}),
+        execution(1, "start"),
+        execution(1, "resource_pending"),
+    ];
+    let g = graph(&counts_capture(e, true));
+    assert!(g.summary.complete && g.summary.counts_exact);
+    assert_eq!(g.callables("", 0, 10).unwrap().total, 0);
+    assert!(
+        Graph::read(
+            counts_capture(vec![], true)
+                .replace("\"capture_mode\":\"counts\",", "")
+                .as_bytes(),
+            1,
+            "bad".into(),
+            Limits::default()
+        )
+        .is_err()
+    );
+    let s = capture(vec![], true).replace(
+        "\"semantics\":\"lazy-dataflow\"",
+        "\"semantics\":\"lazy-dataflow\",\"capture_mode\":\"counts\"",
+    );
+    assert!(Graph::read(s.as_bytes(), 1, "bad".into(), Limits::default()).is_err());
+    let g = graph(&capture(vec![counts(1, 1, 1)], true));
+    assert!(!g.summary.complete);
+    let g = graph(&capture(site(), true));
+    assert_eq!(g.summary.capture_mode, "detail");
+    assert!(g.summary.counts.is_none());
+    assert!(g.summary.counts_exact);
+}
+
+#[test]
+fn checked_in_counts_fixture_preserves_totals_and_selected_source_metadata() {
+    let g = graph(include_str!("../../test-data/eval-graph/counts.jsonl"));
+    assert!(
+        g.summary.complete && g.summary.counts_exact,
+        "{:?}",
+        g.summary.diagnostics
+    );
+    assert_eq!(g.summary.invocations, 10);
+    assert_eq!(g.summary.counts.as_ref().unwrap().created, 6);
+    assert_eq!(g.callables("", 0, 10).unwrap().total, 2);
+    assert_eq!(
+        g.callables("twice", 0, 10).unwrap().callables[0].invocations,
+        10
+    );
+    assert_eq!((g.summary.nodes, g.summary.relations), (0, 0));
+}
+
+#[test]
+fn actual_vix_four_worker_counts_capture_preserves_native_totals_and_zero_sites() {
+    let g = graph(include_str!("../../test-data/eval-graph/vix-counts.jsonl"));
+    assert!(
+        g.summary.complete && g.summary.counts_exact,
+        "{:?}",
+        g.summary.diagnostics
+    );
+    assert_eq!(g.summary.records, 25);
+    let totals = g.summary.counts.as_ref().unwrap();
+    assert_eq!(
+        (totals.body_starts, totals.force_requests, totals.created),
+        (7, 6, 6)
+    );
+    assert_eq!(
+        (totals.cache_compute, totals.cache_hit, totals.cache_wait),
+        (2, 0, 1)
+    );
+    let rows = g.callables("", 0, 200).unwrap();
+    assert_eq!(rows.total, 10);
+    assert_eq!(rows.callables[0].site.name, "vix::item");
+    assert_eq!(rows.callables[0].invocations, 3);
+    assert_eq!(
+        rows.callables.iter().filter(|c| c.invocations == 0).count(),
+        5
+    );
+    assert_eq!((g.summary.nodes, g.summary.relations), (0, 0));
+    assert_eq!(g.summary.executions[0].workers, 4);
+    assert_eq!(g.summary.executions[1].status, "done");
+}

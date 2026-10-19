@@ -1,0 +1,13 @@
+{"event":"header","format":"vix-eval-graph","version":1,"semantics":"source-counts","capture_mode":"counts","scope":"Selected source counts, no invocation detail","include":"twice,unused","records":1,"seq":1,"ts_ns":0}
+{"event":"module","module":1,"seq":2,"ts_ns":1}
+{"event":"site","module":1,"site":1,"kind":"function","name":"twice","file":"counts.vix","start":0,"end":20,"line":1,"column":1,"params":["x"],"seq":3,"ts_ns":2}
+{"event":"site","module":1,"site":2,"kind":"function","name":"unused","file":"counts.vix","start":0,"end":20,"line":1,"column":1,"params":["x"],"seq":4,"ts_ns":3}
+{"event":"execution","execution":1,"module":1,"workers":4,"status":"start","seq":5,"ts_ns":4}
+{"event":"counts","execution":1,"module":1,"site":1,"body_starts":3,"force_requests":6,"created":3,"cache_compute":2,"cache_hit":5,"cache_wait":1,"overflow":false,"seq":6,"ts_ns":5}
+{"event":"counts","execution":1,"module":1,"site":2,"body_starts":0,"force_requests":0,"created":0,"cache_compute":0,"cache_hit":0,"cache_wait":0,"overflow":false,"seq":7,"ts_ns":6}
+{"event":"execution","execution":1,"module":1,"workers":4,"status":"done","seq":8,"ts_ns":7}
+{"event":"execution","execution":2,"module":1,"workers":4,"status":"start","seq":9,"ts_ns":8}
+{"event":"counts","execution":2,"module":1,"site":1,"body_starts":7,"force_requests":14,"created":3,"cache_compute":2,"cache_hit":5,"cache_wait":1,"overflow":false,"seq":10,"ts_ns":9}
+{"event":"counts","execution":2,"module":1,"site":2,"body_starts":0,"force_requests":0,"created":0,"cache_compute":0,"cache_hit":0,"cache_wait":0,"overflow":false,"seq":11,"ts_ns":10}
+{"event":"execution","execution":2,"module":1,"workers":4,"status":"out_of_fuel","seq":12,"ts_ns":11}
+{"event":"footer","complete":true,"records":13,"seq":13,"ts_ns":12}

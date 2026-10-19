@@ -1,4 +1,4 @@
-//! Immutable, capture-scoped lazy dataflow graph queries. Not a temporal call tree.
+//! Immutable, capture-scoped lazy dataflow and source-count queries. Not a temporal call tree.
 use facet::Facet;
 
 #[derive(Clone, Debug, Default, Facet)]
@@ -58,6 +58,21 @@ pub struct GraphExecution {
     pub ts_ns: u64,
     pub workers: u64,
     pub status: String,
+    /// Counts-mode lifecycle identity and module; absent in legacy detail captures.
+    pub execution: Option<u64>,
+    pub module: Option<u64>,
+}
+
+/// Source-site totals. Saturated values with overflow=true are lower bounds, not exact.
+#[derive(Clone, Debug, Default, Facet)]
+pub struct GraphCounts {
+    pub body_starts: u64,
+    pub force_requests: u64,
+    pub created: u64,
+    pub cache_compute: u64,
+    pub cache_hit: u64,
+    pub cache_wait: u64,
+    pub overflow: bool,
 }
 
 #[derive(Clone, Debug, Default, Facet)]
@@ -66,6 +81,12 @@ pub struct GraphSummary {
     pub capture_id: u64,
     pub path: String,
     pub semantics: String,
+    /// detail (including legacy headers) or counts.
+    pub capture_mode: String,
+    /// Present only for counts mode; no invocation identities are implied.
+    pub counts: Option<GraphCounts>,
+    /// Complete validated stream/row coverage without producer or aggregate overflow.
+    pub counts_exact: bool,
     pub scope: String,
     /// Exact optional producer include selector; completeness covers only this selected stream.
     pub selection: Option<String>,
@@ -76,6 +97,7 @@ pub struct GraphSummary {
     pub records: u64,
     pub nodes: u64,
     pub relations: u64,
+    /// Recorded body starts; an alias for counts.body_starts in counts mode.
     pub invocations: u64,
     pub force_requests: u64,
     /// Cache result=0 outcomes, not a thunk evaluation/claim count.
@@ -100,8 +122,11 @@ pub struct GraphNodePage {
 #[derive(Clone, Debug, Default, Facet)]
 pub struct GraphCallable {
     pub site: GraphSite,
-    /// Exact recorded entries, not estimated evaluations or sampled time.
+    /// Recorded body starts, not estimated evaluations or sampled time.
+    /// In counts mode consult counts.overflow and summary.counts_exact before claiming exactness.
     pub invocations: u64,
+    /// Present only for counts mode; sums all executions of this exact module/site.
+    pub counts: Option<GraphCounts>,
 }
 
 #[derive(Clone, Debug, Default, Facet)]

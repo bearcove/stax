@@ -157,6 +157,37 @@ mod tests {
             .unwrap();
         assert_eq!(n.nodes.len(), 3);
         assert_eq!(n.total_relations, 4);
+        // Counts mode travels through the same production router and generated schema.
+        let counts_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../test-data/eval-graph/counts.jsonl");
+        let counts = client
+            .import_path(counts_path.to_string_lossy().into_owned())
+            .await
+            .unwrap();
+        assert_eq!(counts.capture_mode, "counts");
+        assert!(counts.complete && counts.counts_exact);
+        assert_eq!(counts.counts.as_ref().unwrap().body_starts, 10);
+        assert_eq!(counts.executions[0].execution, Some(1));
+        assert_eq!((counts.nodes, counts.relations), (0, 0));
+        let callables = client
+            .callables(counts.capture_id, "twice".into(), 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            callables.callables[0].counts.as_ref().unwrap().body_starts,
+            10
+        );
+        let error = client
+            .search(GraphSearchQuery {
+                capture_id: counts.capture_id,
+                kind: "all".into(),
+                limit: 10,
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("no invocation/argument detail"));
+        client.close(counts.capture_id).await.unwrap();
         assert!(server.inner.lock().active.is_none());
         assert!(server.inner.lock().history.is_empty());
         client.close(summary.capture_id).await.unwrap();

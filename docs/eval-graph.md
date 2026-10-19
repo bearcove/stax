@@ -1,4 +1,4 @@
-# Lazy evaluation graph imports (initial slice)
+# Evaluation capture imports: lazy dataflow and source counts
 
 `stax graph` and the **eval dataflow** UI tab inspect self-contained
 `vix-eval-graph` **version 1** JSONL files. This surface is independent of
@@ -20,9 +20,9 @@ target/debug/stax graph capture.jsonl --view neighborhood --node thunk:1 \
 ```
 
 Output is escaped, structured JSON. `summary` is the default view. Pages have
-an exact total and offset, and a limit of 1–200. `callables` ranks exact **recorded
+an exact row total and offset, and a limit of 1–200. `callables` ranks **recorded
 body starts** per module/source site, separately from individual invocation
-records. `invocations` selects the entries for one exact module/site pair.
+records. Counts-mode totals are exact only when `counts_exact` is true; see below. `invocations` selects the entries for one exact module/site pair.
 Search matches typed node IDs, names, source file metadata and observed previews.
 `neighborhood` pages aggregated incoming/outgoing/both relations, preserving
 unique shared nodes, argument indices, observed signed runtime states,
@@ -97,6 +97,88 @@ archive directories in this slice; no archive sidecar promises are made.
   or arrive out of numeric order; optional `born_ns` is preserved as an exact
   decimal attribute (full u128), distinct from emission observation `ts_ns`.
 
+## Counts-only v1 captures
+
+The same CLI, immutable capture registry, `EvalGraph` service and existing UI tab
+also accept **source counts**, without constructing a graph. The header is:
+
+```json
+{"event":"header","format":"vix-eval-graph","version":1,"semantics":"source-counts","capture_mode":"counts","records":1,"seq":1,"ts_ns":0}
+```
+
+Legacy `semantics:"lazy-dataflow"` headers remain unchanged and default to
+`capture_mode:"detail"`. Explicit `capture_mode:"detail"` is also accepted.
+Other semantics/mode combinations are rejected. Counts captures retain the same
+module, site, selector/budget, sequence/timestamp and footer metadata. **Only
+selected site descriptors** are declared; they define the row coverage contract.
+The event shape is:
+
+```json
+{"event":"counts","execution":1,"module":1,"site":42,"body_starts":10,"force_requests":20,"created":3,"cache_compute":2,"cache_hit":5,"cache_wait":1,"overflow":false,"seq":5,"ts_ns":4}
+```
+
+Every counter is a nonnegative u64 JSON integer and `overflow` is a required
+boolean. `execution`, `module` and `site` are positive u64 IDs. For each execution
+there must be exactly one row per selected declared site of its module,
+**including all-zero sites**, after its start and before its terminal record:
+
+```json
+{"event":"execution","execution":1,"module":1,"workers":4,"status":"start","seq":4,"ts_ns":3}
+{"event":"execution","execution":1,"module":1,"workers":4,"status":"done","seq":6,"ts_ns":5}
+```
+
+Terminal statuses are `done`, `poison`, `out_of_fuel`, and `resource_pending`.
+Module and workers must match the start; nested/interleaved executions use
+unique IDs. An empty selection is valid. Missing/duplicate rows, missing or
+mismatched lifecycle records, or detail events (`allocation`, `invocation`,
+`argument`, `force`, `created`, `cache`) make the import explicitly partial.
+A counts row is validated in full before it contributes any totals.
+
+Rows are summed across **all executions by exact module/site**, not by name or
+input value. `callables` ranks those body-start totals and retains all six
+metrics. There are **no invocation/argument details, nodes, edges, previews,
+bindings or per-call timings**. Search/inspect/invocations/neighborhood queries
+return an explicit unsupported-mode error instead of an empty graph or synthetic
+identities. The UI shows the same source-site ranking with metric columns and
+recorded source metadata; it does not offer invocation/node navigation in this
+mode. `test-data/eval-graph/counts.jsonl` is a two-execution selected capture with
+one zero-valued site and a terminal `out_of_fuel` outcome.
+`test-data/eval-graph/vix-counts.jsonl` is an actual native four-worker, slice-1
+producer capture of repeated cached `item` calls: 7 body starts overall, 6 force
+requests, 6 created, 2 cache-compute outcomes, and 1 cache wait. The `vix::item`
+site starts 3 bodies; all five unused runtime-thunk sites retain explicit zero
+rows. Import does not open the source files named by either fixture.
+
+### Exactness and wire query fields
+
+`GraphSummary.capture_mode` distinguishes `detail` and `counts`. In counts mode,
+`GraphSummary.counts` and `GraphCallable.counts` contain `GraphCounts` with the
+same seven counter/overflow field names as the JSONL event. They are `None`/`null`
+for legacy detail imports. Existing `invocations` fields are body-start aliases,
+**not invocation identities or independently guaranteed exact counts**. Existing
+summary force/cache fields mirror the aggregate count fields.
+`GraphExecution.execution` and `.module` retain lifecycle IDs in counts mode;
+they are absent for legacy detail records. The generated bindings are regenerated
+from `stax-live-proto/src/eval_graph.rs` through the existing codegen task.
+
+All aggregation is checked and saturates at u64::MAX on overflow. Producer
+`overflow:true` propagates even when the row values themselves can be represented.
+An overflowing callable's counters are **lower bounds, not exact totals**;
+global overflow can also arise when summing individually non-overflowing sites.
+`GraphSummary.counts_exact` is true only with a complete validated stream,
+complete lifecycle/selected-site row coverage, and no producer or aggregate
+overflow. A syntactically complete overflowing stream may have `complete:true`
+but **always** has `counts_exact:false` and `counts.overflow:true`. Read these
+fields together; never call a saturated or partial total exact complete.
+For detail imports `counts_exact` follows validated stream completeness.
+
+The producer footer describes its flushed **stream**, not evaluation success.
+Importer `complete` additionally requires valid metadata, event shapes and row
+coverage. Execution outcomes remain separate: `poison`, `out_of_fuel` or
+`resource_pending` do not themselves imply a partial stream or missing counters.
+Missing/truncated/budget-stopped streams remain partial and not exact complete;
+`include`, `max_bytes`, `partial_reason` and diagnostics stay visible.
+
 ## Validation and explicit resource bounds
 
 The importer validates the format/version/semantics header, typed nonzero IDs,
@@ -123,6 +205,20 @@ there are no subscriptions or whole-program layout promises.
 
 ## Deterministic checks
 
+Focused counts/importer and existing-UI checks (no full gate required):
+
+```sh
+CARGO_BUILD_JOBS=1 cargo test -p stax-eval-graph
+CARGO_BUILD_JOBS=1 cargo test -p stax-server eval_graph::tests
+CARGO_BUILD_JOBS=1 cargo run -p xtask -- codegen
+(cd frontend && pnpm typecheck && pnpm test:eval-graph)
+```
+
+The UI tests render the existing components in-memory with stubbed query data;
+they verify counts/legacy modes and honesty about overflow/partial totals, not
+interactive browser/RPC behavior. The Rust RPC test covers the production local
+router and current schema. The broader preexisting checks remain:
+
 ```sh
 CARGO_BUILD_JOBS=2 cargo test -p stax-eval-graph
 CARGO_BUILD_JOBS=2 cargo test -p stax-server
@@ -130,6 +226,10 @@ CARGO_BUILD_JOBS=2 cargo build -p stax -p stax-server
 cargo run -p xtask -- codegen
 (cd frontend && pnpm typecheck && pnpm build)
 ```
+
+Counts-mode tests also cover nested execution aggregation, zero rows, unsupported
+detail queries, duplicate/missing/lifecycle-invalid rows, malformed/truncated
+streams, producer and aggregate overflow, and generated-schema RPC round trips.
 
 Tests cover shared neighbors, many forces versus one cache-compute outcome,
 equal previews with distinct IDs, forward/missing references, wrong versions,
