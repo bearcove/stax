@@ -87,3 +87,13 @@ Licensed under either of
   * MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
 
 at your option.
+
+## Evaluation dataflow captures
+
+stax can import self-contained Vix lazy evaluation graphs independently of CPU
+sampling and target spans. Use `stax graph capture.jsonl` for local JSON queries,
+or the **eval dataflow** UI tab for source-site body-start rankings, argument/thunk
+identity inspection, and bounded shared-node neighborhoods. This is not a
+per-call timing or temporal call-tree view. See [the initial graph importer and
+explorer guide](docs/eval-graph.md) for completion diagnostics, explicit limits,
+and file reopening semantics.

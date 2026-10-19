@@ -11,6 +11,9 @@ use std::collections::BTreeMap;
 
 use facet::Facet;
 
+mod eval_graph;
+pub use eval_graph::*;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Facet)]
 #[repr(u8)]
 pub enum TargetLaneKind {
@@ -2347,6 +2350,7 @@ pub trait RunControl {
 pub fn all_services() -> Vec<&'static vox::ServiceDescriptor> {
     vec![
         profiler_service_descriptor(),
+        eval_graph_service_descriptor(),
         run_control_service_descriptor(),
         target_ingest_service_descriptor(),
     ]

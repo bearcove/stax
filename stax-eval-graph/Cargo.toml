@@ -1,0 +1,10 @@
+[package]
+name = "stax-eval-graph"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Bounded, immutable file imports and queries for lazy evaluation dataflow captures"
+
+[dependencies]
+stax-live-proto = { path = "../stax-live-proto" }
+serde_json = { version = "1", features = ["arbitrary_precision"] }

@@ -362,7 +362,8 @@ stax stop
 
 ## Subcommands reference
 
-All subcommands except `setup` connect to `stax-server` via its local socket.
+All subcommands except `setup`, `compare`, and `graph` connect to `stax-server`
+via its local socket.
 They fail loudly if the daemon isn't running.
 
 ### `stax record [-- COMMAND…]`
@@ -863,3 +864,15 @@ TypeScript bindings are generated into `frontend/src/generated/` by
 
 - **Hardened-runtime targets** (macOS) are out of scope. The attachment
   helper is same-uid and intended for normal local developer processes.
+
+### `stax graph <capture.jsonl>`
+
+Inspect a self-contained `vix-eval-graph` version 1 JSONL file locally, without a
+daemon or a profiler run. Default output is a JSON summary with explicit
+complete/partial diagnostics. Use `--view callables`, `invocations`, `search`,
+`inspect`, or `neighborhood` for bounded queries. The UI **eval dataflow** tab imports
+server-local paths into a separate immutable, explicitly closed capture registry.
+These are lazy dataflow identities/recorded body starts, not per-call timings or
+a complete temporal call tree. Keep the source JSONL to reopen after restarting;
+graphs are not embedded into sampler archives. See [evaluation graph imports](docs/eval-graph.md)
+for commands, validation, resource limits and semantic caveats.

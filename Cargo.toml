@@ -46,6 +46,7 @@ members = [
   "xtask",
   "stax-live",
   "stax-live-proto",
+  "stax-eval-graph",
   "stax-vox-observe",
   "stax-server",
   "stax-target",

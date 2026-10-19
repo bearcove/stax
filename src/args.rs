@@ -189,6 +189,40 @@ pub enum Command {
     Violations(ViolationsArgs),
     /// Print scheduler/PET/application evidence joined to one violation.
     Incident(IncidentArgs),
+
+    /// Import/query a Vix lazy-dataflow JSONL file locally; no daemon required.
+    Graph(GraphArgs),
+}
+
+#[derive(Facet, Debug)]
+pub struct GraphArgs {
+    /// Self-contained vix-eval-graph v1 JSONL file to reopen.
+    #[facet(args::positional)]
+    pub path: String,
+    /// summary, callables, search, inspect, neighborhood, or invocations.
+    #[facet(args::named, default = "summary")]
+    pub view: String,
+    /// Case-insensitive substring for callable/node queries.
+    #[facet(args::named, default)]
+    pub query: String,
+    /// Capture-local typed node identity, e.g. invocation:1 or thunk:1.
+    #[facet(args::named, default)]
+    pub node: String,
+    /// Node kind for search; empty means all.
+    #[facet(args::named, default)]
+    pub kind: String,
+    /// Relation direction: both, incoming, outgoing.
+    #[facet(args::named, default = "both")]
+    pub direction: String,
+    #[facet(args::named, default)]
+    pub module: u64,
+    #[facet(args::named, default)]
+    pub site: u64,
+    #[facet(args::named, default)]
+    pub offset: u64,
+    /// Maximum results per page, 1..=200.
+    #[facet(args::named, default = 50)]
+    pub limit: u32,
 }
 
 #[derive(Facet, Debug)]

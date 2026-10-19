@@ -63,6 +63,7 @@ fn main_impl() -> Result<(), Box<dyn Error>> {
 
     match cli.command {
         Command::Record(args) => run_record(args)?,
+        Command::Graph(args) => run_graph(args)?,
         #[cfg(target_os = "macos")]
         Command::Setup(args) => cmd_setup_mac::main(args)?,
         #[cfg(target_os = "linux")]
@@ -4891,4 +4892,47 @@ fn print_run_one_line(run: &RunSummary) {
         "  run {}  [{state}]  {}  {} kperf / {} intervals  ({})",
         run.id.0, pid, run.pet_samples, run.off_cpu_intervals, run.label
     );
+}
+
+/// The file is the durable artifact. A local query has one capture namespace.
+fn run_graph(args: stax_core::args::GraphArgs) -> Result<(), Box<dyn Error>> {
+    let graph = stax_eval_graph::Graph::from_path(
+        Path::new(&args.path),
+        1,
+        stax_eval_graph::Limits::default(),
+    )?;
+    // facet-json is also used by the RPC wire types; escaping remains structured.
+    let output = match args.view.as_str() {
+        "summary" => facet_json::to_string_pretty(&graph.summary)?,
+        "callables" => {
+            let page = graph.callables(&args.query, args.offset, args.limit)?;
+            facet_json::to_string_pretty(&page)?
+        }
+        "search" => {
+            let page = graph.search(&args.query, &args.kind, args.offset, args.limit)?;
+            facet_json::to_string_pretty(&page)?
+        }
+        "inspect" => facet_json::to_string_pretty(&graph.inspect(&args.node)?)?,
+        "neighborhood" => {
+            let page = graph.neighborhood(&args.node, &args.direction, args.offset, args.limit)?;
+            facet_json::to_string_pretty(&page)?
+        }
+        "invocations" => {
+            let page = graph.invocations(args.module, args.site, args.offset, args.limit)?;
+            facet_json::to_string_pretty(&page)?
+        }
+        other => {
+            return Err(format!(
+                "unknown graph view {other:?}; use summary/callables/search/inspect/neighborhood/invocations"
+            ).into());
+        }
+    };
+    if !graph.summary.complete {
+        eprintln!(
+            "PARTIAL lazy-dataflow capture: {} diagnostics; use --view summary to inspect them",
+            graph.summary.diagnostic_count
+        );
+    }
+    println!("{output}");
+    Ok(())
 }

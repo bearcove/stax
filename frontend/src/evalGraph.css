@@ -1,0 +1,105 @@
+/* Scoped to the graph panel; existing profiler tables/controls are untouched. */
+.eval-graph {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 18px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  background: var(--bg-pane);
+  flex: 1 1 auto;
+  scrollbar-gutter: stable;
+}
+.eval-graph *, .eval-graph *::before, .eval-graph *::after { box-sizing: border-box; }
+.eval-graph h2, .eval-graph h3, .eval-graph h4, .eval-graph p { margin: 0 0 10px; }
+.eval-graph h2 { font-size: 18px; font-weight: 650; }
+.eval-graph h3 { font-size: 14px; font-weight: 650; }
+.eval-graph h4 { font-size: 12px; font-weight: 650; margin-top: 16px; }
+.eval-graph code, .eval-graph pre, .eg-node-id { font-family: var(--font-mono); }
+.eval-graph button, .eval-graph input, .eval-graph select {
+  font: inherit;
+  color: var(--text-primary);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-input);
+  border-radius: 5px;
+  padding: 5px 9px;
+  min-height: 30px;
+}
+.eval-graph button { cursor: pointer; background: var(--bg-button); }
+.eval-graph button:hover:not(:disabled) { background: var(--bg-button-hover); border-color: var(--accent); }
+.eval-graph button:disabled { cursor: not-allowed; opacity: .45; }
+.eval-graph :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.eval-graph input { min-width: 100px; flex: 1 1 200px; }
+.eg-import input { font-family: var(--font-mono); }
+.eg-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 16px; }
+.eg-heading p, .eg-muted { color: var(--text-tertiary); }
+.eg-badge { display: inline-block; flex-shrink: 0; border: 1px solid var(--border-strong); border-radius: 4px; padding: 2px 6px; font-size: 10px; letter-spacing: .04em; }
+.eval-graph .eg-warning { color: var(--accent); }
+.eg-error { background: color-mix(in srgb, var(--danger) 10%, var(--bg-pane)); border: 1px solid var(--danger); color: var(--text-error); padding: 10px; border-radius: 5px; margin-bottom: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.eg-import { margin-bottom: 18px; }
+.eg-import > label { display: block; font-weight: 650; margin-bottom: 6px; }
+.eg-toolbar, .eg-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.eg-toolbar { margin-bottom: 10px; }
+.eg-toolbar h3 { margin: 0; margin-right: auto; }
+.eg-toolbar label { display: inline-flex; align-items: center; gap: 6px; }
+.eg-actions { flex-wrap: nowrap; }
+.eg-section { border: 1px solid var(--border-soft); border-radius: 7px; padding: 14px; margin-bottom: 16px; min-width: 0; }
+.eg-path { font-family: var(--font-mono); overflow-wrap: anywhere; color: var(--text-secondary); }
+.eg-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); gap: 8px; margin: 14px 0; }
+.eg-stats > div { border: 1px solid var(--border-soft); border-radius: 4px; padding: 9px; background: var(--bg-elevated); }
+.eg-stats dt { color: var(--text-tertiary); font-size: 11px; }
+.eg-stats dd { font-family: var(--font-mono); font-size: 18px; margin: 3px 0 0; font-variant-numeric: tabular-nums; }
+.eg-details { border-top: 1px solid var(--border-soft); padding-top: 10px; margin-top: 10px; }
+.eg-details summary { cursor: pointer; font-weight: 600; margin-bottom: 8px; }
+.eg-details ul { padding-left: 20px; max-height: 220px; overflow: auto; overflow-wrap: anywhere; }
+.eg-table-wrap { width: 100%; overflow: auto; }
+.eval-graph table { width: 100%; border-collapse: collapse; text-align: left; font-size: 11px; }
+.eval-graph th { font-weight: 600; color: var(--text-tertiary); background: var(--bg-elevated); white-space: nowrap; }
+.eval-graph td, .eval-graph th { padding: 8px; border-bottom: 1px solid var(--border-soft); vertical-align: top; }
+.eval-graph td { max-width: 360px; overflow-wrap: anywhere; }
+.eval-graph td small { display: block; color: var(--text-tertiary); margin-top: 3px; }
+.eval-graph tr.eg-selected { background: var(--accent-bg-medium); }
+.eval-graph caption { text-align: left; color: var(--text-secondary); padding-bottom: 8px; }
+.eg-captures { max-height: 230px; }
+.eg-status-table { max-height: 220px; }
+.eval-graph .eg-link { background: none; border: none; border-radius: 2px; color: var(--accent); padding: 0; min-height: 0; text-align: left; overflow-wrap: anywhere; }
+.eval-graph .eg-link:hover:not(:disabled) { background: none; text-decoration: underline; }
+.eg-empty { padding: 14px 4px; color: var(--text-tertiary); }
+.eg-workspace { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; align-items: start; }
+.eg-workspace .eg-section { margin-bottom: 0; }
+.eg-tabs { display: flex; gap: 5px; flex-wrap: wrap; border-bottom: 1px solid var(--border-soft); margin-bottom: 14px; padding-bottom: 8px; }
+.eg-tabs button[aria-selected="true"] { color: var(--accent); background: var(--accent-bg-soft); border-color: var(--accent); }
+.eg-search { margin: 12px 0; }
+.eg-pagination { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 11px; margin: 10px 0; }
+.eg-pagination > span { flex: 1 1 180px; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
+.eg-preview-inline { white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0 0; color: var(--text-tertiary); max-height: 5em; overflow: auto; }
+.eg-preview { padding: 12px; background: var(--bg-input); border: 1px solid var(--border-soft); border-radius: 5px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto; margin: 0 0 8px; }
+.eg-fields { display: grid; grid-template-columns: minmax(110px, auto) minmax(0, 1fr); gap: 6px 14px; margin: 12px 0; }
+.eg-fields dt { color: var(--text-tertiary); }
+.eg-fields dd { margin: 0; overflow-wrap: anywhere; }
+.eg-fields ul { margin: 0; padding-left: 18px; }
+.eg-wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
+.eg-scope { padding: 10px; background: var(--accent-bg-soft); border: 1px solid var(--border-soft); border-radius: 5px; margin: 10px 0; }
+.eg-scope > code { margin: 0 8px; }
+.eg-scope p { margin: 8px 0 0; }
+.eg-neighborhood { border-top: 1px solid var(--border-soft); margin-top: 18px; padding-top: 16px; }
+.eg-svg-wrap { border: 1px solid var(--border-soft); border-radius: 5px; overflow: auto; margin-bottom: 14px; background: var(--bg-base); }
+.eg-svg { display: block; min-width: 700px; width: 100%; max-height: 550px; }
+.eg-svg marker path { fill: var(--text-tertiary); }
+.eg-svg-edge > path { fill: none; stroke: var(--text-muted); stroke-width: 1.4; }
+.eg-svg-edge text { fill: var(--text-secondary); stroke: var(--bg-base); stroke-width: 4px; paint-order: stroke; font-size: 10px; font-family: var(--font-mono); }
+.eg-svg-node { cursor: pointer; }
+.eg-svg-node rect { fill: var(--bg-input); stroke: var(--border-strong); stroke-width: 1.5; }
+.eg-svg-node:hover rect, .eg-svg-node:focus-visible rect { stroke: var(--accent); stroke-width: 2; }
+.eg-svg-node.eg-center rect { fill: var(--bg-elevated); stroke: var(--accent); stroke-width: 2; }
+.eg-svg-node.eg-missing rect { stroke: var(--danger); stroke-dasharray: 5 3; }
+.eg-svg-node text { fill: var(--text-tertiary); font-size: 10px; font-family: var(--font-mono); pointer-events: none; }
+.eg-svg-node text.eg-svg-id { fill: var(--text-primary); font-size: 11px; }
+.eg-svg-node text.eg-svg-missing-label { fill: var(--danger); font-size: 9px; }
+.eg-relations { min-width: 650px; }
+/* Only use two columns when the graph pane itself has room, not the viewport. */
+.eval-graph { container-type: inline-size; }
+@container (min-width: 1150px) {
+  .eg-workspace { grid-template-columns: minmax(320px, .8fr) minmax(0, 1.2fr); }
+}

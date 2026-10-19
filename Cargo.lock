@@ -2365,6 +2365,7 @@ dependencies = [
  "libc",
  "log",
  "stax-core",
+ "stax-eval-graph",
  "stax-live-proto",
  "stax-vox-observe",
  "tokio",
@@ -2401,6 +2402,14 @@ version = "0.1.0"
 dependencies = [
  "symbolic-common",
  "symbolic-demangle",
+]
+
+[[package]]
+name = "stax-eval-graph"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "stax-live-proto",
 ]
 
 [[package]]
@@ -2507,6 +2516,7 @@ dependencies = [
  "log",
  "parking_lot",
  "stax-core",
+ "stax-eval-graph",
  "stax-linux-capture",
  "stax-live",
  "stax-live-proto",

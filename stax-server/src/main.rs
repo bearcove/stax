@@ -11,6 +11,7 @@
 //! `recorder::spawn_attach` / `recorder::spawn_launch`. The old
 //! `stax-shade` companion process has been deleted.
 
+mod eval_graph;
 mod recorder;
 mod target_ingest;
 
@@ -134,6 +135,10 @@ fn build_factory(server: ServerState) -> impl vox::LaneAcceptor + 'static {
                     lane.handle_with(RunControlDispatcher::new(server.clone()));
                     Ok(())
                 }
+                "EvalGraph" => {
+                    lane.handle_with(stax_live_proto::EvalGraphDispatcher::new(server.graphs.clone()));
+                    Ok(())
+                }
                 "Profiler" => {
                     lane.handle_with(ProfilerDispatcher::new(server.profiler()));
                     Ok(())
@@ -247,6 +252,7 @@ pub(crate) struct ServerState {
     /// Synthetic-lane bookkeeping for `TargetIngest` (pseudo-tids +
     /// span-name symbols). See `target_ingest`.
     target_lanes: Arc<Mutex<TargetLaneRegistry>>,
+    graphs: eval_graph::GraphService,
 }
 
 struct Inner {
@@ -292,6 +298,7 @@ impl ServerState {
             started_at_unix_ns: now_unix_ns(),
             next_run_id: Arc::new(AtomicU64::new(1)),
             target_lanes: Arc::new(Mutex::new(TargetLaneRegistry::default())),
+            graphs: eval_graph::GraphService::default(),
         }
     }
 

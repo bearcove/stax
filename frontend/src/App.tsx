@@ -44,6 +44,7 @@ import {
   connectRunControl,
   type RunSummary,
 } from "./generated/runcontrol.generated.ts";
+import { EvalGraphPanel } from "./EvalGraph.tsx";
 import { Flamegraph } from "./Flamegraph.tsx";
 import { IntervalsPanel, TargetSpansPanel } from "./Intervals.tsx";
 import { Neighbors } from "./Neighbors.tsx";
@@ -809,9 +810,19 @@ export function App() {
                 >
                   target spans
                 </button>
+                <button
+                  className={`tab${paneTab === "eval-graph" ? " active" : ""}`}
+                  onClick={() => setPaneTab("eval-graph")}
+                  role="tab"
+                  aria-selected={paneTab === "eval-graph"}
+                >
+                  eval dataflow
+                </button>
               </div>
               <div className="tab-body">
-                {paneTab === "asm" && selected !== null ? (
+                {paneTab === "eval-graph" ? (
+                  <EvalGraphPanel url={committedUrl} />
+                ) : paneTab === "asm" && selected !== null ? (
                   <Annotation
                     key={String(selected)}
                     client={client}
@@ -1000,7 +1011,7 @@ function escapeRegex(s: string): string {
 
 export type LangKind = "rust" | "c" | "cpp" | "swift" | "asm" | "unknown";
 export type ObjKind = "main" | "target" | "system" | "dylib" | "unknown";
-type PaneTab = "asm" | "neighbors" | "intervals" | "target-spans";
+type PaneTab = "asm" | "neighbors" | "intervals" | "target-spans" | "eval-graph";
 
 /// What visual widths/ordering represent: active time, sampled CPU
 /// time, target time, off-CPU waiting time, or wall (active + off).

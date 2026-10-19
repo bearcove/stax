@@ -7,6 +7,7 @@ license = "MIT OR Apache-2.0"
 description = "Unprivileged long-running daemon: hosts the run registry, the live aggregator, the web UI, and the agent-facing RunControl service."
 
 [dependencies]
+stax-eval-graph = { path = "../stax-eval-graph" }
 stax-live-proto = { path = "../stax-live-proto" }
 stax-live = { path = "../stax-live" }
 stax-vox-observe = { version = "0.1", path = "../stax-vox-observe" }
