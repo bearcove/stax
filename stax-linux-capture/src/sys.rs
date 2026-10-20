@@ -110,6 +110,20 @@ pub fn online_cpus() -> Vec<u32> {
     (0..n).collect()
 }
 
+/// All perf events must share stax-target's CLOCK_MONOTONIC timestamp
+/// domain. The kernel default is not guaranteed to use that clock. This
+/// also applies to the non-sampling PMU siblings: perf event groups must
+/// agree on their clock. Direct capture and staxd's fd broker both use
+/// the constructors below.
+fn monotonic_attr() -> pe::bindings::perf_event_attr {
+    // SAFETY: perf_event_attr is POD; zero then declare the ABI size.
+    let mut attr: pe::bindings::perf_event_attr = unsafe { mem::zeroed() };
+    attr.size = mem::size_of::<pe::bindings::perf_event_attr>() as u32;
+    attr.set_use_clockid(1);
+    attr.clockid = libc::CLOCK_MONOTONIC;
+    attr
+}
+
 /// Build the sampling `perf_event_attr`: a frequency-driven software
 /// CPU-clock event with TID/TIME/CPU/CALLCHAIN sample fields, plus
 /// `mmap2`/`comm`/`task` records so we learn about images and threads.
@@ -124,11 +138,8 @@ fn sampling_attr(
     kernel_stacks: bool,
     dwarf_unwind: bool,
 ) -> pe::bindings::perf_event_attr {
-    // SAFETY: perf_event_attr is a plain-old-data struct; zeroing it is
-    // the documented way to start (size field then declares the ABI).
-    let mut attr: pe::bindings::perf_event_attr = unsafe { mem::zeroed() };
+    let mut attr = monotonic_attr();
     attr.type_ = pe::bindings::PERF_TYPE_SOFTWARE;
-    attr.size = mem::size_of::<pe::bindings::perf_event_attr>() as u32;
     attr.config = pe::bindings::PERF_COUNT_SW_CPU_CLOCK as u64;
     // Frequency mode: kernel auto-tunes the period to hit ~freq_hz.
     attr.__bindgen_anon_1.sample_freq = freq_hz.max(1) as u64;
@@ -183,11 +194,8 @@ fn sampling_attr(
 /// root-only `tracing/`). No `mmap`/`comm`/`task`: the sampling ring
 /// already owns image + thread bookkeeping.
 fn switch_attr() -> pe::bindings::perf_event_attr {
-    // SAFETY: POD struct; zeroing then setting `size` is the documented
-    // way to initialise a perf_event_attr.
-    let mut attr: pe::bindings::perf_event_attr = unsafe { mem::zeroed() };
+    let mut attr = monotonic_attr();
     attr.type_ = pe::bindings::PERF_TYPE_SOFTWARE;
-    attr.size = mem::size_of::<pe::bindings::perf_event_attr>() as u32;
     // Not DUMMY: sampling every context switch (period 1) with its
     // callchain gives the stack a thread *blocked* in, written just
     // before its SWITCH_OUT record in this same ring. Without it the
@@ -459,10 +467,8 @@ fn parse_waking_format(s: &str) -> Option<WakingFieldOffsets> {
 /// (`sample_period = 1`); the sample carries the waker's TID + stack
 /// (CALLCHAIN) and the wakee tid embedded in PERF_SAMPLE_RAW.
 fn waking_attr(tracepoint_id: u64, kernel_stacks: bool) -> pe::bindings::perf_event_attr {
-    // SAFETY: POD; zero then init `size` per ABI.
-    let mut attr: pe::bindings::perf_event_attr = unsafe { mem::zeroed() };
+    let mut attr = monotonic_attr();
     attr.type_ = pe::bindings::PERF_TYPE_TRACEPOINT;
-    attr.size = mem::size_of::<pe::bindings::perf_event_attr>() as u32;
     attr.config = tracepoint_id;
     // Count-mode (no freq): one sample per wakeup. Wakeups are
     // bursty but bounded by scheduler activity.
@@ -685,10 +691,8 @@ pub fn open_cpu_pmu_siblings(
 
     let mut out: PmuSiblings = Vec::with_capacity(4);
     for (kind, ty, config) in plan {
-        // SAFETY: perf_event_attr is POD; zero then init `size` per ABI.
-        let mut attr: pe::bindings::perf_event_attr = unsafe { mem::zeroed() };
+        let mut attr = monotonic_attr();
         attr.type_ = ty;
-        attr.size = mem::size_of::<pe::bindings::perf_event_attr>() as u32;
         attr.config = config;
         // Same group-read format as the leader so the SAMPLE_READ
         // block matches; same kernel/HV exclusion as the leader's
@@ -731,6 +735,30 @@ pub fn open_cpu_pmu_siblings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CPU samples, switch trailers, and waking tracepoints must use the
+    /// same CLOCK_MONOTONIC domain as stax-target timestamps. The exported
+    /// fd openers used by staxd share these constructors with direct capture.
+    #[test]
+    fn all_timestamped_attrs_use_target_monotonic_clock() {
+        for kernel_stacks in [false, true] {
+            for dwarf_unwind in [false, true] {
+                assert_target_clock(sampling_attr(999, kernel_stacks, dwarf_unwind));
+            }
+            assert_target_clock(waking_attr(123, kernel_stacks));
+        }
+        assert_target_clock(switch_attr());
+    }
+
+    fn assert_target_clock(attr: pe::bindings::perf_event_attr) {
+        assert_ne!(attr.sample_type & pe::bindings::PERF_SAMPLE_TIME as u64, 0);
+        assert_eq!(
+            attr.use_clockid(),
+            1,
+            "perf's default clock differs from stax-target"
+        );
+        assert_eq!(attr.clockid, libc::CLOCK_MONOTONIC);
+    }
 
     /// `dwarf_unwind = false` must produce byte-for-byte the same
     /// `perf_event_attr` as before this feature landed — anything
